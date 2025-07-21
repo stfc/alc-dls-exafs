@@ -3,8 +3,7 @@ from larch.xafs.feffrunner import feff8l
 from larch.xafs import xftf
 from larch.io import read_ascii
 from larch import Group
-
-import os
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 
@@ -18,6 +17,7 @@ def plot_fourier_transform(exafs):
     ax.set_title('Fourier Transform of EXAFS')
 
     fig.savefig('EXAFS_reference.pdf', format='pdf')
+    fig.savefig('EXAFS_reference.svg', format='svg',transparent=True)
 
     plt.show()
 
@@ -33,9 +33,9 @@ def run_postprocessing(feff_directory):
     xftf(g, kweight=2, window='hanning', dk=1, kmin=2, kmax=14)
 
     return(g)
-    
+
 def run_feff_no_pymatgen(cifpath, absorber, feff_directory):
-    
+
     #
     # ...Generate and write and input file for FEFF
     #    the directory ./feff must already exist
@@ -53,8 +53,8 @@ def run_feff_no_pymatgen(cifpath, absorber, feff_directory):
 
 if __name__ == "__main__":
 
-    feff_directory = os.path.join(os.getcwd(), 'feff')
-    cif_location   = os.path.join(os.getcwd(), 'Hematite.cif')
+    feff_directory = Path('feff')
+    cif_location   = Path('Hematite.cif')
     absorbing_atom = 'Fe'
 
     # ...Run FEFF
