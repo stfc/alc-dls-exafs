@@ -58,7 +58,7 @@ if __name__ == "__main__":
     absorbing_atom = 'Fe'
 
     # ...Run FEFF
-    #run_feff_no_pymatgen(cif_location, absorbing_atom, feff_directory)
+    run_feff_no_pymatgen(cif_location, absorbing_atom, feff_directory)
 
     # ...Postprocessing of FEFF output
     exafs = run_postprocessing(feff_directory)
