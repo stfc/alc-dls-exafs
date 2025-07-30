@@ -1,0 +1,64 @@
+variable TEMP equal 300
+variable NUMPREEQMDSTEPS equal 1000
+variable NUMPREEQMDSTEPS2 equal 1000
+variable NUMMDSTEPS equal 1000
+
+units metal
+boundary p p p
+atom_style atomic
+atom_modify map yes
+
+read_data Ag_cluster.lmp
+
+mass 1 107.87
+mass 2 196.97
+
+pair_style symmetrix/mace
+pair_coeff * * mace-mpa-0-medium-47-79.json Ag Au
+
+timestep 0.002
+thermo 1
+thermo_style custom step temp press lx ly lz vol etotal pe
+thermo_modify norm yes
+
+write_data initial_structure.lmp
+
+velocity all create ${TEMP} 12345 mom yes rot no
+fix 1 all nvt temp ${TEMP} ${TEMP} 0.5
+dump preeq1 all custom 1 dump_preeq1.xyz id type xs ys zs fx fy fz
+run ${NUMPREEQMDSTEPS}
+unfix 1
+undump preeq1
+
+fix 1 all nve
+dump preeq2 all custom 1 dump_preeq2.xyz id type xs ys zs fx fy fz
+run ${NUMPREEQMDSTEPS2}
+undump preeq2
+
+set group all image 0 0 0
+dump prod all custom 1 dump_production.xyz id type xs ys zs fx fy fz
+
+compute rdf_all all rdf 100 1 1 1 2 2 1 2 2
+
+fix store_rdf all ave/time 1 ${NUMMDSTEPS} ${NUMMDSTEPS} c_rdf_all[*] file rdfs.dat mode vector # for some reason 20000 results in empty rdf file. as if it reached the 20000th step but then just terminated before chance to write
+
+group Ag type 1
+group Au type 2
+
+compute msd_all all    msd com yes average yes
+compute msd_Ag  Ag     msd com yes average yes
+compute msd_Au  Au     msd com yes average yes
+
+variable msd_all_z equal c_msd_all[4]
+variable msd_Ag_z  equal c_msd_Ag[4]
+variable msd_Au_z  equal c_msd_Au[4]
+
+fix msd_out all ave/time 1 ${NUMMDSTEPS} ${NUMMDSTEPS} v_msd_all_z v_msd_Ag_z v_msd_Au_z file msd_final.dat 
+
+run ${NUMMDSTEPS}
+run 0
+
+unfix store_rdf
+undump prod
+
+
