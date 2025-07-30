@@ -1,25 +1,21 @@
-Brief summary of codes/scripts (see script headers for full details):
+Brief summary of codes/scripts etc (see scripts in question for full details):
 
 setup_cluster.py:
-Generate or convert nanostructures for LAMMPS input.
-- Builds FCC nanoclusters with custom surfaces/layers or converts from XYZ.
-- Supports type assignment (core–shell or hemisphere split) and optional element mapping.
-- Outputs LAMMPS data and XYZ formats.
+    Setup nanoparticle cluster for subsequent LAMMPS simulation.
 
 lammpsIn_constP:
-LAMMPS driver script for constant-pressure MD:
-- Generates configurations, radial distribution functions (RDF), coordination numbers (CN), and mean squared displacements (MSD).
+    LAMMPS driver script for MD simulation (constant P) including:
+        - RDF and CN calculation
+        - MSD calculation for total and per-species displacements
+    Example job submission script included.
+    Potential file included (zipped)
 
 post_process_lammps.py:
-Post-process LAMMPS outputs:
-- Parse simulation details (e.g., temperature, timestep, species).
-- Plot RDF (rdfs_plot.png) and CN (coordination_plot.png).
-- Read MSDs (total and per species) from msd_final.dat and warn if exceeding threshold.
+    Plot RDFs and CNs, report MSDs (total and per species), 
+    and issue a warning if MSD threshold exceeded (diffusion detected).
+    Example RDF plot ('rdfs_plot.png') included.
 
 dump_to_cif.py:
-Convert LAMMPS dump file to CIF:
-- Reads species info from LAMMPS input file.
-- Regroups atoms by species for cleaner CIF output.
-
-run_feff.py:
-Convert CIF into input for FEFF to simulate experimental spectra.
+    Convert the first config of 'dump_production.xyz' into a CIF file (only single config included in this dump)
+    (species names parsed and reassigned for clean output).
+    FEFF output (EXAFS_reference.pdf/.svg)
