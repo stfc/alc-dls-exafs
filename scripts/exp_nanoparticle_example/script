@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=2
+#SBATCH --cpus-per-task=8
+
+#SBATCH -t 24:00:00
+#SBATCH -J myname
+
+source ~/.bashrc
+
+m="lammps-mace"
+micromamba activate $m
+module purge
+module load foss/2025a CMake/3.31.3-GCCcore-14.2.0
+
+export LD_LIBRARY_PATH=/home/vol02/scarf562/playground/micromamba/micromamba/envs/$m/lib/:$LD_LIBRARY_PATH
+
+### export lammps libs path
+export LD_LIBRARY_PATH=/home/vol01/scarf781/progs/mace_stuff/lammps-symmetrix-cpu/lib64/:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/home/vol01/scarf781/progs/mace_stuff/lammps-symmetrix-cpu/lib/:$LD_LIBRARY_PATH
+
+export OMP_NUM_THREADS=1
+lmp="/home/vol01/scarf781/progs/mace_stuff/lammps-symmetrix-cpu/bin/lmp"
+srun $lmp -in lammpsIn_constP -log output
+
+
