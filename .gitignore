@@ -1,0 +1,163 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# # FEFF Output Files
+# # General FEFF directories and files
+# feff/
+# feff_*/
+# **/feff/
+# **/feff_*/
+# feff*.dat
+# chi.dat
+# *.pad
+# atoms.json
+
+# # Specific FEFF output patterns
+# feff[0-9][0-9][0-9][0-9].dat
+# feff0*.dat
+# *.xmu
+# *.chi
+
+# # LAMMPS Files
+# dump_*.xyz
+# *.log
+# log.*
+# *.lmp
+
+# # Plot and Image Files
+# *.png
+# *.pdf
+# *.svg
+# *.eps
+# *.jpg
+# *.jpeg
+# *.gif
+
+# # Data Files
+# *.dat
+# *.out
+# *.txt
+# *.csv
+# *.json
+# *.xml
+# *.cif.bak
+
+# Model Files
+*.model
+*.pth
+*.pkl
+*.pickle
+
+# Output Directories
+outputs/
+output/
+results/
+test_output/
+test_outputs/
+feff_output/
+*_output/
+*_results/
+
+# Example-specific outputs
+examples/*/outputs/
+examples/*/feff/
+examples/*/dump_*.xyz
+examples/*/slurm-*.out
+examples/*/*.png
+examples/*/*.pdf
+examples/*/*.svg
+
+# Scripts output
+scripts/*/outputs/
+scripts/*/feff/
+scripts/*/*.png
+scripts/*/*.pdf  
+scripts/*/*.svg
+scripts/*/chi.dat
+scripts/*/*.dat
+
+# Larch-specific files
+*.larch
+larch.log
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Log files
+*.log
+log
+
+# SLURM output files
+slurm-*.out
+*.sbatch
+
+# Configuration files that might contain sensitive data
+config.ini
+settings.json
+
+# Keep directory structure but ignore contents
+outputs/*
+!outputs/.gitkeep
+test_outputs/*
+!test_outputs/.gitkeep

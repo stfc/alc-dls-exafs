@@ -1,1 +1,4 @@
 xraylarch
+typer[all]
+rich
+matplotlib
