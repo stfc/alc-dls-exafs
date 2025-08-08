@@ -31,6 +31,7 @@ dependencies = [
     "matplotlib>=3.5",
     "ase>=3.22.1",
     "larixite>=0.1.0",
+    "marimo>=0.14.16",
 ]
 
 [project.urls]
