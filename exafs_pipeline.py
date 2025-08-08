@@ -8,6 +8,9 @@ app = marimo.App(width="medium")
 def _():
     from ase.io import read as ase_read
     from ase.io import write as ase_write
+    from ase.data import atomic_numbers
+    from math import floor
+
     import marimo as mo
     import os
     from pathlib import Path
@@ -19,7 +22,7 @@ def _():
 
     # \u26a0\ufe0f Make sure this package is installed or in PYTHONPATH
     try:
-        from larch_cli_wrapper.wrapper import LarchWrapper, FeffConfig, PRESETS
+        from larch_cli_wrapper.wrapper import LarchWrapper, FeffConfig, PRESETS, EdgeType
     except ImportError:
         mo.stop(
             mo.md("""
@@ -32,7 +35,19 @@ def _():
             """)
         )
 
-    return FeffConfig, LarchWrapper, PRESETS, Path, mo, os, tempfile
+
+
+    return (
+        EdgeType,
+        FeffConfig,
+        LarchWrapper,
+        PRESETS,
+        Path,
+        go,
+        mo,
+        os,
+        tempfile,
+    )
 
 
 @app.cell(hide_code=True)
@@ -48,8 +63,8 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
-def _(PRESETS, mo):
+@app.cell
+def _(EdgeType, PRESETS, mo):
     # Create the main form
     form = (
         mo.md('''
@@ -57,9 +72,11 @@ def _(PRESETS, mo):
 
         Structure/Trajectory File: {structure_file}
 
-        Absorbing Atom: {absorber}
+        {absorber}
 
-        Processing Mode: {processing_mode}
+        {edge}
+
+        {processing_mode}
 
         {sample_interval}
 
@@ -78,6 +95,11 @@ def _(PRESETS, mo):
         .batch(
             structure_file=mo.ui.file(label="Structure/Trajectory File", multiple=False),
             absorber=mo.ui.text(label="Absorbing Species", placeholder="e.g. Fe, Cu, O"),
+            edge=mo.ui.dropdown(
+                options=[e.name for e in EdgeType],
+                value="K",
+                label="Edge (for single structures)"
+            ),
             processing_mode=mo.ui.radio(
                 options={"Single structure": "single", "Trajectory (all frames)": "trajectory"},
                 value="Single structure",
@@ -118,32 +140,109 @@ def _(PRESETS, mo):
 
 
 @app.cell(hide_code=True)
-def _(form, mo):
-    settings = form.value or {}
-    if not settings:
-        settings_message = "*Configure and submit the form above to start processing.*"
+def _(mo):
+    plot_type = mo.ui.radio(["χ(k)", "|χ(R)|"], value="χ(k)")
+    plot_type
 
+    return (plot_type,)
+
+
+@app.cell(hide_code=True)
+def _(absorber, edge, go, mo, plot_type, result):
+    mo.stop(result is None)
+
+    # Define common style
+    layout_common = dict(
+        font=dict(family="Times New Roman", size=18),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        showlegend=True,
+        margin=dict(l=80, r=30, t=50, b=70),
+        xaxis=dict(
+            showline=True,
+            linewidth=2,
+            linecolor='black',
+            mirror=True,
+            gridcolor='lightgray',
+            ticks='outside',
+            tickwidth=2,
+            tickcolor='black',
+            title_font=dict(size=20)
+        ),
+        yaxis=dict(
+            showline=True,
+            linewidth=2,
+            linecolor='black',
+            mirror=True,
+            gridcolor='lightgray',
+            ticks='outside',
+            tickwidth=2,
+            tickcolor='black',
+            title_font=dict(size=20)
+        ),
+        legend=dict(
+            x=0.02, y=0.95,
+            bgcolor="rgba(0,0,0,0)",
+            bordercolor="rgba(0,0,0,0)",
+            font=dict(size=16)
+        )
+    )
+
+    # Build figure based on plot type
+    if plot_type.value == "χ(k)":
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=result.k,
+            y=result.chi,
+            mode="lines",
+            name="χ(k)",
+            line=dict(width=2.5, color="black")
+        ))
+        fig.update_layout(
+            title="EXAFS χ(k)",
+            xaxis_title="k [Å⁻¹]",
+            yaxis_title="χ(k)",
+            **layout_common
+        )
     else:
-        is_trajectory = settings["processing_mode"] == "trajectory"
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=result.r,
+            y=result.chir_mag,
+            mode="lines",
+            name="|χ(R)|",
+            line=dict(width=2.5, color="black")
+        ))
+        fig.update_layout(
+            title="Fourier Transform |χ(R)|",
+            xaxis_title="R [Å]",
+            yaxis_title="|χ(R)|",
+            **layout_common
+        )
 
-        settings_message = f"""**\u2699\ufe0f Current Settings:**
+    fig.add_annotation(
+        text=f"{absorber} {edge} edge",
+        xref="paper",
+        yref="paper",
+        x=0.9,
+        y=0.98,
+        showarrow=False,
+        font=dict(family="Times New Roman", size=16, color="black"),
+        align="center",
+        bgcolor="white",
+        bordercolor="black",
+        borderwidth=1,
+        borderpad=4
+    )
 
-        | Setting | Value |
-        |--------|-------|
-        | 📁 Structure | {settings['structure_file'][0].name if settings.get('structure_file') else 'None'} |
-        | 🎯 Absorber | {settings.get('absorber', 'Not set')} |
-        | ⚡ Mode | {settings.get('processing_mode', 'Not set')} |
-        | 🔧 Preset | {settings.get('preset', 'Not set').title()} |
-        | 🚀 Parallel | {'Yes' if is_trajectory and settings['parallel_settings']['parallel'] else 'No' if is_trajectory else 'N/A'} |
-        | 📝 Input only | {'Yes' if settings['run_options']['input_only'] else 'No'} |
-            """
-    mo.md(settings_message)
 
-    return is_trajectory, settings
+    fig
+
+    return
 
 
 @app.cell
-def _(FeffConfig, LarchWrapper, Path, mo, os, settings, tempfile):
+def _(EdgeType, FeffConfig, LarchWrapper, Path, mo, os, settings, tempfile):
     mo.stop(not settings or not settings.get("structure_file") or not settings.get("absorber"))
 
     structure_file = settings["structure_file"][0]
@@ -161,6 +260,8 @@ def _(FeffConfig, LarchWrapper, Path, mo, os, settings, tempfile):
     try:
         wrapper = LarchWrapper(verbose=False)
         config = FeffConfig.from_preset(settings["preset"])
+        # Update with chosen edge
+        config.edge = EdgeType[settings["edge"]]
 
         output_dir = Path(settings["output_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -202,7 +303,7 @@ def _(FeffConfig, LarchWrapper, Path, mo, os, settings, tempfile):
         if 'temp_path' in locals() and temp_path.exists():
             os.unlink(temp_path)
 
-    return input_info, nframes, wrapper
+    return absorber, input_info, nframes, wrapper
 
 
 @app.cell
@@ -210,7 +311,7 @@ def _(input_info, is_trajectory, mo, nframes, settings, wrapper):
     mo.stop(input_info is None or wrapper is None)
 
     input_only = settings["run_options"]["input_only"]
-    # is_trajectory = settings["processing_mode"] == "trajectory"
+    edge = settings["edge"]
     settings['run_options']['show_plot'] = False  # We plot it in marimo instead
     result = None
 
@@ -288,7 +389,7 @@ def _(input_info, is_trajectory, mo, nframes, settings, wrapper):
             """)
     message2
 
-    return (result,)
+    return edge, result
 
 
 @app.cell
@@ -309,90 +410,28 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    plot_type = mo.ui.radio(["χ(k)", "|χ(R)|"], value="χ(k)")
-    plot_type
+def _(form, mo):
+    settings = form.value or {}
+    if not settings:
+        settings_message = "*Configure and submit the form above to start processing.*"
 
-    return (plot_type,)
-
-
-@app.cell(hide_code=True)
-def _(mo, plot_type, result):
-    mo.stop(result is None)
-    import plotly.graph_objects as go
-
-    # Define common style
-    layout_common = dict(
-        font=dict(family="Times New Roman", size=18),
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        showlegend=True,
-        margin=dict(l=80, r=30, t=50, b=70),
-        xaxis=dict(
-            showline=True,
-            linewidth=2,
-            linecolor='black',
-            mirror=True,
-            gridcolor='lightgray',
-            ticks='outside',
-            tickwidth=2,
-            tickcolor='black',
-            title_font=dict(size=20)
-        ),
-        yaxis=dict(
-            showline=True,
-            linewidth=2,
-            linecolor='black',
-            mirror=True,
-            gridcolor='lightgray',
-            ticks='outside',
-            tickwidth=2,
-            tickcolor='black',
-            title_font=dict(size=20)
-        ),
-        legend=dict(
-            x=0.02, y=0.95,
-            bgcolor="rgba(0,0,0,0)",
-            bordercolor="rgba(0,0,0,0)",
-            font=dict(size=16)
-        )
-    )
-
-    # Build figure based on plot type
-    if plot_type.value == "χ(k)":
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=result.k,
-            y=result.chi,
-            mode="lines",
-            name="χ(k)",
-            line=dict(width=2.5, color="black")
-        ))
-        fig.update_layout(
-            title="EXAFS χ(k)",
-            xaxis_title="k [Å⁻¹]",
-            yaxis_title="χ(k)",
-            **layout_common
-        )
     else:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=result.r,
-            y=result.chir_mag,
-            mode="lines",
-            name="|χ(R)|",
-            line=dict(width=2.5, color="black")
-        ))
-        fig.update_layout(
-            title="Fourier Transform |χ(R)|",
-            xaxis_title="R [Å]",
-            yaxis_title="|χ(R)|",
-            **layout_common
-        )
+        is_trajectory = settings["processing_mode"] == "trajectory"
 
-    fig
+        settings_message = f"""**\u2699\ufe0f Current Settings:**
 
-    return
+        | Setting | Value |
+        |--------|-------|
+        | 📁 Structure | {settings['structure_file'][0].name if settings.get('structure_file') else 'None'} |
+        | 🎯 Absorber | {settings.get('absorber', 'Not set')} |
+        | ⚡ Mode | {settings.get('processing_mode', 'Not set')} |
+        | 🔧 Preset | {settings.get('preset', 'Not set').title()} |
+        | 🚀 Parallel | {'Yes' if is_trajectory and settings['parallel_settings']['parallel'] else 'No' if is_trajectory else 'N/A'} |
+        | 📝 Input only | {'Yes' if settings['run_options']['input_only'] else 'No'} |
+            """
+    mo.md(settings_message)
+
+    return is_trajectory, settings
 
 
 @app.cell(hide_code=True)
