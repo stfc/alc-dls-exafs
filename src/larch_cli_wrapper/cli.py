@@ -1,32 +1,36 @@
 #!/usr/bin/env python3
-"""CLI interface for Larch Wrapper - EXAFS processing pipeline"""
+"""Streamlined CLI interface for Larch Wrapper - EXAFS processing pipeline"""
 
 from pathlib import Path
-import sys
 import typer
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TaskProgressColumn,
-    TextColumn,
-    TimeRemainingColumn,
-)
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 
-from .wrapper import LarchWrapper, FeffConfig, PRESETS, ProcessingMode
+from .wrapper import LarchWrapper, FeffConfig, PRESETS
 
 app = typer.Typer(
     name="larch-cli",
-    help="A CLI wrapper for larch EXAFS processing with configuration file support",
+    help="Streamlined CLI for EXAFS processing with larch",
     invoke_without_command=True,
     no_args_is_help=True,
-    add_completion=True,
 )
 console = Console()
 
+def _setup_config(config_file: Path = None, preset: str = None) -> FeffConfig:
+    """Setup configuration from file, preset, or defaults."""
+    if config_file:
+        config = FeffConfig.from_yaml(config_file)
+        console.print(f"[dim]Loaded configuration from {config_file}[/dim]")
+    elif preset:
+        config = FeffConfig.from_preset(preset)
+        console.print(f"[dim]Using '{preset}' preset[/dim]")
+    else:
+        config = FeffConfig()
+        console.print(f"[dim]Using default configuration[/dim]")
+    return config
+
 def create_progress() -> Progress:
-    """Create a consistent progress bar for all commands."""
+    """Create progress bar for processing tasks."""
     return Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -36,247 +40,226 @@ def create_progress() -> Progress:
         console=console,
     )
 
-def create_simple_progress() -> Progress:
-    """Create a simple progress bar for indeterminate tasks."""
-    return Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    )
-
 @app.command("info")
 def show_info():
-    """Show diagnostic information."""
+    """Show system and dependency information."""
     wrapper = LarchWrapper(verbose=True)
     wrapper.print_diagnostics()
 
-@app.command("process")
-def process(
-    structure: Path = typer.Argument(
-        ...,
-        help="Path to structure file (XYZ, CIF, PDB, etc.) or trajectory",
-    ),
-    absorber: str = typer.Argument(
-        ..., help="Absorbing atom symbol or site index (e.g., Fe, Cu, 0)"
-    ),
-    output_dir: Path = typer.Option(
-        Path("outputs"), "--output-dir", "-o", help="Output directory"
-    ),
-    trajectory: bool = typer.Option(
-        False, "--trajectory", "-t", help="Process as trajectory (multiple frames, supports parallel processing)"
-    ),
-    sample_interval: int = typer.Option(
-        1, "--interval", "-i", help="Process every Nth frame (for trajectories)"
-    ),
-    input_only: bool = typer.Option(
-        False, "--input-only", help="Generate FEFF inputs only, don't run calculations"
-    ),
-    config_file: Path = typer.Option(
-        None,
-        "--config",
-        "-c",
-        help="Configuration file (YAML format, overrides other parameters)",
-    ),
-    preset: str = typer.Option(
-        None,
-        "--preset",
-        help=f"Configuration preset ({', '.join(PRESETS.keys())})",
-    ),
-    show_plot: bool = typer.Option(
-        False, "--show/--no-show", help="Display plot interactively"
-    ),
-    parallel: bool = typer.Option(
-        True, "--parallel/--no-parallel", help="Enable parallel processing for trajectories"
-    ),
-    n_workers: int = typer.Option(
-        None, "--workers", "-w", help="Number of parallel workers (default: auto)"
-    ),
+@app.command("generate")
+def generate_inputs(
+    structure: Path = typer.Argument(..., help="Path to structure file"),
+    absorber: str = typer.Argument(..., help="Absorbing atom symbol or site index"),
+    output_dir: Path = typer.Option(Path("outputs"), "--output", "-o", help="Output directory"),
+    config_file: Path = typer.Option(None, "--config", "-c", help="YAML configuration file"),
+    preset: str = typer.Option(None, "--preset", "-p", help=f"Configuration preset: {list(PRESETS.keys())}"),
 ):
-    """Process a structure or trajectory for EXAFS analysis."""
+    """Generate FEFF input files only."""
     if not structure.exists():
         console.print(f"[red]Error: Structure file {structure} not found[/red]")
         raise typer.Exit(1)
-
+    
     try:
         # Setup configuration
-        if config_file:
-            config = FeffConfig.from_yaml(config_file)
-            console.print(f"[cyan]Loaded configuration from {config_file}[/cyan]")
-        elif preset:
-            config = FeffConfig.from_preset(preset)
-            console.print(f"[cyan]Using preset '{preset}' configuration[/cyan]")
-        else:
-            config = FeffConfig()
-            console.print("[cyan]Using default configuration[/cyan]")
+        config = _setup_config(config_file, preset)
         
-        # Apply CLI-specific overrides
+        with LarchWrapper(verbose=True) as wrapper:
+            console.print(f"[cyan]Generating FEFF input for {absorber}...[/cyan]")
+            input_path = wrapper.generate_feff_input(structure, absorber, output_dir, config)
+            console.print(f"[green]✓ FEFF input generated: {input_path}[/green]")
+    
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+@app.command("run-feff") 
+def run_feff_calculation(
+    feff_dir: Path = typer.Argument(..., help="Directory containing feff.inp"),
+):
+    """Run FEFF calculation in specified directory."""
+    if not feff_dir.exists():
+        console.print(f"[red]Error: Directory {feff_dir} not found[/red]")
+        raise typer.Exit(1)
+    
+    if not (feff_dir / "feff.inp").exists():
+        console.print(f"[red]Error: No feff.inp found in {feff_dir}[/red]")
+        raise typer.Exit(1)
+    
+    try:
+        with LarchWrapper(verbose=True) as wrapper:
+            console.print(f"[cyan]Running FEFF calculation in {feff_dir}...[/cyan]")
+            success = wrapper.run_feff(feff_dir)
+            if success:
+                console.print(f"[green]✓ FEFF calculation completed successfully[/green]")
+                console.print(f"  Output files in: {feff_dir}")
+            else:
+                console.print(f"[red]✗ FEFF calculation failed[/red]")
+                raise typer.Exit(1)
+    
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+@app.command("process")
+def process(
+    structure: Path = typer.Argument(..., help="Path to structure file or trajectory"),
+    absorber: str = typer.Argument(..., help="Absorbing atom symbol or site index"),
+    output_dir: Path = typer.Option(Path("outputs"), "--output", "-o", help="Output directory"),
+    trajectory: bool = typer.Option(False, "--trajectory", "-t", help="Process as trajectory"),
+    sample_interval: int = typer.Option(1, "--interval", "-i", help="Process every Nth frame"),
+    config_file: Path = typer.Option(None, "--config", "-c", help="YAML configuration file"),
+    preset: str = typer.Option(None, "--preset", "-p", help=f"Configuration preset: {list(PRESETS.keys())}"),
+    show_plot: bool = typer.Option(False, "--show", help="Display plots interactively"),
+    parallel: bool = typer.Option(True, "--parallel/--sequential", help="Enable parallel processing"),
+    n_workers: int = typer.Option(None, "--workers", "-w", help="Number of parallel workers"),
+    plot_individual_frames: bool = typer.Option(False, "--plot-frames", help="Plot individual trajectory frames (trajectories only)"),
+):
+    """Process structure or trajectory for EXAFS analysis."""
+    if not structure.exists():
+        console.print(f"[red]Error: Structure file {structure} not found[/red]")
+        raise typer.Exit(1)
+    
+    try:
+        # Setup configuration
+        config = _setup_config(config_file, preset)
+        
+        # Configure for trajectory processing
         if trajectory:
             config.sample_interval = sample_interval
             config.parallel = parallel
-            if n_workers is not None:
-                config.n_workers = n_workers
+            config.n_workers = n_workers
         
-        # Show parallel processing status
-        if trajectory and config.parallel:
-            workers = config.n_workers or "auto"
-            console.print(f"[dim]Parallel processing: enabled ({workers} workers)[/dim]")
-        elif trajectory:
-            console.print(f"[dim]Parallel processing: disabled[/dim]")
-        
-        wrapper = LarchWrapper(verbose=True)
-        
-        # Generate FEFF inputs (always the first step)
-        console.print(f"[yellow]Generating FEFF input(s) for {absorber}...[/yellow]")
-        
-        input_info = wrapper.generate_inputs(
-            structure=structure,
-            absorber=absorber,
-            output_dir=output_dir,
-            config=config,
-            trajectory=trajectory
-        )
-        
-        # Report input generation results
-        nframes = input_info['nframes']
-        if trajectory:
-            console.print(f"[green]✓[/green] Generated inputs for {nframes} frames")
-            console.print(f"  Output directory: {output_dir}")
-            console.print(f"  Frame directories: {output_dir}/frame_XXXX/")
-        else:
-            console.print(f"[green]✓[/green] Generated FEFF input successfully")
-            console.print(f"  Output directory: {output_dir}")
-            console.print(f"  Input file: {output_dir / 'feff.inp'}")
-        
-        if input_only:
-            # Stop here if only inputs were requested
-            console.print(f"\n[bold green]✓ Input generation completed successfully![/bold green]")
-            console.print("[dim]Use --no-input-only to continue with full processing[/dim]")
-            return
-        
-        # Continue with full processing
-        console.print(f"\n[cyan]Processing {structure} for {absorber} (absorber)[/cyan]")
-        
-        with create_progress() as progress:
-            task = progress.add_task(
-                "Processing...", 
-                total=100
-            )
+        with LarchWrapper(verbose=True) as wrapper:
+            console.print(f"[cyan]Processing {structure} for {absorber}...[/cyan]")
             
-            def progress_callback(completed, total, description):
-                """Callback to update progress bar."""
-                progress.update(
-                    task, 
-                    completed=int(completed/total * 100),
-                    description=description
+            with create_progress() as progress:
+                task = progress.add_task("Processing...", total=100)
+                
+                def progress_callback(completed, total, description):
+                    progress.update(task, completed=completed, description=description)
+                    # And initialize with correct total:
+                    task = progress.add_task("Processing...", total=total)
+
+                result = wrapper.process(
+                    structure=structure,
+                    absorber=absorber,
+                    output_dir=output_dir,
+                    config=config,
+                    trajectory=trajectory,
+                    show_plot=show_plot,
+                    plot_individual_frames=plot_individual_frames,
+                    progress_callback=progress_callback
                 )
+                
+                progress.update(task, completed=100, description="[green]✓ Complete![/green]")
             
-            result = wrapper.process(
-                structure=structure,
-                absorber=absorber,
-                output_dir=output_dir,
-                config=config,
-                trajectory=trajectory,
-                show_plot=show_plot,
-                progress_callback=progress_callback
-            )
-            
-            progress.update(task, completed=100, description="[green]✓ Complete![/green]")
-        
-        console.print("\n[bold green]✓ Processing completed successfully![/bold green]")
-        console.print(f"  Output directory: {output_dir}")
-        console.print(f"  PDF plot: {result.plot_paths[0]}")
-        console.print(f"  SVG plot: {result.plot_paths[1]}")
-        
-        if result.is_averaged:
-            console.print(f"  Processed frames: {result.nframes}")
-            console.print(f"  Processing mode: [cyan]Averaged trajectory[/cyan]")
-        else:
-            console.print(f"  Processing mode: [yellow]Single structure[/yellow]")
+            # Show results
+            console.print(f"\n[bold green]✓ Processing completed![/bold green]")
+            console.print(f"  Output: {output_dir}")
+            console.print(f"  Plots: {result.plot_paths[0].name}, {result.plot_paths[1].name}")
+            if trajectory:
+                console.print(f"  Frames processed: {result.nframes}")
     
     except Exception as e:
-        console.print(f"\n[red]Error processing structure: {e}[/red]")
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+@app.command("process-output")
+def process_feff_output(
+    feff_dir: Path = typer.Argument(..., help="Directory containing FEFF output (chi.dat or trajectory frames)"),
+    output_dir: Path = typer.Option(None, "--output", "-o", help="Output directory (default: same as feff_dir)"),
+    config_file: Path = typer.Option(None, "--config", "-c", help="YAML configuration file"),
+    preset: str = typer.Option(None, "--preset", "-p", help=f"Configuration preset: {list(PRESETS.keys())}"),
+    show_plot: bool = typer.Option(False, "--show", help="Display plots interactively"),
+    plot_individual_frames: bool = typer.Option(False, "--plot-frames", help="Plot individual trajectory frames (trajectories only)"),
+):
+    """Process FEFF output files and generate plots. Handles both single frames and trajectories."""
+    if not feff_dir.exists():
+        console.print(f"[red]Error: Directory {feff_dir} not found[/red]")
+        raise typer.Exit(1)
+    
+    output_dir = output_dir or feff_dir
+    
+    try:
+        config = _setup_config(config_file, preset)
+        
+        with LarchWrapper(verbose=True) as wrapper:
+            # Check if this is a trajectory output (contains frame_XXXX directories)
+            frame_dirs = [d for d in feff_dir.iterdir() 
+                         if d.is_dir() and d.name.startswith('frame_')]
+            
+            if frame_dirs:
+                # Trajectory output processing
+                console.print(f"[cyan]Processing trajectory FEFF output in {feff_dir}...[/cyan]")
+                console.print(f"  Found {len(frame_dirs)} trajectory frames")
+                
+                result = wrapper.process_trajectory_output(
+                    feff_dir, config, 
+                    plot_individual_frames=plot_individual_frames,
+                    show_plot=show_plot,
+                    output_dir=output_dir
+                )
+                
+                console.print(f"[green]✓ Trajectory FEFF output processed successfully[/green]")
+                console.print(f"  Frames processed: {result.nframes}")
+                console.print(f"  Plots: {result.plot_paths[0].name}, {result.plot_paths[1].name}")
+                console.print(f"  Output: {output_dir}")
+                
+            else:
+                # Single frame output processing
+                if not (feff_dir / "chi.dat").exists():
+                    console.print(f"[red]Error: No chi.dat found in {feff_dir}[/red]")
+                    raise typer.Exit(1)
+                
+                console.print(f"[cyan]Processing single FEFF output in {feff_dir}...[/cyan]")
+                
+                # Process FEFF output
+                exafs_group = wrapper.process_feff_output(feff_dir, config)
+                
+                # Generate plots
+                plot_paths = wrapper.plot_results(exafs_group, output_dir, show_plot=show_plot)
+                
+                console.print(f"[green]✓ FEFF output processed successfully[/green]")
+                console.print(f"  Plots: {plot_paths[0].name}, {plot_paths[1].name}")
+                console.print(f"  Output: {output_dir}")
+    
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
 @app.command("config-example")
 def create_config_example(
-    output_file: Path = typer.Option(
-        Path("example_config.yaml"),
-        "--output",
-        "-o",
-        help="Output configuration file path",
-    ),
-    preset: str = typer.Option(
-        "publication",
-        "--preset",
-        "-p",
-        help=f"Preset to use as base ({', '.join(PRESETS.keys())})",
-    ),
+    output_file: Path = typer.Option(Path("config.yaml"), "--output", "-o", help="Output file path"),
+    preset: str = typer.Option("publication", "--preset", "-p", help=f"Base preset: {list(PRESETS.keys())}"),
 ):
     """Create an example configuration file."""
     if preset not in PRESETS:
-        console.print(
-            f"[red]Error: Unknown preset '{preset}'. Available: {', '.join(PRESETS.keys())}[/red]"
-        )
+        console.print(f"[red]Error: Unknown preset '{preset}'[/red]")
         raise typer.Exit(1)
-
+    
     try:
         config = FeffConfig.from_preset(preset)
-        config.to_yaml(
-            output_file, 
-            f"Example configuration file based on '{preset}' preset"
-        )
-
-        console.print(
-            f"[bold green]\u2713[/bold green] Example configuration file created: {output_file}"
-        )
-        console.print(f"[dim]  Based on preset: {preset}[/dim]")
-        console.print("[dim]  Edit the file to customize FEFF parameters[/dim]")
-
-    except Exception as e:
-        console.print(f"[red]Error creating configuration file: {e}[/red]")
-        raise typer.Exit(1)
-
-@app.command("config-validate")
-def validate_config(
-    config_file: Path = typer.Argument(
-        ..., help="Path to configuration file to validate"
-    )
-):
-    """Validate a configuration file."""
-    if not config_file.exists():
-        console.print(f"[red]Error: Configuration file {config_file} not found[/red]")
-        raise typer.Exit(1)
-
-    try:
-        config = FeffConfig.from_yaml(config_file)
-
-        console.print(
-            f"[bold green]\u2713[/bold green] Configuration file is valid: {config_file}"
-        )
-        console.print("\n[bold]Loaded parameters:[/bold]")
-
-        # Display parameters in organized way
-        console.print(f"  [cyan]Spectrum Type:[/cyan] {config.spectrum_type.value}")
-        console.print(f"  [cyan]Edge:[/cyan] {config.edge.value}")
-        console.print(f"  [cyan]Radius:[/cyan] {config.radius} �")
-        console.print(f"  [cyan]kmin:[/cyan] {config.kmin}")
-        console.print(f"  [cyan]kmax:[/cyan] {config.kmax}")
-        console.print(f"  [cyan]kweight:[/cyan] {config.kweight}")
+        # Create a simple YAML representation
+        yaml_content = f"""# EXAFS Configuration (based on '{preset}' preset)
+spectrum_type: {config.spectrum_type}
+edge: {config.edge}
+radius: {config.radius}
+kmin: {config.kmin}
+kmax: {config.kmax}
+kweight: {config.kweight}
+window: {config.window}
+dk: {config.dk}
+method: {config.method}
+user_tag_settings: {dict(config.user_tag_settings) or '{}'}
+"""
         
-        if config.user_tag_settings:
-            console.print("  [cyan]FEFF Parameters:[/cyan]")
-            for key, value in config.user_tag_settings.items():
-                console.print(f"    {key}: {value}")
-
+        output_file.write_text(yaml_content)
+        console.print(f"[green]✓ Configuration example created: {output_file}[/green]")
+        console.print(f"  Based on '{preset}' preset")
+    
     except Exception as e:
-        console.print(f"[red]Error validating configuration file: {e}[/red]")
+        console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
-
-@app.command("version")
-def show_version():
-    """Show version and diagnostic information."""
-    wrapper = LarchWrapper(verbose=True)
-    wrapper.print_diagnostics()
 
 if __name__ == "__main__":
     app()

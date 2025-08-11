@@ -6,27 +6,19 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
-    from ase.io import read as ase_read
-    from ase.io import write as ase_write
-    from ase.data import atomic_numbers
-    from math import floor
-
     import marimo as mo
     import os
     from pathlib import Path
     import plotly.graph_objects as go
     import tempfile
 
-
-
-
-    # \u26a0\ufe0f Make sure this package is installed or in PYTHONPATH
+    # ⚠️ Make sure this package is installed or in PYTHONPATH
     try:
-        from larch_cli_wrapper.wrapper import LarchWrapper, FeffConfig, PRESETS, EdgeType
+        from larch_cli_wrapper.wrapper import LarchWrapper, FeffConfig, PRESETS, EdgeType, ProcessingMode
     except ImportError:
         mo.stop(
             mo.md("""
-            **\u274c Import Error**: `larch_cli_wrapper` not found.
+            **❌ Import Error**: `larch_cli_wrapper` not found.
 
             Make sure:
             - The package is installed (`pip install larch-cli-wrapper` or similar)
@@ -35,14 +27,13 @@ def _():
             """)
         )
 
-
-
     return (
         EdgeType,
         FeffConfig,
         LarchWrapper,
         PRESETS,
         Path,
+        ProcessingMode,
         go,
         mo,
         os,
@@ -56,8 +47,8 @@ def _(mo):
         """
     # EXAFS Pipeline Processing
 
-    This app provides an interactive interface for EXAFS processing using the larch wrapper.
-    You can process single structures or trajectories with customizable parameters.
+    This app provides an interactive interface for EXAFS processing using the streamlined larch wrapper.
+    You can process single structures or trajectories with customizable parameters and enhanced plotting options.
     """
     )
     return
@@ -112,7 +103,7 @@ def _(EdgeType, PRESETS, mo):
             ),
             preset=mo.ui.dropdown(
                 options={name.title(): name for name in PRESETS.keys()},
-                value="Quick",  # Match actual key
+                value="Quick",
                 label="Configuration Preset"
             ),
             parallel_settings=mo.ui.dictionary({
@@ -125,7 +116,7 @@ def _(EdgeType, PRESETS, mo):
                 placeholder="Directory for output files"
             ),
             run_options=mo.ui.dictionary({
-                "input_only": mo.ui.checkbox(label="Generate FEFF inputs only (don't run calculations)"),
+                "process_output_only": mo.ui.checkbox(label="Process existing FEFF outputs (skip FEFF run)", value=False),
             })
         )
         .form(
@@ -135,6 +126,7 @@ def _(EdgeType, PRESETS, mo):
         )
     )
 
+
     form
     return (form,)
 
@@ -142,14 +134,40 @@ def _(EdgeType, PRESETS, mo):
 @app.cell(hide_code=True)
 def _(mo):
     plot_type = mo.ui.radio(["χ(k)", "|χ(R)|"], value="χ(k)")
-    plot_type
+    show_individual_frame_legend = mo.ui.checkbox(
+        label="Show legend for individual frames",
+        value=False,
+    )
 
-    return (plot_type,)
+    # wrap the plot type and legend settings in a form
+    plot_options_form = mo.md(
+        """
+        ## 📊 Plot Options
+
+        **Plot Type**: {plot_type}
+
+        **Show Individual Frame Legend**: {show_individual_frame_legend}
+        """.format(plot_type=plot_type, show_individual_frame_legend=show_individual_frame_legend))
+    plot_options_form
+    return plot_type, show_individual_frame_legend
 
 
 @app.cell(hide_code=True)
-def _(absorber, edge, go, mo, plot_type, result):
+def _(
+    absorber,
+    go,
+    mo,
+    plot_type,
+    result,
+    settings,
+    show_individual_frame_legend,
+):
+    """Interactive plotting cell with support for individual trajectory frames."""
     mo.stop(result is None)
+
+    exafs_group = result.exafs_group
+    individual_frames = result.individual_frame_groups
+    edge = settings.get("edge", "K")
 
     # Define common style
     layout_common = dict(
@@ -189,14 +207,49 @@ def _(absorber, edge, go, mo, plot_type, result):
     )
 
     # Build figure based on plot type
+    fig = go.Figure()
+
     if plot_type.value == "χ(k)":
-        fig = go.Figure()
+        # Plot individual frames first (if available) so they appear in background
+        if individual_frames:
+            for i, frame in enumerate(individual_frames):
+                fig.add_trace(go.Scatter(
+                    x=frame.k,
+                    y=frame.chi,
+                    mode="lines",
+                    name=f"Frame {i+1}",
+                    line=dict(width=1, color=f"rgba(128,128,128,0.3)"),
+                    showlegend=show_individual_frame_legend.value  # Only show legend for first 3 frames
+                ))
+
+        # Plot main/averaged spectrum
+        line_props = dict(width=2.5, color="black")
+        if hasattr(exafs_group, 'chi_std') and individual_frames:
+            # Add standard deviation envelope if available
+            k = exafs_group.k
+            chi = exafs_group.chi
+            std = exafs_group.chi_std
+
+            # Standard deviation envelope
+            fig.add_trace(go.Scatter(
+                x=list(k) + list(k[::-1]),
+                y=list(chi + std) + list((chi - std)[::-1]),
+                fill='toself',
+                fillcolor='rgba(0,0,0,0.1)',
+                line=dict(color='rgba(255,255,255,0)'),
+                showlegend=False,
+                hoverinfo="skip"
+            ))
+            name = f"χ(k) Average ± σ"
+        else:
+            name = "χ(k)"
+
         fig.add_trace(go.Scatter(
-            x=result.k,
-            y=result.chi,
+            x=exafs_group.k,
+            y=exafs_group.chi,
             mode="lines",
-            name="χ(k)",
-            line=dict(width=2.5, color="black")
+            name=name,
+            line=line_props
         ))
         fig.update_layout(
             title="EXAFS χ(k)",
@@ -205,12 +258,24 @@ def _(absorber, edge, go, mo, plot_type, result):
             **layout_common
         )
     else:
-        fig = go.Figure()
+        # Plot individual frames first (if available)
+        if individual_frames:
+            for i, frame in enumerate(individual_frames):
+                fig.add_trace(go.Scatter(
+                    x=frame.r,
+                    y=frame.chir_mag,
+                    mode="lines",
+                    name=f"Frame {i+1}",
+                    line=dict(width=1, color=f"rgba(128,128,128,0.3)"),
+                    showlegend=show_individual_frame_legend.value
+                ))
+
+        # Plot main/averaged spectrum
         fig.add_trace(go.Scatter(
-            x=result.r,
-            y=result.chir_mag,
+            x=exafs_group.r,
+            y=exafs_group.chir_mag,
             mode="lines",
-            name="|χ(R)|",
+            name="|χ(R)| Average" if individual_frames else "|χ(R)|",
             line=dict(width=2.5, color="black")
         ))
         fig.update_layout(
@@ -242,7 +307,17 @@ def _(absorber, edge, go, mo, plot_type, result):
 
 
 @app.cell
-def _(EdgeType, FeffConfig, LarchWrapper, Path, mo, os, settings, tempfile):
+def _(
+    FeffConfig,
+    LarchWrapper,
+    Path,
+    ProcessingMode,
+    mo,
+    os,
+    settings,
+    tempfile,
+):
+    """Main processing cell - handles both full processing and output-only processing."""
     mo.stop(not settings or not settings.get("structure_file") or not settings.get("absorber"))
 
     structure_file = settings["structure_file"][0]
@@ -251,162 +326,145 @@ def _(EdgeType, FeffConfig, LarchWrapper, Path, mo, os, settings, tempfile):
     if not absorber:
         mo.stop(mo.md("**❌ Absorbing atom is required.**"))
 
-    # Create temp file
-    suffix = f".{structure_file.name.split('.')[-1]}"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(structure_file.contents)
-        temp_path = Path(tmp.name)
+    # Setup configuration
+    config = FeffConfig.from_preset(settings["preset"])
+    output_dir = Path(settings["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    is_traj = settings["processing_mode"] == "trajectory"
+    if is_traj:
+        config.sample_interval = settings["sample_interval"]
+        config.parallel = settings["parallel_settings"]["parallel"]
+        if settings["parallel_settings"]["n_workers"] is not None:
+            config.n_workers = settings["parallel_settings"]["n_workers"]
+
+    plot_individual_frames = is_traj
+    show_plot = False # we handle this in the app instead
+    process_output_only = settings["run_options"]["process_output_only"]
 
     try:
         wrapper = LarchWrapper(verbose=False)
-        config = FeffConfig.from_preset(settings["preset"])
-        # Update with chosen edge
-        config.edge = EdgeType[settings["edge"]]
 
-        output_dir = Path(settings["output_dir"])
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        is_traj = settings["processing_mode"] == "trajectory"
-        if is_traj:
-            config.sample_interval = settings["sample_interval"]
-            config.parallel = settings["parallel_settings"]["parallel"]
-            if settings["parallel_settings"]["n_workers"] is not None:
-                config.n_workers = settings["parallel_settings"]["n_workers"]
-
-        # Generate inputs
-        input_info = wrapper.generate_inputs(
-            structure=temp_path,
-            absorber=absorber,
-            output_dir=output_dir,
-            config=config,
-            trajectory=is_traj
-        )
-
-        nframes = input_info.get("nframes", 1)
-        msg = f"✅ Generated inputs for {nframes} frame(s)" if is_traj else "✅ Generated FEFF input"
-
-        message = mo.md(f"""
-        ### {msg}
-        - **Mode**: {settings['processing_mode']}
-        - **Absorber**: {absorber}
-        - **Preset**: {settings['preset']}
-        - **Output**: `{input_info['output_dir']}`
-        - **Parallel**: {'Yes' if is_traj and config.parallel else 'No'}
-        """)
-
-    except Exception as e:
-        message = mo.md(f"**❌ Error during input generation:** {str(e)}")
-        input_info = None
-        wrapper = None
-
-    finally:
-        if 'temp_path' in locals() and temp_path.exists():
-            os.unlink(temp_path)
-
-    return absorber, input_info, nframes, wrapper
-
-
-@app.cell
-def _(input_info, is_trajectory, mo, nframes, settings, wrapper):
-    mo.stop(input_info is None or wrapper is None)
-
-    input_only = settings["run_options"]["input_only"]
-    edge = settings["edge"]
-    settings['run_options']['show_plot'] = False  # We plot it in marimo instead
-    result = None
-
-    if input_only:
-        # nframes = input_info.get("nframes", 1)
-        message2 = mo.md(f"""
-        ### \u2705 Input Generation Complete
-
-        - Generated inputs for {nframes} structure(s)
-        - Output directory: `{input_info['output_dir']}`
-        - Preset: {settings['preset']}
-        - Mode: {settings['processing_mode']}
-
-        \u2705 You can now disable "input only" to run full processing.
-        """)
-    else:
-        try:
-            with mo.status.progress_bar(
-                total=input_info.get("nframes", 1),
-                title="Processing frames...",
-                subtitle="Starting...",
-                completion_title="✅ Processing Complete",
-                completion_subtitle="All frames processed."
-            ) as bar:
-
-                def progress_callback(completed, total, desc):
-                    bar.update(
-                        increment=1,  # one step per frame
+        if process_output_only:
+            # Process existing FEFF outputs
+            if is_traj:
+                frame_dirs = [d for d in output_dir.iterdir() 
+                             if d.is_dir() and d.name.startswith('frame_')]
+                if not frame_dirs:
+                    result = None
+                    message = mo.md(f"**❌ No trajectory frames found in {output_dir}**")
+                else:
+                    result = wrapper.process_trajectory_output(
+                        output_dir, config, 
+                        plot_individual_frames=plot_individual_frames,
+                        show_plot=show_plot,
+                        output_dir=output_dir
                     )
+                    message = mo.md(f"""
+                    ### ✅ Processed Existing Trajectory Outputs
+                    - **Frames processed**: {result.nframes}
+                    - **Individual frame plots**: {'Yes' if plot_individual_frames else 'No'}
+                    - **Output**: `{output_dir}`
+                    """)
+            else:
+                chi_file = output_dir / "chi.dat"
+                if not chi_file.exists():
+                    result = None
+                    message = mo.md(f"**❌ No chi.dat found in {output_dir}**")
+                else:
+                    exafs_group_temp = wrapper.process_feff_output(output_dir, config)
+                    plot_paths = wrapper.plot_results(exafs_group_temp, output_dir, show_plot=show_plot)
 
-                if is_trajectory:
-                    result = wrapper._process_trajectory_from_inputs(
-                        input_info,
-                        show_plot=settings["run_options"]["show_plot"],
+                    # Create ProcessingResult-like object for consistency
+                    from types import SimpleNamespace
+                    result = SimpleNamespace(
+                        exafs_group=exafs_group_temp,
+                        plot_paths=plot_paths,
+                        processing_mode=ProcessingMode.SINGLE_FRAME,
+                        nframes=1,
+                        individual_frame_groups=None
+                    )
+                    message = mo.md(f"""
+                    ### ✅ Processed Existing Single Frame Output
+                    - **Output**: `{output_dir}`
+                    """)
+        else:
+            # Full processing from structure file
+            # Create temporary file
+            suffix = f".{structure_file.name.split('.')[-1]}"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp.write(structure_file.contents)
+                temp_path = Path(tmp.name)
+
+            try:
+                # For progress bar, use a reasonable initial estimate
+                # The wrapper will provide exact counts via progress callback
+                initial_total = 100 if is_traj else 1
+                
+                with mo.status.progress_bar(
+                    total=initial_total,
+                    title="Processing EXAFS...",
+                    subtitle="Starting...",
+                    completion_title="✅ Processing Complete",
+                    completion_subtitle="EXAFS analysis finished.",
+                ) as bar:
+
+                    def progress_callback(completed, total, desc):
+                        # Update progress bar total on first call if needed
+                        if completed == 0 and total != initial_total:
+                            bar.total = total
+                        # Only increment if we've actually completed work (completed > 0)
+                        elif completed > 0:
+                            bar.update(increment=1, subtitle=desc)
+
+                    result = wrapper.process(
+                        structure=temp_path,
+                        absorber=absorber,
+                        output_dir=output_dir,
+                        config=config,
+                        trajectory=is_traj,
+                        show_plot=show_plot,
+                        plot_individual_frames=plot_individual_frames,
                         progress_callback=progress_callback
                     )
+
+                # Show results based on processing mode
+                if result.processing_mode == ProcessingMode.TRAJECTORY:
+                    message = mo.md(f"""
+                    ### ✅ Trajectory Processing Complete
+                    - **Frames processed**: {result.nframes}
+                    - **Individual frame plots**: {'Yes' if plot_individual_frames else 'No'}
+                    - **Output**: `{output_dir}`
+                    - **PDF Plot**: `{result.plot_paths[0].name}`
+                    - **SVG Plot**: `{result.plot_paths[1].name}`
+                    - **Mode**: Averaged trajectory
+                    """)
                 else:
-                    result = wrapper._process_single_frame_from_inputs(
-                        input_info,
-                        show_plot=settings["run_options"]["show_plot"]
-                    )
+                    message = mo.md(f"""
+                    ### ✅ Single Structure Processed
+                    - **Output**: `{output_dir}`
+                    - **PDF**: `{result.plot_paths[0].name}`
+                    - **SVG**: `{result.plot_paths[1].name}`
+                    """)
 
-            # After bar closes, show results
-            if result.is_averaged:
-                message2 = mo.md(f"""
-                ### ✅ Trajectory Processing Complete
+            finally:
+                # Cleanup temp file
+                if 'temp_path' in locals() and temp_path.exists():
+                    os.unlink(temp_path)
 
-                - Frames processed: {result.nframes}
-                - Output: `{input_info['output_dir']}`
-                - PDF Plot: `{result.plot_paths[0]}`
-                - SVG Plot: `{result.plot_paths[1]}`
-                - Mode: Averaged trajectory
-                """)
-            else:
-                message2 = mo.md(f"""
-                ### ✅ Single Structure Processed
+    except Exception as e:
+        import traceback
+        result = None
+        message = mo.md(f"""
+        ### ❌ Processing Failed
+        **Error:** {str(e)}
+        ```
+        {traceback.format_exc()}
+        ```
+        """)
 
-                - Output: `{input_info['output_dir']}`
-                - PDF: `{result.plot_paths[0]}`
-                - SVG: `{result.plot_paths[1]}`
-                """)
-
-        except Exception as e:
-            import traceback
-            message2 = mo.md(f"""
-            ### ❌ Processing Failed
-
-            **Error:** {str(e)}
-
-            Inputs were generated. Try running FEFF manually.
-
-            ```
-            {traceback.format_exc()}
-            ```
-            """)
-    message2
-
-    return edge, result
-
-
-@app.cell
-def _():
-    # # Display the svg created
-    # if result and result.plot_paths:
-    #     # Render an image from a URL
-    #     svg_plot = mo.image(
-    #         src=result.plot_paths[1],
-    #         alt="Generated EXAFS plot",
-    #         width=800,
-    #         height=400,
-    #         rounded=False,
-    #         caption="Generated EXAFS plot",
-    #     )
-    # svg_plot
-    return
+    message
+    return absorber, result
 
 
 @app.cell(hide_code=True)
@@ -418,7 +476,7 @@ def _(form, mo):
     else:
         is_trajectory = settings["processing_mode"] == "trajectory"
 
-        settings_message = f"""**\u2699\ufe0f Current Settings:**
+        settings_message = f"""**⚙️ Current Settings:**
 
         | Setting | Value |
         |--------|-------|
@@ -427,11 +485,11 @@ def _(form, mo):
         | ⚡ Mode | {settings.get('processing_mode', 'Not set')} |
         | 🔧 Preset | {settings.get('preset', 'Not set').title()} |
         | 🚀 Parallel | {'Yes' if is_trajectory and settings['parallel_settings']['parallel'] else 'No' if is_trajectory else 'N/A'} |
-        | 📝 Input only | {'Yes' if settings['run_options']['input_only'] else 'No'} |
+        | 📝 Process Output Only | {'Yes' if settings['run_options']['process_output_only'] else 'No'} |
             """
     mo.md(settings_message)
 
-    return is_trajectory, settings
+    return (settings,)
 
 
 @app.cell(hide_code=True)
@@ -446,14 +504,25 @@ def _(mo):
        - *Single structure*: One-off EXAFS
        - *Trajectory*: Average over frames
     4. **Tweak settings**:
-       - Use **"Quick"** preset for testing
+       - Use **"Quick"** preset for testing, **"Publication"** for final results
        - Enable **parallel** for large trajectories
-    5. Check **"Input only"** to debug before full run.
+       - Enable **"Individual frames"** to overlay individual trajectory frames in plots
+    5. **Processing options**:
+       - **Normal**: Full processing from structure file
+       - **"Process output only"**: Reprocess existing FEFF outputs with different analysis parameters
     6. Click **Run**.
 
-    💡 Tip: Always test with "input only" first!
+    💡 **Tips**: 
+    - Use "Process output only" to reprocess with different Fourier transform parameters
+    - Individual frame plotting helps visualize trajectory dynamics
+    - Try different presets to optimize for speed vs. accuracy
     """
     )
+    return
+
+
+@app.cell
+def _():
     return
 
 
