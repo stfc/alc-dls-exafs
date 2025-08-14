@@ -122,6 +122,7 @@ def plot_cns(r, cn, labels, temp, avg_ps, pair_style):
     plt.savefig("coordination_plot.png", dpi=300)
     print("Saved coordination plot: coordination_plot.png")
 
+
 def read_msd(msd_path, threshold=0.5):
     print("\nReading MSD data...")
     with open(msd_path, 'r') as f:
@@ -132,10 +133,24 @@ def read_msd(msd_path, threshold=0.5):
 
     last_line = lines[-1]
     timestep, msd_all, msd_Ag, msd_Au = map(float, last_line.split())
-    print(f"MSD values read (Å²): All={msd_all:.5f}, Ag={msd_Ag:.5f}, Au={msd_Au:.5f}")
 
-    if any(msd > threshold for msd in [msd_all, msd_Ag, msd_Au]):
+    msd_values = {
+        "All": msd_all,
+        "Ag": msd_Ag,
+        "Au": msd_Au
+    }
+
+    print("MSD values read (Å²): " + ", ".join(f"{k}={v:.5f}" for k, v in msd_values.items()))
+
+    # Report max vibration
+    max_species = max(msd_values, key=msd_values.get)
+    max_value = msd_values[max_species]
+    print(f"Maximum MSD: {max_value:.5f} Å² ({max_species})")
+
+    # Threshold warning
+    if any(msd > threshold for msd in msd_values.values()):
         print(f"WARNING: One or more MSD values exceed {threshold} Å²!")
+
 
 # --- Run ---
 info = parse_lammps_info("lammpsIn_constP")
