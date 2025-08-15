@@ -14,10 +14,11 @@ def _():
 
     # ⚠️ Make sure this package is installed or in PYTHONPATH
     try:
-        from larch_cli_wrapper.wrapper import LarchWrapper, FeffConfig, PRESETS, EdgeType, ProcessingMode
+        from larch_cli_wrapper.wrapper import LarchWrapper, ProcessingMode
+        from larch_cli_wrapper.feff_utils import FeffConfig, PRESETS, EdgeType
     except ImportError:
         mo.stop(
-            mo.md("""
+            mo.output.append(mo.md("""
             **❌ Import Error**: `larch_cli_wrapper` not found.
 
             Make sure:
@@ -25,7 +26,7 @@ def _():
             - Or the `src/` folder is in your Python path
             - Or run `pip install -e .` if this is a local package
             """)
-        )
+        ))
 
     return (
         EdgeType,
@@ -117,6 +118,7 @@ def _(EdgeType, PRESETS, mo):
             ),
             run_options=mo.ui.dictionary({
                 "process_output_only": mo.ui.checkbox(label="Process existing FEFF outputs (skip FEFF run)", value=False),
+                "force_recalculate": mo.ui.checkbox(label="Force recalculate (ignore cache)", value=False),
             })
         )
         .form(
@@ -328,6 +330,10 @@ def _(
 
     # Setup configuration
     config = FeffConfig.from_preset(settings["preset"])
+
+    # Apply edge parameter from UI to config (this affects cache key generation)
+    config.edge = settings.get("edge", "K")
+
     output_dir = Path(settings["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -341,9 +347,14 @@ def _(
     plot_individual_frames = is_traj
     show_plot = False # we handle this in the app instead
     process_output_only = settings["run_options"]["process_output_only"]
+    force_recalculate = settings["run_options"]["force_recalculate"]
+
+    # Apply force_recalculate to config
+    config.force_recalculate = force_recalculate
 
     try:
-        wrapper = LarchWrapper(verbose=False)
+        # Initialize wrapper with caching (same as CLI)
+        wrapper = LarchWrapper(verbose=False, cache_dir=Path.home() / ".larch_cache")
 
         if process_output_only:
             # Process existing FEFF outputs
@@ -354,18 +365,23 @@ def _(
                     result = None
                     message = mo.md(f"**❌ No trajectory frames found in {output_dir}**")
                 else:
-                    result = wrapper.process_trajectory_output(
-                        output_dir, config, 
-                        plot_individual_frames=plot_individual_frames,
-                        show_plot=show_plot,
-                        output_dir=output_dir
-                    )
-                    message = mo.md(f"""
-                    ### ✅ Processed Existing Trajectory Outputs
-                    - **Frames processed**: {result.nframes}
-                    - **Individual frame plots**: {'Yes' if plot_individual_frames else 'No'}
-                    - **Output**: `{output_dir}`
-                    """)
+                    # Use the main process method with existing trajectory output
+                    # Since we're in "output_only" mode, we need to process the existing frames
+                    try:
+                        result = wrapper.process(
+                            structure_file, absorber, output_dir, config,
+                            trajectory=True, show_plot=show_plot,
+                            plot_individual_frames=plot_individual_frames
+                        )
+                        message = mo.md(f"""
+                        ### ✅ Processed Existing Trajectory Outputs
+                        - **Frames processed**: {result.nframes}
+                        - **Individual frame plots**: {'Yes' if plot_individual_frames else 'No'}
+                        - **Output**: `{output_dir}`
+                        """)
+                    except Exception as e:
+                        result = None
+                        message = mo.md(f"**❌ Error processing trajectory output: {str(e)}**")
             else:
                 chi_file = output_dir / "chi.dat"
                 if not chi_file.exists():
@@ -373,7 +389,11 @@ def _(
                     message = mo.md(f"**❌ No chi.dat found in {output_dir}**")
                 else:
                     exafs_group_temp = wrapper.process_feff_output(output_dir, config)
-                    plot_paths = wrapper.plot_results(exafs_group_temp, output_dir, show_plot=show_plot)
+                    # Updated plot_results call with required absorber parameter
+                    plot_paths = wrapper.plot_results(
+                        exafs_group_temp, output_dir, 
+                        show_plot=show_plot, absorber=absorber, edge=settings.get("edge", "K")
+                    )
 
                     # Create ProcessingResult-like object for consistency
                     from types import SimpleNamespace
@@ -400,7 +420,7 @@ def _(
                 # For progress bar, use a reasonable initial estimate
                 # The wrapper will provide exact counts via progress callback
                 initial_total = 100 if is_traj else 1
-                
+
                 with mo.status.progress_bar(
                     total=initial_total,
                     title="Processing EXAFS...",
@@ -435,16 +455,16 @@ def _(
                     - **Frames processed**: {result.nframes}
                     - **Individual frame plots**: {'Yes' if plot_individual_frames else 'No'}
                     - **Output**: `{output_dir}`
-                    - **PDF Plot**: `{result.plot_paths[0].name}`
-                    - **SVG Plot**: `{result.plot_paths[1].name}`
+                    - **PDF Plot**: `{result.plot_paths['pdf'].name}`
+                    - **SVG Plot**: `{result.plot_paths['svg'].name}`
                     - **Mode**: Averaged trajectory
                     """)
                 else:
                     message = mo.md(f"""
                     ### ✅ Single Structure Processed
                     - **Output**: `{output_dir}`
-                    - **PDF**: `{result.plot_paths[0].name}`
-                    - **SVG**: `{result.plot_paths[1].name}`
+                    - **PDF**: `{result.plot_paths['pdf'].name}`
+                    - **SVG**: `{result.plot_paths['svg'].name}`
                     """)
 
             finally:
@@ -464,7 +484,7 @@ def _(
         """)
 
     message
-    return absorber, result
+    return absorber, config, result
 
 
 @app.cell(hide_code=True)
@@ -486,10 +506,30 @@ def _(form, mo):
         | 🔧 Preset | {settings.get('preset', 'Not set').title()} |
         | 🚀 Parallel | {'Yes' if is_trajectory and settings['parallel_settings']['parallel'] else 'No' if is_trajectory else 'N/A'} |
         | 📝 Process Output Only | {'Yes' if settings['run_options']['process_output_only'] else 'No'} |
+        | 💾 Force Recalculate | {'Yes' if settings['run_options']['force_recalculate'] else 'No'} |
             """
     mo.md(settings_message)
 
     return (settings,)
+
+
+@app.cell
+def _(config, mo):
+    # Nice UI element with the config settings
+    config_dict = config.as_dict()
+    mo.md("""
+    ## ⚙️ Configuration Settings
+
+    {}
+
+    """.format(config_dict))
+    return
+
+
+@app.cell
+def _(config, mo):
+    mo.json(config.__repr_json__())
+    return
 
 
 @app.cell(hide_code=True)
@@ -510,14 +550,122 @@ def _(mo):
     5. **Processing options**:
        - **Normal**: Full processing from structure file
        - **"Process output only"**: Reprocess existing FEFF outputs with different analysis parameters
-    6. Click **Run**.
+       - **"Force recalculate"**: Bypass cache and recalculate everything
+    6. **Cache Management**: Use the cache controls below to monitor or clear cached results
+    7. Click **Run**.
 
     💡 **Tips**: 
     - Use "Process output only" to reprocess with different Fourier transform parameters
     - Individual frame plotting helps visualize trajectory dynamics
     - Try different presets to optimize for speed vs. accuracy
+    - Caching dramatically speeds up repeated calculations - only disable for troubleshooting
     """
     )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    """Cache management interface."""
+
+    # Create cache management controls
+    cache_controls = mo.ui.dictionary({
+        "show_info": mo.ui.button(label="🔍 Show Cache Info", kind="neutral"),
+        "clear_cache": mo.ui.button(label="🗑️ Clear Cache", kind="warn")
+    })
+
+    cache_form = mo.md(
+        """
+        ## 💾 Cache Management
+
+        The EXAFS processing uses intelligent caching to speed up repeated calculations.
+        Cache files are stored in `~/.larch_cache/` and are automatically used when processing 
+        identical structures with the same parameters.
+
+        {cache_controls}
+        """
+    ).batch(cache_controls=cache_controls)
+
+    cache_form
+    return (cache_controls,)
+
+
+@app.cell
+def _(LarchWrapper, Path, cache_controls, mo):
+    """Handle cache operations and display results."""
+
+    if not cache_controls.value or not any(cache_controls.value.values()):
+        mo.stop("")
+
+    try:
+        # Use the same cache directory as CLI - use context manager to avoid variable conflict
+        cache_wrapper = LarchWrapper(verbose=False, cache_dir=Path.home() / ".larch_cache")
+
+        if cache_controls.value.get("show_info"):
+            cache_info = cache_wrapper.get_cache_info()
+
+            if cache_info["enabled"]:
+                cache_status_message = mo.md(f"""
+                ### 📊 Cache Status
+
+                | Property | Value |
+                |----------|-------|
+                | **Status** | ✅ Enabled |
+                | **Directory** | `{cache_info['cache_dir']}` |
+                | **Files** | {cache_info['files']} cached results |
+                | **Size** | {cache_info['size_mb']} MB |
+
+                💡 **Cache Benefits:**
+                - Dramatically speeds up repeated calculations
+                - Automatically used when structure and parameters match
+                - Safe to clear - will rebuild as needed
+                """)
+            else:
+                cache_status_message = mo.md("""
+                ### 📊 Cache Status
+
+                ⚠️ **Cache is disabled**
+
+                Enable caching by ensuring the wrapper is initialized with a cache directory.
+                """)
+
+        elif cache_controls.value.get("clear_cache"):
+            initial_info = cache_wrapper.get_cache_info()
+
+            if initial_info.get("files", 0) > 0:
+                cache_wrapper.clear_cache()
+                cache_status_message = mo.md(f"""
+                ### 🗑️ Cache Cleared
+
+                ✅ **Successfully cleared cache**
+                - Removed {initial_info['files']} cache files
+                - Freed {initial_info['size_mb']} MB of storage
+                - Next processing runs will rebuild cache as needed
+                """)
+            else:
+                cache_status_message = mo.md("""
+                ### 🗑️ Cache Clear
+
+                ℹ️ **Cache is already empty**
+
+                No cache files found to remove.
+                """)
+
+        else:
+            cache_status_message = mo.md("")
+
+        # Clean up the cache wrapper
+        cache_wrapper.cleanup_temp_files()
+        cache_wrapper.cleanup_temp_dirs()
+
+    except Exception as e:
+        cache_status_message = mo.md(f"""
+        ### ❌ Cache Operation Failed
+
+        **Error:** {str(e)}
+        """)
+
+    cache_status_message
     return
 
 

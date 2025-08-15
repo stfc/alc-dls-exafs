@@ -1,0 +1,60 @@
+# Marimo-style matplotlib configuration for publication-quality EXAFS plots
+# This style mimics the clean, professional appearance of marimo notebooks
+# with Times-like serif fonts and proper scientific formatting
+
+# Figure settings
+figure.facecolor: white
+figure.edgecolor: white
+figure.dpi: 300
+
+# Font settings
+font.family: serif
+font.serif: Liberation Serif, DejaVu Serif, Noto Serif, FreeSerif, Times New Roman, Times, serif
+font.size: 18
+
+# Axes settings
+axes.facecolor: white
+axes.edgecolor: black
+axes.linewidth: 2
+axes.labelsize: 20
+axes.titlesize: 20
+axes.grid: True
+axes.axisbelow: True
+
+# Grid settings
+grid.color: lightgray
+grid.alpha: 0.7
+grid.linestyle: -
+grid.linewidth: 0.5
+
+# Tick settings
+xtick.major.size: 6
+xtick.major.width: 2
+xtick.minor.size: 3
+xtick.minor.width: 1
+xtick.color: black
+xtick.labelsize: 18
+xtick.direction: out
+
+ytick.major.size: 6
+ytick.major.width: 2
+ytick.minor.size: 3
+ytick.minor.width: 1
+ytick.color: black
+ytick.labelsize: 18
+ytick.direction: out
+
+# Legend settings
+legend.fontsize: 16
+legend.frameon: False
+legend.loc: best
+
+# Line settings
+lines.linewidth: 2.5
+lines.solid_capstyle: round
+
+# Savefig settings
+savefig.dpi: 300
+savefig.bbox: tight
+savefig.facecolor: white
+savefig.edgecolor: none
