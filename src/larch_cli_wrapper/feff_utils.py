@@ -42,6 +42,9 @@ PRESETS = {
         "radius": 8.0, 
         "kmin": 2, 
         "kmax": 12,
+        "kweight": 2,
+        "window": "hanning",
+        "dk": 1.0,
         "user_tag_settings": {}  # Use larixite defaults
     },
     "publication": {
@@ -50,21 +53,23 @@ PRESETS = {
         "radius": 12.0, 
         "kmin": 3, 
         "kmax": 18, 
-        "dk": 4,
+        "kweight": 2,
+        "window": "hanning",
+        "dk": 4.0,
         "user_tag_settings": {}  # Use larixite defaults
     },
 }
 
 class SpectrumType(str, Enum):
     EXAFS = "EXAFS"
-    XANES = "XANES"
-    DANES = "DANES"
-    XMCD = "XMCD"
-    ELNES = "ELNES"
-    EXELFS = "EXELFS"
-    FPRIME = "FPRIME"
-    NRIXS = "NRIXS"
-    XES = "XES"
+    # XANES = "XANES"
+    # DANES = "DANES"
+    # XMCD = "XMCD"
+    # ELNES = "ELNES"
+    # EXELFS = "EXELFS"
+    # FPRIME = "FPRIME"
+    # NRIXS = "NRIXS"
+    # XES = "XES"
 
 class EdgeType(str, Enum):
     K = "K"
@@ -78,7 +83,7 @@ class FeffConfig:
     spectrum_type: str = "EXAFS"
     edge: str = "K"
     radius: float = 8.0 # cluster size
-    method: str = "larixite"
+    method: str = "auto"  # Updated default to auto
     user_tag_settings: dict[str, str] = field(default_factory=dict)  # Empty by default - use method defaults
     kweight: int = 2
     window: str = "hanning"
@@ -94,6 +99,10 @@ class FeffConfig:
         self._validate_spectrum_type()
         self._validate_energy_range()
         self._validate_fourier_params()
+        self._validate_radius()
+        self._validate_method()
+        self._validate_n_workers()
+        self._validate_sample_interval()
         # No automatic defaults - let each method use its own defaults
 
     def _validate_spectrum_type(self):
@@ -111,6 +120,24 @@ class FeffConfig:
             raise ValueError(f"dk must be positive, got {self.dk}")
         if not 1 <= self.kweight <= 3:
             logging.warning(f"Unusual kweight value: {self.kweight}")
+            
+    def _validate_radius(self):
+        if self.radius <= 0:
+            raise ValueError(f"Radius must be positive, got {self.radius}")
+            
+    def _validate_method(self):
+        valid_methods = ["auto", "larixite", "pymatgen"]
+        if self.method not in valid_methods:
+            raise ValueError(f"Invalid method: {self.method}. Valid methods: {valid_methods}")
+            
+    def _validate_n_workers(self):
+        if self.n_workers is not None and self.n_workers <= 0:
+            raise ValueError(f"Invalid n_workers: {self.n_workers}")
+            
+    def _validate_sample_interval(self):
+        """Validate sample_interval parameter."""
+        if self.sample_interval < 1:
+            raise ValueError(f"sample_interval must be >= 1, got {self.sample_interval}")
 
     @classmethod
     def from_preset(cls, preset_name: str) -> "FeffConfig":
@@ -209,14 +236,6 @@ def generate_pymatgen_input(atoms: Atoms, absorber: Union[str, int], output_dir:
     if config.spectrum_type == "EXAFS":
         feff_set = MPEXAFSSet(
             absorbing_atom=absorber_element, 
-            structure=structure, 
-            edge=config.edge, 
-            radius=config.radius, 
-            user_tag_settings=user_settings
-        )
-    elif config.spectrum_type == "XANES":
-        feff_set = MPXANESSet(
-            absorbing_atom=absorber_element, 
             structure=structure,
             edge=config.edge, 
             radius=config.radius,
@@ -304,26 +323,37 @@ def generate_larixite_input(atoms: Atoms, absorber: Union[str, int], output_dir:
 
 
 def generate_feff_input(atoms: Atoms, absorber: Union[str, int], output_dir: Path, config) -> Path:
-    """Generate FEFF input using the specified method."""
+    """Generate FEFF input using the specified method with improved error handling."""
     # Determine method
     if config.method == "auto":
-        method = "pymatgen" if PYMATGEN_AVAILABLE else "larixite"
+        if LARIXITE_AVAILABLE:
+            method = "larixite"
+        elif PYMATGEN_AVAILABLE:
+            method = "pymatgen"
+        else:
+            raise ValueError("No FEFF input generation method available. Please install pymatgen or larixite.")
     else:
         method = config.method
     
     # Validate method availability
     if method == "pymatgen" and not PYMATGEN_AVAILABLE:
-        raise ValueError("Pymatgen method requested but pymatgen is not available")
+        raise ValueError("Pymatgen method requested but pymatgen is not available. Install with: pip install pymatgen")
     elif method == "larixite" and not LARIXITE_AVAILABLE:
-        raise ValueError("Larixite method requested but larixite is not available")
+        raise ValueError("Larixite method requested but larixite is not available. Install with: pip install larixite")
     
     # Generate input using appropriate method
-    if method == "pymatgen":
-        return generate_pymatgen_input(atoms, absorber, output_dir, config)
-    elif method == "larixite":
-        return generate_larixite_input(atoms, absorber, output_dir, config)
-    else:
-        raise ValueError(f"Unsupported method: {method}")
+    try:
+        if method == "pymatgen":
+            return generate_pymatgen_input(atoms, absorber, output_dir, config)
+        elif method == "larixite":
+            return generate_larixite_input(atoms, absorber, output_dir, config)
+        else:
+            raise ValueError(f"Unsupported method: {method}. Valid methods: auto, larixite, pymatgen")
+    except Exception as e:
+        # Log detailed error information
+        error_msg = f"FEFF input generation failed with method '{method}': {str(e)}"
+        logging.error(error_msg)
+        raise
 
 
 def run_feff_calculation(feff_dir: Path, verbose: bool = False) -> bool:
@@ -460,7 +490,7 @@ def run_feff_calculation(feff_dir: Path, verbose: bool = False) -> bool:
 
 
 def read_feff_output(feff_dir: Path):
-    """Read FEFF chi.dat output with fallback methods."""
+    """Read FEFF chi.dat output with fallback methods and improved error handling."""
     from larch.io import read_ascii
     import numpy as np
     
@@ -478,4 +508,9 @@ def read_feff_output(feff_dir: Path):
             chi = data[:, 2]
             return chi, k
         except Exception as fallback_error:
-            raise Exception(f"Failed to read {chi_file}: {read_error}, fallback failed: {fallback_error}")
+            error_msg = (
+                f"Failed to read {chi_file}:\n"
+                f"Primary error: {read_error}\n"
+                f"Fallback error: {fallback_error}"
+            )
+            raise Exception(error_msg) from None

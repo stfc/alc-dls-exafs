@@ -5,6 +5,7 @@ import logging
 import multiprocessing as mp
 import os
 import sys
+import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -16,7 +17,7 @@ from larch import Group
 from larch.xafs import xftf
 
 from .cache_utils import get_cache_key, load_from_cache, save_to_cache
-from .feff_utils import generate_feff_input, run_feff_calculation, read_feff_output, generate_larixite_input, generate_pymatgen_input, FeffConfig, PRESETS
+from .feff_utils import generate_feff_input, run_feff_calculation, read_feff_output, FeffConfig, PRESETS
 
 # Required dependencies
 try:
@@ -46,8 +47,6 @@ except ImportError:
     NUMBA_AVAILABLE = False
 
 
-
-
 # ================== EXCEPTIONS ==================
 class EXAFSProcessingError(Exception):
     """Base exception for EXAFS processing errors."""
@@ -69,7 +68,6 @@ class ProcessingMode(Enum):
     AVERAGE = "average"
 
 
-
 # ================== PROGRESS REPORTING ==================
 class ProgressReporter(Protocol):
     def update(self, current: int, total: int, description: str) -> None: ...
@@ -77,37 +75,34 @@ class ProgressReporter(Protocol):
     def close(self) -> None: ...
 
 class TQDMReporter:
-    def __init__(self):
+    def __init__(self, total_frames: int, initial_description: str = "Starting"):
+        self.total = total_frames
+        self.current = 0
+        self.desc = initial_description
+        self.pbar = None
         try:
             from tqdm import tqdm
-            self.tqdm = tqdm
-            self.pbar = None
+            self.pbar = tqdm(total=total_frames, desc=initial_description)
         except ImportError:
-            self.tqdm = None
+            # Fallback to simple terminal output
             self.pbar = None
+            print(f"Starting: {initial_description} [0/{total_frames}]", flush=True)
 
     def update(self, current: int, total: int, description: str) -> None:
-        if self.tqdm is None:
-            return
-        if self.pbar is None:
-            self.pbar = self.tqdm(total=total, desc=description)
-        self.pbar.n = current
-        self.pbar.set_description(description)
-        self.pbar.refresh()
+        if self.pbar:
+            self.pbar.n = current
+            self.pbar.desc = description
+            self.pbar.refresh()
+        else:
+            percent = (current / total) * 100
+            print(f"\r[{percent:6.2f}%] {description}", end="", flush=True)
+            if current == total:
+                print()
 
     def close(self) -> None:
         if self.pbar:
             self.pbar.close()
 
-class SimpleReporter:
-    def update(self, current: int, total: int, description: str) -> None:
-        percent = (current / total) * 100
-        print(f"\r[{percent:6.2f}%] {description}", end="", flush=True)
-        if current == total:
-            print()
-
-    def close(self) -> None:
-        print()
 
 class CallbackReporter:
     """Reporter that bridges to CLI progress callbacks."""
@@ -126,12 +121,22 @@ class CallbackReporter:
 
 # ================== PROCESSING RESULT ==================
 @dataclass
+class FrameProcessingResult:
+    """Result of processing a single frame with error information."""
+    chi: Optional[np.ndarray] = None
+    k: Optional[np.ndarray] = None
+    error: Optional[str] = None
+    frame_idx: Optional[int] = None
+
+@dataclass
 class ProcessingResult:
     exafs_group: Group
     plot_paths: Dict[str, Path]  # e.g., {"pdf": ..., "svg": ..., "png": ...}
     processing_mode: ProcessingMode
     nframes: int = 1
     individual_frame_groups: Optional[List[Group]] = None
+    cache_hits: int = 0
+    cache_misses: int = 0
 
     @property
     def k(self) -> np.ndarray:
@@ -157,10 +162,6 @@ class ProcessingResult:
         return output_dir
 
 
-# ================== CACHING ==================
-# Caching functionality is now integrated directly into LarchWrapper
-
-
 # ================== PARALLEL PROCESSING ==================
 class ParallelProcessor:
     def __init__(self, n_workers: Optional[int] = None):
@@ -179,7 +180,11 @@ class ParallelProcessor:
 
     @staticmethod
     def _worker_init(log_level):
-        logging.basicConfig(level=log_level)
+        logging.basicConfig(
+            level=log_level,
+            format='[Worker] [%(levelname)s] %(message)s',
+            handlers=[logging.StreamHandler(sys.stdout)]
+        )
 
 
 # ================== MAIN WRAPPER ==================
@@ -269,30 +274,6 @@ class LarchWrapper:
             "size_mb": round(total_size / (1024 * 1024), 2)
         }
 
-    def generate_feff_input(self, structure: Union[Path, Atoms], absorber: Union[str, int],
-                        output_dir: Path, config: FeffConfig) -> Path:
-        """Generate FEFF input files - now uses utility functions."""
-        if isinstance(structure, Atoms):
-            # Use utility function directly for Atoms objects
-            return generate_feff_input(structure, absorber, output_dir, config)
-        else:
-            # For file-based structures, read first then use utility
-            structure_path = Path(structure).resolve()
-            atoms = ase_read(str(structure_path))
-            return generate_feff_input(atoms, absorber, output_dir, config)
-
-    def _generate_with_larixite(self, structure_path: Path, absorber: Union[str, int],
-                            output_dir: Path, config: FeffConfig) -> Path:
-        """Legacy method - now redirects to utility function."""
-        atoms = ase_read(str(structure_path))
-        return generate_larixite_input(atoms, absorber, output_dir, config)
-
-    def _generate_with_pymatgen(self, structure_path: Path, absorber: Union[str, int],
-                            output_dir: Path, config: FeffConfig) -> Path:
-        """Legacy method - now redirects to utility function."""
-        atoms = ase_read(str(structure_path))  
-        return generate_pymatgen_input(atoms, absorber, output_dir, config)
-
     def run_feff(self, feff_dir: Path, config: Optional[FeffConfig] = None) -> bool:
         """Run FEFF calculation - now uses utility function."""
         result = run_feff_calculation(feff_dir, verbose=self.logger.level <= logging.INFO)
@@ -362,15 +343,20 @@ class LarchWrapper:
         
         style_config = styles.get(plot_style, styles["publication"])
         
+        # Check if style file exists and warn if not
+        if not style_config["style_file"].exists():
+            self.logger.warning(
+                f"Style file {style_config['style_file']} not found. "
+                "Using matplotlib default style."
+            )
+        
         # Store original matplotlib settings
         original_params = plt.rcParams.copy()
         
         try:
-            # Apply marimo-style using external style file
+            # Apply style if file exists
             if style_config["style_file"].exists():
                 plt.style.use(str(style_config["style_file"]))
-            else:
-                self.logger.warning(f"Style file {style_config['style_file']} not found, using default style")
             
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=style_config["figsize"])
             
@@ -471,21 +457,22 @@ class LarchWrapper:
         return outputs
 
     def _process_single_frame(self, atoms: Atoms, absorber: str, output_dir: Path,
-                            config: FeffConfig) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+                            config: FeffConfig) -> Optional[FrameProcessingResult]:
         """Process a single frame with caching support - now uses utility functions."""
         # Check cache first if caching is enabled
         if self.cache_dir and not config.force_recalculate:
             cache_key = get_cache_key(atoms, absorber, config)
             cached_result = load_from_cache(cache_key, self.cache_dir, config.force_recalculate)
             if cached_result is not None:
-                return cached_result
+                chi, k = cached_result
+                return FrameProcessingResult(chi=chi, k=k)
         
         try:
             # Use utility functions
             generate_feff_input(atoms, absorber, output_dir, config)
             
             if not run_feff_calculation(output_dir, verbose=self.logger.level <= logging.INFO):
-                return None
+                return FrameProcessingResult(error="FEFF calculation failed", chi=None, k=None)
             
             chi, k = read_feff_output(output_dir)
             
@@ -494,11 +481,12 @@ class LarchWrapper:
                 cache_key = get_cache_key(atoms, absorber, config)
                 save_to_cache(cache_key, chi, k, self.cache_dir)
             
-            return chi, k
+            return FrameProcessingResult(chi=chi, k=k)
             
         except Exception as e:
-            self.logger.error(f"Frame processing failed: {e}")
-            return None
+            error_msg = f"Frame processing failed: {str(e)}\n{traceback.format_exc()}"
+            self.logger.error(error_msg)
+            return FrameProcessingResult(error=error_msg, chi=None, k=None)
 
     def _process_structures_chunked(self, structures: List[Atoms], absorber: str, output_dir: Path,
                                 config: FeffConfig, reporter: ProgressReporter, 
@@ -507,86 +495,62 @@ class LarchWrapper:
         individual_groups = []
         k_ref = None  # Will store k-grid from first successful frame
         total_frames = len(structures)
+        cache_hits = 0
+        cache_misses = 0
         
-        # Process frames
+        # Process frames using unified parallel framework
+        # For sequential processing, use n_workers=1 instead of separate logic
         if config.parallel and total_frames > 1:
             n_workers = config.n_workers or min(mp.cpu_count(), total_frames)
-            self.logger.info(f"Using {n_workers} parallel workers")
-            
-            try:
-                with mp.Pool(n_workers) as pool:
-                    # Create worker tasks - include cache information
-                    tasks = [(i, atoms, absorber, output_dir, config, False, self.cache_dir) for i, atoms in enumerate(structures)]
-                    
-                    # Use imap for incremental progress updates
-                    results_iter = pool.imap(self._process_frame_worker, tasks)
-                    
-                    # Process results as they complete
-                    for result_idx, (chi, k, frame_idx, error) in enumerate(results_iter):
-                        if error:
-                            self.logger.error(f"Frame {frame_idx} failed: {error}")
-                            continue
-                        
-                        if k_ref is None:
-                            k_ref = k.copy()
-                        
-                        # Interpolate to common k-grid if needed
-                        if not np.array_equal(k, k_ref):
-                            chi = np.interp(k_ref, k, chi, left=0, right=0)
-                        
-                        chi_list.append(chi)
-                        
-                        # Create frame group for plotting
-                        frame_group = Group()
-                        frame_group.k = k_ref.copy()
-                        frame_group.chi = chi
-                        xftf(frame_group, kweight=config.kweight, window=config.window, 
-                             dk=config.dk, kmin=config.kmin, kmax=config.kmax)
-                        individual_groups.append(frame_group)
-                        
-                        # Update progress after each completed frame
-                        reporter.update(len(chi_list), total_frames, f"Processed {len(chi_list)}/{total_frames}")
-                    
-            except Exception as e:
-                self.logger.error(f"Parallel processing failed: {e}, falling back to sequential")
-                config.parallel = False
+            if sys.platform.startswith("win") and n_workers > 1:
+                self.logger.warning("Parallel processing may be less stable on Windows")
+        else:
+            # Sequential processing: treat as parallel with 1 worker
+            n_workers = 1
         
-        # Sequential processing (or fallback from parallel)
-        if not config.parallel or total_frames == 1:
-            self.logger.info(f"Processing {total_frames} frames sequentially")
-            processed = 0
-
-            for i, atoms in enumerate(structures):
-                frame_dir = output_dir / f"frame_{i:04d}"
-                frame_dir.mkdir(exist_ok=True)
-
-                result = self._process_single_frame(atoms, absorber, frame_dir, config)
-                if result is not None:
-                    chi, k = result
-
-                    # Set k_ref from first successful frame
+        self.logger.info(f"Processing {total_frames} frames with {n_workers} worker{'s' if n_workers > 1 else ''} ({'parallel' if n_workers > 1 else 'sequential'})")
+        
+        try:
+            # Always use the parallel framework (even for n_workers=1)
+            # The multiprocessing framework handles encoding properly in worker processes
+            with mp.Pool(n_workers) as pool:
+                # Create worker tasks - include cache information
+                tasks = [(i, atoms, absorber, output_dir, config, False, self.cache_dir) for i, atoms in enumerate(structures)]
+                
+                # Use imap for incremental progress updates
+                results_iter = pool.imap(self._process_frame_worker, tasks)
+                
+                # Process results as they complete
+                for result_idx, frame_result in enumerate(results_iter):
+                    if frame_result.error:
+                        self.logger.error(f"Frame {frame_result.frame_idx} failed: {frame_result.error}")
+                        continue
+                    
                     if k_ref is None:
-                        k_ref = k.copy()
-
-                    # Interpolate to common grid if needed
-                    if not np.array_equal(k, k_ref):
-                        chi_interp = np.interp(k_ref, k, chi, left=0, right=0)
+                        k_ref = frame_result.k.copy()
+                    
+                    # Interpolate to common k-grid if needed
+                    if not np.array_equal(frame_result.k, k_ref):
+                        chi_interp = np.interp(k_ref, frame_result.k, frame_result.chi, left=0, right=0)
                     else:
-                        chi_interp = chi
-
-                    # Add interpolated chi to the list for averaging
+                        chi_interp = frame_result.chi
+                    
                     chi_list.append(chi_interp)
-
-                    # Create group with common k-grid
+                    
+                    # Create frame group for plotting
                     frame_group = Group()
                     frame_group.k = k_ref.copy()
                     frame_group.chi = chi_interp
-                    xftf(frame_group, kweight=config.kweight, window=config.window,
-                        dk=config.dk, kmin=config.kmin, kmax=config.kmax)
+                    xftf(frame_group, kweight=config.kweight, window=config.window, 
+                         dk=config.dk, kmin=config.kmin, kmax=config.kmax)
                     individual_groups.append(frame_group)
-
-                processed += 1
-                reporter.update(processed, total_frames, f"Processed {processed}/{total_frames}")
+                    
+                    # Update progress after each completed frame
+                    reporter.update(len(chi_list), total_frames, f"Processed {len(chi_list)}/{total_frames}")
+                        
+        except Exception as e:
+            self.logger.error(f"Frame processing failed: {e}")
+            raise RuntimeError(f"Failed to process trajectory frames: {e}")
 
         # Final validation
         if not chi_list:
@@ -615,11 +579,13 @@ class LarchWrapper:
             plot_paths=plot_paths,
             processing_mode=ProcessingMode.TRAJECTORY,
             nframes=len(chi_list),
-            individual_frame_groups=individual_groups
+            individual_frame_groups=individual_groups,
+            cache_hits=cache_hits,
+            cache_misses=cache_misses
         )
 
     @staticmethod
-    def _process_frame_worker(frame_data: tuple) -> tuple:
+    def _process_frame_worker(frame_data: tuple) -> FrameProcessingResult:
         """Worker function for parallel frame processing - now uses utility functions."""
         try:
             from .feff_utils import generate_feff_input, run_feff_calculation, read_feff_output
@@ -633,7 +599,7 @@ class LarchWrapper:
                 cached_result = load_from_cache(cache_key, cache_dir, config.force_recalculate)
                 if cached_result is not None:
                     chi, k = cached_result
-                    return chi, k, frame_idx, None
+                    return FrameProcessingResult(chi=chi, k=k, frame_idx=frame_idx)
             
             # Setup frame directory
             if is_single:
@@ -655,15 +621,17 @@ class LarchWrapper:
                 cache_key = get_cache_key(atoms, absorber, config)
                 save_to_cache(cache_key, chi, k, cache_dir)
             
-            return chi, k, frame_idx, None
+            return FrameProcessingResult(chi=chi, k=k, frame_idx=frame_idx)
             
         except Exception as e:
-            return None, None, frame_idx, str(e)
+            error_msg = f"{str(e)}\n{traceback.format_exc()}"
+            return FrameProcessingResult(error=error_msg, frame_idx=frame_idx)
 
     def process(self, structure: Union[Path, str, Atoms], absorber: str, output_dir: Path,
                 config: Optional[FeffConfig] = None, trajectory: bool = False,
                 show_plot: bool = False, plot_individual_frames: bool = False,
                 frame_index: Optional[int] = None,
+                plot_style: str = "publication",
                 progress_callback: Optional[Callable[[int, int, str], None]] = None) -> ProcessingResult:
         config = config or FeffConfig()
         output_dir = Path(output_dir).resolve()
@@ -672,16 +640,16 @@ class LarchWrapper:
             if trajectory:
                 raise ValueError("trajectory mode not supported for single Atoms")
             result = self._process_single_frame(structure, absorber, output_dir, config)
-            if result is None:
-                raise FEFFCalculationError("Single frame processing failed")
-            chi, k = result
+            if result.error or result.chi is None or result.k is None:
+                raise FEFFCalculationError(f"Single frame processing failed: {result.error}")
+            
             group = Group()
-            group.k = k
-            group.chi = chi
+            group.k = result.k
+            group.chi = result.chi
             xftf(group, kweight=config.kweight, window=config.window, dk=config.dk,
                  kmin=config.kmin, kmax=config.kmax)
-            plot_paths = self.plot_results(group, output_dir, "EXAFS_FT", show_plot=show_plot, 
-                                          absorber=absorber, edge=config.edge)
+            plot_paths = self.plot_results(group, output_dir, "EXAFS_FT", show_plot=show_plot,
+                                           plot_style=plot_style, absorber=absorber, edge=config.edge)
             return ProcessingResult(exafs_group=group, plot_paths=plot_paths,
                                   processing_mode=ProcessingMode.SINGLE_FRAME)
 
@@ -691,10 +659,16 @@ class LarchWrapper:
         if not isinstance(structures, list):
             structures = [structures]
 
-        reporter = TQDMReporter() if progress_callback is None else CallbackReporter(progress_callback)
-        reporter.update(0, len(structures), "Starting")
-
-        return self._process_structures_chunked(structures, absorber, output_dir, config, reporter, plot_individual_frames)
+        # Initialize reporter with proper fallback behavior
+        if progress_callback is None:
+            reporter = TQDMReporter(len(structures), "Starting")
+        else:
+            reporter = CallbackReporter(progress_callback)
+        
+        try:
+            return self._process_structures_chunked(structures, absorber, output_dir, config, reporter, plot_individual_frames)
+        finally:
+            reporter.close()
 
     def _construct_ase_index(self, trajectory: bool, frame_index: Optional[int], sample_interval: int) -> str:
         if frame_index is not None:
@@ -705,6 +679,7 @@ class LarchWrapper:
             return "-1"
 
     def get_diagnostics(self) -> Dict[str, Any]:
+        cache_info = self.get_cache_info()
         return {
             "system": {"platform": os.name, "python": sys.version.split()[0]},
             "dependencies": {
@@ -713,6 +688,11 @@ class LarchWrapper:
                 "numba": NUMBA_AVAILABLE,
             },
             "presets": list(PRESETS.keys()),
+            "cache": {
+                "enabled": cache_info["enabled"],
+                "files": cache_info.get("files", 0),
+                "size_mb": cache_info.get("size_mb", 0)
+            }
         }
 
     def print_diagnostics(self):
@@ -722,5 +702,7 @@ class LarchWrapper:
         print("=" * 50)
         print(f"System: {diag['system']['platform']} | Python: {diag['system']['python']}")
         print(f"Dependencies: ASE ✓ | Numba {'✓' if diag['dependencies']['numba'] else '✗'}")
+        print(f"Cache: {'Enabled' if diag['cache']['enabled'] else 'Disabled'} | "
+              f"{diag['cache']['files']} files | {diag['cache']['size_mb']} MB")
         print(f"Available presets: {', '.join(diag['presets'])}")
         print("=" * 50)

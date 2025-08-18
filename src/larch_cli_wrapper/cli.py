@@ -8,7 +8,7 @@ from rich.progress import (
     Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 )
 
-from .wrapper import LarchWrapper, EXAFSProcessingError
+from .wrapper import LarchWrapper, EXAFSProcessingError, ProcessingResult
 from .feff_utils import EdgeType, FeffConfig, PRESETS
 
 app = typer.Typer(
@@ -63,7 +63,7 @@ def generate_inputs(
     output_dir: Path = typer.Option(Path("outputs"), "--output", "-o", help="Output directory"),
     config_file: Path = typer.Option(None, "--config", "-c", help="YAML configuration file"),
     preset: str = typer.Option(None, "--preset", "-p", help=f"Configuration preset: {list(PRESETS.keys())}"),
-    method: str = typer.Option("larixite", "--method", "-m", help="Method: larixite, pymatgen"),
+    method: str = typer.Option("auto", "--method", "-m", help="Method: auto, larixite, pymatgen"),
 ):
     """Generate FEFF input files only."""
     if not structure.exists():
@@ -76,11 +76,16 @@ def generate_inputs(
         config.method = method
         with LarchWrapper(verbose=True, cache_dir=Path.home() / ".larch_cache") as wrapper:
             console.print(f"[cyan]Generating FEFF input for {absorber} using {config.method} method...[/cyan]")
+            
+            # Generate FEFF input using the unified method
             input_path = wrapper.generate_feff_input(structure, absorber, output_dir, config)
+            
             console.print(f"[green]✓ FEFF input generated: {input_path}[/green]")
+            console.print(f"  Check {input_path / 'feff.inp'} for details")
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
+
 
 @app.command("run-feff")
 def run_feff_calculation(
@@ -171,6 +176,7 @@ def process(
                     else:
                         progress.update(task_id, completed=current, description=description)
 
+                # Process the structure
                 result = wrapper.process(
                     structure=structure,
                     absorber=absorber,
@@ -178,28 +184,46 @@ def process(
                     config=config,
                     trajectory=trajectory,
                     show_plot=show_plot,
+                    plot_style=plot_style,
                     plot_individual_frames=plot_individual_frames,
                     progress_callback=progress_callback,
                 )
 
                 # Ensure completion
                 if task_id is not None:
-                    progress.update(task_id, completed=total_frames, description="[green]\u2713 Complete![/green]")
+                    progress.update(task_id, completed=total_frames, description="[green]✓ Complete![/green]")
 
             # Show results
             console.print("\n[bold green]✓ Processing completed![/bold green]")
             console.print(f"  Method: {config.method}")
             console.print(f"  Output: {output_dir}")
+            
+            # Display cache statistics if available
+            if hasattr(result, 'cache_hits') and hasattr(result, 'cache_misses'):
+                total = result.cache_hits + result.cache_misses
+                if total > 0:
+                    hit_rate = (result.cache_hits / total) * 100
+                    console.print(f"  Cache: {result.cache_hits} hits / {result.cache_misses} misses ({hit_rate:.1f}%)")
+            
             formats = ", ".join(f"{k.upper()}" for k in result.plot_paths.keys())
             console.print(f"  Plots: {formats}")
+            
             if hasattr(result, "nframes"):
                 console.print(f"  Frames processed: {result.nframes}")
+                
+            # Show plot paths
+            console.print("\n[bold]Generated plots:[/bold]")
+            for fmt, path in result.plot_paths.items():
+                console.print(f"  {fmt.upper()}: {path}")
 
     except EXAFSProcessingError as e:
         console.print(f"[red]Processing error: {e}[/red]")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
+        # For debugging, could show more details in verbose mode
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
         raise typer.Exit(1)
 
 
@@ -230,32 +254,66 @@ def process_feff_output(
 
             if frame_dirs:
                 console.print(f"[cyan]Processing trajectory output with {len(frame_dirs)} frames...[/cyan]")
-                # Reuse the main process method with a virtual structure path
-                # Trick: pass feff_dir as "structure" and use special indexing
-                result = wrapper.process(
-                    structure=feff_dir,  # Not used directly
-                    absorber="auto",     # Will be ignored
-                    output_dir=output_dir,
-                    config=config,
-                    trajectory=True,
-                    show_plot=show_plot,
-                    plot_individual_frames=plot_individual_frames,
-                    plot_style=plot_style
-                )
-                console.print(f"[green]\u2713 Trajectory processed[/green]")
+                
+                # For trajectory processing, we need to create a virtual structure path
+                # that the wrapper can process as a trajectory
+                with create_progress() as progress:
+                    task_id = None
+                    total_frames = len(frame_dirs)
+
+                    def progress_callback(current: int, total: int, description: str):
+                        nonlocal task_id
+                        if task_id is None:
+                            task_id = progress.add_task(description, total=total)
+                        progress.update(task_id, completed=current, description=description)
+
+                    # Process using the main process method
+                    result = wrapper.process(
+                        structure=feff_dir,  # Not used directly for trajectory output
+                        absorber="auto",     # Will be determined from the data
+                        output_dir=output_dir,
+                        config=config,
+                        trajectory=True,
+                        show_plot=show_plot,
+                        plot_style=plot_style,
+                        plot_individual_frames=plot_individual_frames,
+                        progress_callback=progress_callback,
+                    )
+
+                console.print(f"[green]✓ Trajectory processed[/green]")
                 console.print(f"  Output: {output_dir}")
+                console.print(f"  Frames processed: {result.nframes}")
+                
+                # Show plot paths
+                console.print("\n[bold]Generated plots:[/bold]")
+                for fmt, path in result.plot_paths.items():
+                    console.print(f"  {fmt.upper()}: {path}")
 
             elif chi_file.exists():
                 console.print(f"[cyan]Processing single FEFF output...[/cyan]")
                 exafs_group = wrapper.process_feff_output(feff_dir, config)
+                
+                # Create a proper ProcessingResult for consistent output
                 plot_paths = wrapper.plot_results(
                     exafs_group, output_dir, filename_base="EXAFS_FT",
                     show_plot=show_plot, plot_style=plot_style
                 )
+                
+                result = ProcessingResult(
+                    exafs_group=exafs_group,
+                    plot_paths=plot_paths,
+                    processing_mode="single_frame",
+                )
+                
                 formats = ", ".join(f"{k.upper()}" for k in plot_paths.keys())
-                console.print(f"[green]\u2713 Single output processed[/green]")
+                console.print(f"[green]✓ Single output processed[/green]")
                 console.print(f"  Plots: {formats}")
                 console.print(f"  Output: {output_dir}")
+                
+                # Show plot paths
+                console.print("\n[bold]Generated plots:[/bold]")
+                for fmt, path in plot_paths.items():
+                    console.print(f"  {fmt.upper()}: {path}")
             else:
                 console.print(f"[red]Error: No FEFF output (chi.dat or frame_*) found in {feff_dir}[/red]")
                 raise typer.Exit(1)
@@ -305,7 +363,7 @@ user_tag_settings: {dict(config.user_tag_settings) or '{}'}
 #   PRINT: "1 0 0 0 0 3"    # Verbosity levels
 """
         output_file.write_text(yaml_content)
-        console.print(f"[green]\u2713 Configuration example created: {output_file}[/green]")
+        console.print(f"[green]✓ Configuration example created: {output_file}[/green]")
         console.print(f"  Based on '{preset}' preset")
         console.print("[dim]Note: Empty user_tag_settings uses larixite defaults[/dim]")
 
