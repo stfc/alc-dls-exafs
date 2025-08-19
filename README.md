@@ -1,406 +1,269 @@
-# ALS/DLS-Spectroscopy EXAFS Project
+# EXAFS Processing Pipeline
 
-A modern, robust CLI wrapper for larch EXAFS processing with support for single structures and MD trajectories.
+A comprehensive CLI and interactive toolkit for Extended X-ray Absorption Fine Structure (EXAFS) processing using Larch and FEFF.
 
-## Installation
+## Features
 
-### Basic Installation
+- 🚀 **Interactive Marimo App**: Web-based interface for EXAFS processing
+- 🖥️ **Command Line Interface**: Streamlined CLI for batch processing
+- 📊 **Multiple Processing Modes**: Single structure, trajectory, and ensemble processing
+- 🔧 **FEFF Integration**: Automated FEFF input generation and calculation
+- 📈 **Advanced Plotting**: Publication-ready plots with matplotlib and plotly
+- ⚡ **Parallel Processing**: Multi-core support for large datasets
+- 💾 **Smart Caching**: Intelligent caching to avoid redundant calculations
+
+## Quick Start
+
+### Installation
+
+#### Linux/macOS
+
 ```bash
-pip install -r requirements.txt
-```
+# Clone the repository
+git clone https://github.com/stfc/alc-dls-exafs.git
+cd alc-dls-exafs
 
-### Development Installation
-```bash
-# Install the package in editable mode
+# Install with pip (recommended)
 pip install -e .
 
-# Or install with development dependencies
-pip install -e .
-pip install -r requirements-dev.txt
-
-# Or use the Makefile for complete setup
-make dev-setup
-```
-
-### Package Installation (Recommended)
-
-Once installed, the CLI is available system-wide:
-
-```bash
-# Install and use the CLI command
-pip install -e .
-larch-cli structure structure.cif Fe --output-dir results
-
-# Or use the module interface
-python -m larch_cli_wrapper.cli structure structure.cif Fe --output-dir results
-```
-
-### Optional Dependencies
-
-The package supports several optional feature sets:
-
-```bash
-# Advanced features (pymatgen for enhanced FEFF parameters)
-pip install -e .[advanced]
-
-# Performance optimization (numba for fast trajectory processing)  
-pip install -e .[performance]
-
-# All optional features
+# Or with all optional dependencies
 pip install -e .[full]
-
-# Development tools (testing, linting, etc.)
-pip install -e .[dev]
 ```
 
-## Larch CLI Wrapper
+#### Windows
 
-This project provides a powerful, user-friendly CLI wrapper around larch for EXAFS processing. The wrapper supports both single structure analysis and time-averaged MD trajectory processing with cross-platform compatibility and performance optimization.
+```powershell
+# Clone the repository
+git clone https://github.com/stfc/alc-dls-exafs.git
+cd alc-dls-exafs
 
-### Key Features
+# Install with pip
+pip install -e .
 
-- **🏗️ Modular Python API**: Use `LarchWrapper` class for programmatic access
-- **⚡ Streamlined CLI**: Two main commands (`structure`, `trajectory`) plus utilities  
-- **🔄 Complete Pipeline**: Run FEFF generation, calculation, and post-processing in one command
-- **🎯 Flexible Processing**: Process individual structures or entire MD trajectories
-- **📊 Rich Output**: Colored terminal output with progress indicators and diagnostics
-- **📈 Customizable Plots**: Generate publication-quality PDF and SVG plots
-- **🚀 Performance Optimized**: Optional numba acceleration for trajectory processing
-- **⚡ Parallel Processing**: Multi-core support for trajectory processing with automatic worker management
-- **🌍 Cross-Platform**: Windows, macOS, and Linux compatibility
-
-### Quick Start
-
-#### CLI Usage
-
-Process a single structure (complete pipeline):
-```bash
-larch-cli structure examples/structure.cif Fe --output-dir results
+# Or with all optional dependencies
+pip install -e .[full]
 ```
 
-Process MD trajectory (time-averaged EXAFS):
-```bash
-larch-cli trajectory trajectory.xyz Au --interval 10 --output-dir traj_results
-```
-
-Generate FEFF input only:
-```bash
-larch-cli structure structure.cif Fe --input-only --output-dir feff_input
-```
-#### Python API Usage
-
-```python
-from pathlib import Path
-from larch_cli_wrapper.wrapper import LarchWrapper
-
-# Initialize wrapper
-wrapper = LarchWrapper()
-
-# Process single structure - complete pipeline
-exafs_group, plot_paths = wrapper.run_full_pipeline(
-    structure_path=Path('structure.cif'),
-    absorber='Fe',
-    output_dir=Path('feff_output')
-)
-
-# Process MD trajectory with time-averaging
-trajectory_group, plot_paths = wrapper.process_trajectory(
-    trajectory_path=Path('trajectory.xyz'),
-    absorber='Au',
-    output_dir=Path('traj_output'),
-    sample_interval=5  # Process every 5th frame
-)
-
-# Process MD trajectory with parallel processing (faster)
-trajectory_group, plot_paths = wrapper.process_trajectory(
-    trajectory_path=Path('trajectory.xyz'),
-    absorber='Au',
-    output_dir=Path('traj_output'),
-    sample_interval=5,
-    parallel=True,      # Enable parallel processing
-    n_workers=4         # Use 4 parallel workers
-)
-
-# Step-by-step processing for more control
-input_file = wrapper.generate_feff_input(Path('structure.cif'), 'Fe', Path('feff'))
-success = wrapper.run_feff(Path('feff'))
-exafs_group = wrapper.process_feff_output(Path('feff'))
-plot_paths = wrapper.plot_fourier_transform(exafs_group, show_plot=True)
-```
-
-### CLI Commands
-
-The CLI provides 5 focused commands:
-
-#### Main Processing Commands
-
-##### `structure` - Single Structure Processing
-Process a single structure from any supported format (CIF, XYZ, VASP, PDB, etc.).
+#### Alternative: Using uv (faster)
 
 ```bash
-larch-cli structure STRUCTURE_FILE ABSORBER [OPTIONS]
+# Install uv if not already installed
+pip install uv
+
+# Install the project
+uv pip install -e .
 ```
 
-**Key Features:**
-- Supports all ASE-compatible structure formats
-- Can extract specific frames from trajectory files
-- Full pipeline or input-only mode
-- Customizable EXAFS parameters
+### Running the Interactive App
 
-**Example:**
-```bash
-larch-cli structure Hematite.cif Fe --output-dir results --kweight 3 --show
-```
-
-##### `trajectory` - MD Trajectory Processing  
-Process MD trajectories for time-averaged EXAFS analysis.
+Launch the interactive Marimo application for a web-based EXAFS processing experience:
 
 ```bash
-larch-cli trajectory TRAJECTORY_FILE ABSORBER [OPTIONS]
+marimo run exafs_pipeline.py
 ```
 
-**Key Features:**
-- Handles large trajectory files efficiently
-- **Parallel processing** for improved performance on multi-core systems
-- Optional numba acceleration for performance
-- Configurable frame intervals
-- Time-averaged spectral analysis
+This will open a web interface in your browser where you can:
+- Upload structure files (CIF, XYZ, POSCAR, etc.)
+- Configure FEFF parameters interactively
+- Process single structures or trajectories
+- Visualize results with interactive plots
+- Export data and figures
 
-**Example:**
-```bash
-# Sequential processing (traditional)
-larch-cli trajectory md_run.xyz Au --interval 10 --output-dir traj_analysis
+### Command Line Usage
 
-# Parallel processing (faster on multi-core systems)
-larch-cli trajectory md_run.xyz Au --interval 10 --output-dir traj_analysis --parallel --workers 4
-```
+The CLI provides a streamlined interface for batch processing:
 
-#### Utility Commands
-
-##### `run-feff` - Execute FEFF Calculation
-Run FEFF calculation on existing input files.
+#### Process a Single Structure
 
 ```bash
-larch-cli run-feff FEFF_DIR [OPTIONS]
+# Basic EXAFS processing
+larch-cli process structure.cif Fe --output results/
+
+# With custom parameters
+larch-cli process structure.cif Fe \
+  --output results/ \
+  --edge K \
+  --kmin 3.0 \
+  --kmax 12.0 \
+  --kweight 3
 ```
 
-##### `process` - Post-Process FEFF Output
-Process existing FEFF output and generate plots.
+#### Process a Trajectory
 
 ```bash
-larch-cli process FEFF_DIR [OPTIONS]
+# Process MD trajectory
+larch-cli process trajectory.xyz Fe \
+  --trajectory \
+  --output results/trajectory/ \
+  --parallel \
+  --n-workers 4
 ```
 
-##### `version` - System Diagnostics
-Show comprehensive system information and diagnostics.
+#### Generate FEFF Input Only
 
 ```bash
-larch-cli version
+# Generate FEFF input files without running calculation
+larch-cli generate structure.cif Fe --output feff_input/
 ```
 
-**Displays:**
-- Package version and dependencies
-- FEFF executable paths and versions
-- Python environment details
-- Optional dependency status
+#### Run FEFF Calculation
 
-### Common Options
-
-All main commands support these options:
-
-- `--output-dir, -o`: Output directory (default varies by command)
-- `--input-only`: Generate FEFF input only, skip calculation
-- `--method, -m`: Method (auto, larixite, pymatgen)  
-- `--spectrum, -s`: Spectrum type (EXAFS, XANES, etc.)
-- `--edge`: Absorption edge (K, L1, L2, L3, etc.)
-- `--radius, -r`: Cluster radius in Angstroms
-- `--kweight, -k`: k-weighting for Fourier transform  
-- `--window, -w`: Window function (hanning, kaiser, etc.)
-- `--kmin/kmax`: k-range for Fourier transform
-- `--show/--no-show`: Display plots interactively
-
-### Advanced Usage Examples
-
-#### Custom Fourier Transform Parameters
-```python
-from larch_cli_wrapper.wrapper import LarchWrapper
-
-wrapper = LarchWrapper()
-exafs_group = wrapper.process_feff_output(
-    feff_dir,
-    kweight=3,          # Higher k-weighting
-    window='kaiser',    # Different window function  
-    kmin=3.0,          # Custom k-range
-    kmax=12.0
-)
+```bash
+# Run FEFF in existing directory
+larch-cli run-feff feff_input/
 ```
 
-#### Trajectory Processing with Performance Optimization
-```python
-# Install performance extras first: pip install -e .[performance]
-trajectory_group, plots = wrapper.process_trajectory(
-    trajectory_path,
-    absorber='Au',
-    output_dir=Path('trajectory_output'),
-    frame_interval=10,           # Every 10th frame
-    use_numba_optimization=True  # Fast averaging (requires numba)
-)
+### Configuration Files
+
+Use YAML configuration files for complex setups:
+
+```yaml
+# config.yaml
+spectrum_type: "EXAFS"
+edge: "K"
+radius: 8.0
+kmin: 2.0
+kmax: 14.0
+kweight: 2
+method: "template"
+parallel: true
+n_workers: 4
+
+user_tag_settings:
+  S02: "1.0"
+  CONTROL: "1 1 1 1 1 1"
+  NLEG: "6"
 ```
-
-#### Custom Plot Generation
-```python
-plot_paths = wrapper.plot_fourier_transform(
-    exafs_group,
-    output_dir=Path('custom_plots'),
-    filename_base='my_spectrum',
-    kweight=2,
-    show_plot=False,
-    save_formats=['pdf', 'svg', 'png']  # Multiple formats
-)
-```
-
-#### Advanced FEFF Input Generation
-```python
-# Using pymatgen for enhanced FEFF parameters (requires advanced extras)
-input_file = wrapper.generate_feff_input(
-    structure_path,
-    absorber='Fe',
-    output_dir=Path('advanced_feff'),
-    method='pymatgen',    # Enhanced parameter sets
-    spectrum_type='XANES',
-    edge='L3',
-    radius=12.0
-)
-```
-
-#### Error Handling and Diagnostics
-```python
-import logging
-from larch_cli_wrapper.wrapper import LarchWrapper
-
-# Enable detailed logging
-logging.basicConfig(level=logging.INFO)
-
-wrapper = LarchWrapper()
-
-try:
-    # Check system capabilities
-    if wrapper.check_feff_executable():
-        result = wrapper.run_full_pipeline(structure_path, absorber, output_dir)
-    else:
-        print("FEFF executable not found!")
-        
-except FileNotFoundError as e:
-    print(f"File not found: {e}")
-except RuntimeError as e:
-    print(f"FEFF calculation failed: {e}")
-except Exception as e:
-    print(f"Unexpected error: {e}")
-```
-
-### Migration from Legacy Scripts
-
-If migrating from older EXAFS processing scripts:
-
-**Before (manual processing):**
-```python
-from larch.xafs.feffrunner import feff8l
-from larch.xafs import xftf
-# ... extensive manual setup and processing
-```
-
-**After (using wrapper):**
-```python
-from larch_cli_wrapper.wrapper import LarchWrapper
-
-wrapper = LarchWrapper()
-exafs_group, plots = wrapper.run_full_pipeline(structure_path, absorber, output_dir)
-```
-
-See migration examples in `examples/` directory.
 
 ## Project Structure
 
 ```
-├── src/larch_cli_wrapper/        # Main package
-│   ├── __init__.py
-│   ├── wrapper.py               # Core LarchWrapper class
-│   └── cli.py                   # CLI interface using typer
-├── examples/                    # Example workflows and data  
-│   ├── example_wrapper_usage.py # API usage examples
-│   ├── example_pymatgen_usage.py # Advanced pymatgen examples
-│   └── simplified_example.py   # Basic usage patterns
-├── docs/                       # Comprehensive documentation
-│   ├── quick_start.md          # Getting started guide
-│   ├── project_structure.md    # Detailed project organization
-│   └── pymatgen_integration.md # Advanced features guide
-├── tests/                      # Comprehensive test suite
-├── pyproject.toml              # Modern Python packaging
-├── requirements.txt            # Core dependencies
-└── requirements-dev.txt        # Development dependencies
+├── src/larch_cli_wrapper/      # Core package
+│   ├── cli.py                  # Command line interface
+│   ├── wrapper.py              # Main processing wrapper
+│   ├── feff_utils.py           # FEFF utilities
+│   └── cache_utils.py          # Caching system
+├── exafs_pipeline.py           # Interactive Marimo app
+└── tests/                      # Test suite
 ```
 
 ## Dependencies
 
-### Core Dependencies
-- **xraylarch** (≥0.9.47): EXAFS processing engine and FEFF interface
-- **typer** (≥0.12.0): Modern CLI framework with rich features
-- **rich**: Beautiful terminal output with progress indicators  
-- **matplotlib** (≥3.5): Publication-quality plotting
-- **ase** (≥3.22.1): Atomic structure handling and file I/O
-- **larixite** (≥0.1.0): Optimized CIF to FEFF conversion
-- **numpy** (≥1.21): Numerical computing foundation
+### Core Requirements
+- **Python** ≥ 3.10
+- **xraylarch** ≥ 0.9.47 - EXAFS analysis library
+- **typer** ≥ 0.12.0 - CLI framework
+- **rich** - Terminal formatting
+- **matplotlib** ≥ 3.5 - Plotting
+- **marimo** ≥ 0.14.16 - Interactive notebooks
+- **ase** ≥ 3.22.1 - Atomic structure handling
 
 ### Optional Dependencies
-- **pymatgen** (≥2022.7): Advanced spectrum types and enhanced FEFF parameters
-- **numba** (≥0.56): High-performance trajectory processing acceleration
+- **pymatgen** ≥ 2022.7 - Alternative FEFF input generator
 
-## Development
+## Contributing
 
-This project uses modern Python packaging with `pyproject.toml` and includes comprehensive development tooling.
+We welcome contributions! Here's how to get started:
 
 ### Development Setup
-```bash
-# Complete development setup
-make dev-setup
 
-# Or manually:
-pip install -e .
-pip install -r requirements-dev.txt
-pre-commit install
+1. **Fork and clone the repository:**
+```bash
+git clone https://github.com/your-username/alc-dls-exafs.git
+cd alc-dls-exafs
 ```
 
-### Code Quality Tools
-- **Black**: Code formatting
-- **isort**: Import sorting  
-- **flake8**: Linting
-- **mypy**: Type checking
-- **pytest**: Testing
-- **pre-commit**: Git hooks for code quality
-
-### Common Commands
+2. **Create a virtual environment:**
 ```bash
-make help              # Show all available commands
-make test              # Run tests
-make test-coverage     # Run tests with coverage
-make lint              # Run linting
-make format            # Format code
-make type-check        # Type checking
-make build             # Build package
-make clean             # Clean build artifacts
+# Using venv
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Or using conda
+conda create -n exafs-dev python=3.11
+conda activate exafs-dev
 ```
+
+3. **Install in development mode:**
+```bash
+pip install -e .[dev]
+```
+
+### Development Workflow
+
+1. **Create a feature branch:**
+```bash
+git checkout -b feature/your-feature-name
+```
+
+2. **Make changes and add tests:**
+```bash
+# Run tests
+pytest tests/
+
+# Run linting
+flake8 src/
+black src/ tests/
+
+# Type checking
+mypy src/
+```
+
+3. **Commit and push:**
+```bash
+git add .
+git commit -m "Add your feature description"
+git push origin feature/your-feature-name
+```
+
+4. **Create a Pull Request** on GitHub
+
+### Code Style
+
+- Follow [PEP 8](https://pep8.org/) for Python code style
+- Use [Black](https://black.readthedocs.io/) for code formatting
+- Add type hints where appropriate
+- Write docstrings for all public functions and classes
+- Include tests for new functionality
 
 ### Testing
+
+Run the test suite:
 ```bash
-# Run all tests
+# All tests
 pytest
 
-# Run with coverage
-pytest --cov=larch_wrapper --cov=cli --cov-report=html
+# Specific test file
+pytest tests/test_wrapper.py
 
-# Run specific tests
-pytest tests/test_larch_wrapper.py
+# With coverage
+pytest --cov=larch_cli_wrapper
 ```
 
-### Project Structure
-See `docs/project_structure.md` for detailed information about the project organization.
+### Documentation
+
+Update documentation when adding features:
+- Update relevant files in `docs/`
+- Update this README if needed
+- Add docstrings to new functions/classes
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## Support
+
+- **Documentation**: TODO
+- **Issues**: Report bugs and request features on [GitHub Issues](https://github.com/stfc/alc-dls-exafs/issues)
+- **Discussions**: Join discussions on the project's GitHub page
+
+## Citation
+
+TODO
+
+
+## Acknowledgments
+
+- Built on top of the excellent [Larch](https://xraypy.github.io/xraylarch/) project
+- FEFF calculations powered by the [FEFF Project](https://feff.phys.washington.edu/)
+- Structure handling via [ASE](https://wiki.fysik.dtu.dk/ase/) and [pymatgen](https://pymatgen.org/)
