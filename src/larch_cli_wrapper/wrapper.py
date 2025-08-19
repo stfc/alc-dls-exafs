@@ -165,7 +165,8 @@ class ProcessingResult:
 # ================== PARALLEL PROCESSING ==================
 class ParallelProcessor:
     def __init__(self, n_workers: Optional[int] = None):
-        self.n_workers = n_workers or min(mp.cpu_count() - 1, 8)
+        # Manually set number of workers, or use half the available CPU cores
+        self.n_workers = n_workers or mp.cpu_count() // 2
 
     @contextmanager
     def process_pool(self):
