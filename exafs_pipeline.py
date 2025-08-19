@@ -6,27 +6,30 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
-    import marimo as mo
     import os
-    from pathlib import Path
-    import plotly.graph_objects as go
     import tempfile
     import traceback
+    from pathlib import Path
     from types import SimpleNamespace
+
+    import marimo as mo
+    import plotly.graph_objects as go
 
     # Package imports
     try:
+        from larch_cli_wrapper.feff_utils import PRESETS, EdgeType, FeffConfig
         from larch_cli_wrapper.wrapper import LarchWrapper, ProcessingMode
-        from larch_cli_wrapper.feff_utils import FeffConfig, PRESETS, EdgeType
     except ImportError:
         mo.stop(
-            mo.output.append(mo.md("""
+            mo.output.append(
+                mo.md("""
             **❌ Import Error**: `larch_cli_wrapper` not found.
 
             Make sure:
             - The package is installed (`pip install larch-cli-wrapper`)
             - Or run `pip install -e .` if this is a local package
-            """))
+            """)
+            )
         )
 
     # Constants
@@ -67,7 +70,7 @@ def _(mo):
 @app.cell
 def _(EdgeType, PRESETS, mo):
     form = (
-        mo.md('''
+        mo.md("""
         **EXAFS Processing Pipeline**
 
         Structure/Trajectory File: {structure_file}
@@ -91,19 +94,21 @@ def _(EdgeType, PRESETS, mo):
         Output Directory: {output_dir}
 
         {run_options}
-        ''')
+        """)
         .batch(
-            structure_file=mo.ui.file(label="Structure/Trajectory File", multiple=False),
-            absorber=mo.ui.text(label="Absorbing Species", placeholder="e.g. Fe, Cu, O"),
+            structure_file=mo.ui.file(
+                label="Structure/Trajectory File", multiple=False
+            ),
+            absorber=mo.ui.text(
+                label="Absorbing Species", placeholder="e.g. Fe, Cu, O"
+            ),
             edge=mo.ui.dropdown(
-                options=[e.name for e in EdgeType],
-                value="K",
-                label="Edge"
+                options=[e.name for e in EdgeType], value="K", label="Edge"
             ),
             processing_mode=mo.ui.radio(
                 options=["Single structure", "Trajectory (all frames)"],
                 value="Single structure",
-                label="Processing Mode"
+                label="Processing Mode",
             ),
             sample_interval=mo.ui.number(
                 label="Sample interval (trajectories only)",
@@ -113,26 +118,37 @@ def _(EdgeType, PRESETS, mo):
             preset=mo.ui.dropdown(
                 options={name.title(): name for name in PRESETS.keys()},
                 value="Quick",
-                label="Configuration Preset"
+                label="Configuration Preset",
             ),
-            parallel_settings=mo.ui.dictionary({
-                "parallel": mo.ui.checkbox(label="Enable parallel processing", value=True),
-                "n_workers": mo.ui.number(label="Number of workers (auto if blank)", value=None)
-            }),
+            parallel_settings=mo.ui.dictionary(
+                {
+                    "parallel": mo.ui.checkbox(
+                        label="Enable parallel processing", value=True
+                    ),
+                    "n_workers": mo.ui.number(
+                        label="Number of workers (auto if blank)", value=None
+                    ),
+                }
+            ),
             output_dir=mo.ui.text(
                 label="Output Directory",
                 value="outputs/exafs_pipeline",
-                placeholder="Directory for output files"
+                placeholder="Directory for output files",
             ),
-            run_options=mo.ui.dictionary({
-                "process_output_only": mo.ui.checkbox(label="Process existing FEFF outputs (skip FEFF run)", value=False),
-                "force_recalculate": mo.ui.checkbox(label="Force recalculate (ignore cache)", value=False),
-            })
+            run_options=mo.ui.dictionary(
+                {
+                    "process_output_only": mo.ui.checkbox(
+                        label="Process existing FEFF outputs (skip FEFF run)",
+                        value=False,
+                    ),
+                    "force_recalculate": mo.ui.checkbox(
+                        label="Force recalculate (ignore cache)", value=False
+                    ),
+                }
+            ),
         )
-        .form(
-            submit_button_label="Run EXAFS Processing",
-            bordered=True
-        ))
+        .form(submit_button_label="Run EXAFS Processing", bordered=True)
+    )
     form
     return (form,)
 
@@ -144,7 +160,7 @@ def _():
 
 @app.cell(hide_code=True)
 def _(mo):
-    plot_type =  mo.ui.radio(["χ(k)", "|χ(R)|"], value="χ(k)")
+    plot_type = mo.ui.radio(["χ(k)", "|χ(R)|"], value="χ(k)")
     # mo.center(plot_type)
     return (plot_type,)
 
@@ -159,13 +175,13 @@ def _(form, mo):
             **⚙️ Current Settings:**
             | Setting | Value |
             |--------|-------|
-            | 📁 Structure | {settings['structure_file'][0].name} |
-            | 🎯 Absorber | {settings.get('absorber', 'Not set')} |
-            | ⚡ Mode | {settings.get('processing_mode', 'Not set')} |
-            | 🔧 Preset | {settings.get('preset', 'Not set').title()} |
-            | 🚀 Parallel | {'Yes' if settings['parallel_settings']['parallel'] else 'No'} |
-            | 📝 Process Output Only | {'Yes' if settings['run_options']['process_output_only'] else 'No'} |
-            | 💾 Force Recalculate | {'Yes' if settings['run_options']['force_recalculate'] else 'No'} |
+            | 📁 Structure | {settings["structure_file"][0].name} |
+            | 🎯 Absorber | {settings.get("absorber", "Not set")} |
+            | ⚡ Mode | {settings.get("processing_mode", "Not set")} |
+            | 🔧 Preset | {settings.get("preset", "Not set").title()} |
+            | 🚀 Parallel | {"Yes" if settings["parallel_settings"]["parallel"] else "No"} |
+            | 📝 Process Output Only | {"Yes" if settings["run_options"]["process_output_only"] else "No"} |
+            | 💾 Force Recalculate | {"Yes" if settings["run_options"]["force_recalculate"] else "No"} |
         """)
     )
     return (settings,)
@@ -189,13 +205,21 @@ def _(
     def process_existing_outputs(wrapper, config, output_dir, absorber, is_traj):
         """Process existing FEFF outputs without running new calculations"""
         if is_traj:
-            frame_dirs = [d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith('frame_')]
+            frame_dirs = [
+                d
+                for d in output_dir.iterdir()
+                if d.is_dir() and d.name.startswith("frame_")
+            ]
             if not frame_dirs:
                 return mo.md(f"**❌ No trajectory frames found in {output_dir}**"), None
 
             result = wrapper.process(
-                output_dir, absorber, output_dir, config,
-                trajectory=True, plot_individual_frames=True
+                output_dir,
+                absorber,
+                output_dir,
+                config,
+                trajectory=True,
+                plot_individual_frames=True,
             )
             return success_message(result, is_traj, output_dir), result
         else:
@@ -211,10 +235,12 @@ def _(
         return SimpleNamespace(
             exafs_group=exafs_group,
             processing_mode=ProcessingMode.SINGLE_FRAME,
-            nframes=1
+            nframes=1,
         )
 
-    def process_new_file(wrapper, structure_file, config, output_dir, absorber, is_traj):
+    def process_new_file(
+        wrapper, structure_file, config, output_dir, absorber, is_traj
+    ):
         """Process new structure/trajectory file"""
         suffix = f".{structure_file.name.split('.')[-1]}"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
@@ -223,15 +249,17 @@ def _(
 
         try:
             with mo.status.progress_bar(
-                total=None,
+                total=100,
                 title="Processing EXAFS...",
                 subtitle="Starting...",
                 completion_title="✅ Processing Complete",
                 remove_on_exit=True,
             ) as bar:
+
                 def progress_callback(completed, total, desc):
                     bar.total = total
-                    if completed == 0: bar.total = total
+                    if completed == 0:
+                        bar.total = total
                     bar.update(increment=1, subtitle=desc)
 
                 result = wrapper.process(
@@ -241,11 +269,12 @@ def _(
                     config=config,
                     trajectory=is_traj,
                     plot_individual_frames=True,
-                    progress_callback=progress_callback
+                    progress_callback=progress_callback,
                 )
             return success_message(result, is_traj, output_dir), result
         finally:
-            if temp_path.exists(): os.unlink(temp_path)
+            if temp_path.exists():
+                os.unlink(temp_path)
 
     def success_message(result, is_traj, output_dir):
         """Generate success message based on processing mode"""
@@ -261,7 +290,11 @@ def _(
         """)
 
     # Main processing logic
-    if not settings or not settings.get("structure_file") or not settings.get("absorber"):
+    if (
+        not settings
+        or not settings.get("structure_file")
+        or not settings.get("absorber")
+    ):
         message, result = None, None
     else:
         structure_file = settings["structure_file"][0]
@@ -284,9 +317,22 @@ def _(
         try:
             with LarchWrapper(verbose=False, cache_dir=CACHE_DIR) as processing_wrapper:
                 if settings["run_options"]["process_output_only"]:
-                    message, result = process_existing_outputs(processing_wrapper, config, output_dir, processing_absorber, is_traj)
+                    message, result = process_existing_outputs(
+                        processing_wrapper,
+                        config,
+                        output_dir,
+                        processing_absorber,
+                        is_traj,
+                    )
                 else:
-                    message, result = process_new_file(processing_wrapper, structure_file, config, output_dir, processing_absorber, is_traj)
+                    message, result = process_new_file(
+                        processing_wrapper,
+                        structure_file,
+                        config,
+                        output_dir,
+                        processing_absorber,
+                        is_traj,
+                    )
         except Exception as e:
             message = mo.md(f"""
                 ### ❌ Processing Failed
@@ -302,7 +348,9 @@ def _(
 
 @app.cell
 def _(go, message, mo, plot_type, result, settings):
-    def create_plot(exafs_group, individual_frames, plot_type, show_legend, absorber, edge):
+    def create_plot(
+        exafs_group, individual_frames, plot_type, show_legend, absorber, edge
+    ):
         """Create plot based on selected options"""
         fig = go.Figure()
         common_layout = {
@@ -310,9 +358,23 @@ def _(go, message, mo, plot_type, result, settings):
             "plot_bgcolor": "white",
             "paper_bgcolor": "white",
             "margin": {"l": 80, "r": 30, "t": 50, "b": 70},
-            "xaxis": {"showline": True, "linewidth": 2, "linecolor": "black", "mirror": True, "gridcolor":"lightgray", "tickwidth":2},
-            "yaxis": {"showline": True, "linewidth": 2, "linecolor": "black", "mirror": True, "gridcolor":"lightgray", "tickwidth":2},
-            "legend": {"x": 0.02, "y": 0.95, "bgcolor": "rgba(0,0,0,0)"}
+            "xaxis": {
+                "showline": True,
+                "linewidth": 2,
+                "linecolor": "black",
+                "mirror": True,
+                "gridcolor": "lightgray",
+                "tickwidth": 2,
+            },
+            "yaxis": {
+                "showline": True,
+                "linewidth": 2,
+                "linecolor": "black",
+                "mirror": True,
+                "gridcolor": "lightgray",
+                "tickwidth": 2,
+            },
+            "legend": {"x": 0.02, "y": 0.95, "bgcolor": "rgba(0,0,0,0)"},
         }
 
         if plot_type == "χ(k)":
@@ -321,7 +383,7 @@ def _(go, message, mo, plot_type, result, settings):
                 title="EXAFS χ(k)",
                 xaxis_title="k [Å⁻¹]",
                 yaxis_title="χ(k)",
-                **common_layout
+                **common_layout,
             )
         else:
             add_ft_plot(fig, exafs_group, individual_frames, show_legend)
@@ -329,14 +391,20 @@ def _(go, message, mo, plot_type, result, settings):
                 title="Fourier Transform |χ(R)|",
                 xaxis_title="R [Å]",
                 yaxis_title="|χ(R)|",
-                **common_layout
+                **common_layout,
             )
 
         fig.add_annotation(
             text=f"{absorber} {edge} edge",
-            x=0.9, y=0.98, xref="paper", yref="paper",
-            showarrow=False, font={"size": 16},
-            bgcolor="white", bordercolor="black", borderwidth=1
+            x=0.9,
+            y=0.98,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+            font={"size": 16},
+            bgcolor="white",
+            bordercolor="black",
+            borderwidth=1,
         )
         return fig
 
@@ -344,43 +412,60 @@ def _(go, message, mo, plot_type, result, settings):
         """Add chi(k) plot traces"""
         if individual_frames:
             for i, frame in enumerate(individual_frames[:50]):  # Limit to 50 frames
-                fig.add_trace(go.Scatter(
-                    x=frame.k, y=frame.chi, name=f"Frame {i+1}",
-                    line={"width": 1, "color": "rgba(128,128,128,0.3)"},
-                    showlegend=show_legend and i == 0
-                ))
+                fig.add_trace(
+                    go.Scatter(
+                        x=frame.k,
+                        y=frame.chi,
+                        name=f"Frame {i + 1}",
+                        line={"width": 1, "color": "rgba(128,128,128,0.3)"},
+                        showlegend=show_legend and i == 0,
+                    )
+                )
 
-        if hasattr(exafs_group, 'chi_std') and individual_frames:
+        if hasattr(exafs_group, "chi_std") and individual_frames:
             k, chi, std = exafs_group.k, exafs_group.chi, exafs_group.chi_std
-            fig.add_trace(go.Scatter(
-                x=list(k) + list(k[::-1]),
-                y=list(chi + std) + list((chi - std)[::-1]),
-                fill='toself', fillcolor='rgba(0,0,0,0.1)',
-                line={"color": 'rgba(255,255,255,0)'},
-                showlegend=False
-            ))
+            fig.add_trace(
+                go.Scatter(
+                    x=list(k) + list(k[::-1]),
+                    y=list(chi + std) + list((chi - std)[::-1]),
+                    fill="toself",
+                    fillcolor="rgba(0,0,0,0.1)",
+                    line={"color": "rgba(255,255,255,0)"},
+                    showlegend=False,
+                )
+            )
 
-        fig.add_trace(go.Scatter(
-            x=exafs_group.k, y=exafs_group.chi,
-            name="χ(k) Average ± σ" if hasattr(exafs_group, 'chi_std') else "χ(k)",
-            line={"width": 2.5, "color": "black"}
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=exafs_group.k,
+                y=exafs_group.chi,
+                name="χ(k) Average ± σ" if hasattr(exafs_group, "chi_std") else "χ(k)",
+                line={"width": 2.5, "color": "black"},
+            )
+        )
 
     def add_ft_plot(fig, exafs_group, individual_frames, show_legend):
         """Add Fourier transform plot traces"""
         if individual_frames:
             for i, frame in enumerate(individual_frames[:50]):  # Limit to 50 frames
-                fig.add_trace(go.Scatter(
-                    x=frame.r, y=frame.chir_mag, name=f"Frame {i+1}",
-                    line={"width": 1, "color": "rgba(128,128,128,0.3)"},
-                    showlegend=show_legend and i == 0
-                ))
+                fig.add_trace(
+                    go.Scatter(
+                        x=frame.r,
+                        y=frame.chir_mag,
+                        name=f"Frame {i + 1}",
+                        line={"width": 1, "color": "rgba(128,128,128,0.3)"},
+                        showlegend=show_legend and i == 0,
+                    )
+                )
 
-        fig.add_trace(go.Scatter(
-            x=exafs_group.r, y=exafs_group.chir_mag,
-            name="|χ(R)| Average" if individual_frames else "|χ(R)|",
-            line={"width": 2.5, "color": "black"}
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=exafs_group.r,
+                y=exafs_group.chir_mag,
+                name="|χ(R)| Average" if individual_frames else "|χ(R)|",
+                line={"width": 2.5, "color": "black"},
+            )
+        )
 
     # Skip if no result
     if result is None:
@@ -393,15 +478,15 @@ def _(go, message, mo, plot_type, result, settings):
         show_legend = False
 
         # Get individual frames if they exist
-        individual_frames = getattr(result, 'individual_frame_groups', None)
+        individual_frames = getattr(result, "individual_frame_groups", None)
 
         fig = create_plot(
-            exafs_group, 
+            exafs_group,
             individual_frames,
             plot_type.value,
             show_legend,
             plot_absorber,
-            edge
+            edge,
         )
 
         plot_output = mo.vstack([mo.hstack([plot_type, fig], justify="start"), message])
@@ -417,8 +502,12 @@ def _(plot_output):
 
 @app.cell(hide_code=True)
 def _(clear_cache, mo, show_cache):
-    show_cache_info_button =  mo.ui.button(label="🔍 Show Cache Info", kind="neutral", on_click=show_cache)
-    clear_cache_button =  mo.ui.button(label="🗑️ Clear Cache", kind="danger", on_click=clear_cache)
+    show_cache_info_button = mo.ui.button(
+        label="🔍 Show Cache Info", kind="neutral", on_click=show_cache
+    )
+    clear_cache_button = mo.ui.button(
+        label="🗑️ Clear Cache", kind="danger", on_click=clear_cache
+    )
     return clear_cache_button, show_cache_info_button
 
 
@@ -446,15 +535,16 @@ def _(CACHE_DIR, LarchWrapper, mo):
                         | Property | Value |
                         |----------|-------|
                         | **Status** | ✅ Enabled |
-                        | **Directory** | `{info['cache_dir']}` |
-                        | **Files** | {info['files']} |
-                        | **Size** | {info['size_mb']} MB |
+                        | **Directory** | `{info["cache_dir"]}` |
+                        | **Files** | {info["files"]} |
+                        | **Size** | {info["size_mb"]} MB |
                     """)
 
         except Exception as e:
             message = mo.md(f"### ❌ Cache Error\n{str(e)}")
         mo.output.append(message)
         # return message
+
     return clear_cache, show_cache
 
 
@@ -465,7 +555,7 @@ def _():
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(f"""## 🗑️ Cache Management""")
+    mo.md("""## 🗑️ Cache Management""")
     return
 
 

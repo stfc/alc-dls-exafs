@@ -1,16 +1,11 @@
 """Comprehensive tests for the CLI interface."""
 
-import json
-import tempfile
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
-import pytest
 from typer.testing import CliRunner
 
 from larch_cli_wrapper.cli import app
-from larch_cli_wrapper.feff_utils import FeffConfig, EdgeType, PRESETS
-from larch_cli_wrapper.wrapper import ProcessingResult, EXAFSProcessingError
+from larch_cli_wrapper.wrapper import EXAFSProcessingError, ProcessingResult
 
 
 class TestCLI:
@@ -71,12 +66,20 @@ class TestCLI:
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "generate", str(structure_file), "Fe",
-            "--output", str(output_dir),
-            "--edge", "K",
-            "--method", "larixite"
-        ])
+        result = self.runner.invoke(
+            app,
+            [
+                "generate",
+                str(structure_file),
+                "Fe",
+                "--output",
+                str(output_dir),
+                "--edge",
+                "K",
+                "--method",
+                "larixite",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "FEFF input generated" in result.stdout
@@ -94,10 +97,9 @@ class TestCLI:
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "generate", str(structure_file), "Fe",
-            "--preset", "publication"
-        ])
+        result = self.runner.invoke(
+            app, ["generate", str(structure_file), "Fe", "--preset", "publication"]
+        )
 
         assert result.exit_code == 0
 
@@ -106,7 +108,7 @@ class TestCLI:
         """Test generate with configuration file."""
         structure_file = tmp_path / "structure.cif"
         structure_file.write_text("fake cif content")
-        
+
         config_file = tmp_path / "config.yaml"
         config_file.write_text("""
 spectrum_type: EXAFS
@@ -122,10 +124,9 @@ kmax: 14.0
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "generate", str(structure_file), "Fe",
-            "--config", str(config_file)
-        ])
+        result = self.runner.invoke(
+            app, ["generate", str(structure_file), "Fe", "--config", str(config_file)]
+        )
 
         assert result.exit_code == 0
 
@@ -156,7 +157,7 @@ kmax: 14.0
         feff_dir.mkdir()
         input_file = feff_dir / "feff.inp"
         input_file.write_text("fake feff input")
-        
+
         # Create mock output files
         chi_file = feff_dir / "chi.dat"
         chi_file.write_text("fake chi data")
@@ -216,7 +217,7 @@ kmax: 14.0
         # Check that verbose flag was passed
         mock_wrapper.run_feff.assert_called_once()
         args, kwargs = mock_wrapper.run_feff.call_args
-        assert kwargs.get('verbose') is True
+        assert kwargs.get("verbose") is True
 
     # ================== PROCESS COMMAND TESTS ==================
 
@@ -238,7 +239,7 @@ kmax: 14.0
             exafs_group=Mock(),
             plot_paths={"pdf": output_dir / "plot.pdf", "png": output_dir / "plot.png"},
             processing_mode="single_frame",
-            nframes=1
+            nframes=1,
         )
         mock_result.cache_hits = 2
         mock_result.cache_misses = 1
@@ -249,11 +250,18 @@ kmax: 14.0
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe",
-            "--output", str(output_dir),
-            "--edge", "K"
-        ])
+        result = self.runner.invoke(
+            app,
+            [
+                "process",
+                str(structure_file),
+                "Fe",
+                "--output",
+                str(output_dir),
+                "--edge",
+                "K",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Processing completed" in result.stdout
@@ -270,7 +278,7 @@ kmax: 14.0
             exafs_group=Mock(),
             plot_paths={"pdf": tmp_path / "plot.pdf"},
             processing_mode="trajectory",
-            nframes=10
+            nframes=10,
         )
 
         mock_wrapper = Mock()
@@ -279,13 +287,20 @@ kmax: 14.0
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe",
-            "--trajectory",
-            "--interval", "2",
-            "--parallel",
-            "--workers", "4"
-        ])
+        result = self.runner.invoke(
+            app,
+            [
+                "process",
+                str(structure_file),
+                "Fe",
+                "--trajectory",
+                "--interval",
+                "2",
+                "--parallel",
+                "--workers",
+                "4",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Frames processed: 10" in result.stdout
@@ -301,7 +316,7 @@ kmax: 14.0
         mock_result = ProcessingResult(
             exafs_group=Mock(),
             plot_paths={"pdf": tmp_path / "plot.pdf"},
-            processing_mode="single_frame"
+            processing_mode="single_frame",
         )
 
         mock_wrapper = Mock()
@@ -310,16 +325,25 @@ kmax: 14.0
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe",
-            "--config", str(config_file),
-            "--edge", "K",
-            "--method", "pymatgen",
-            "--show",
-            "--plot-style", "presentation",
-            "--plot-frames",
-            "--force"
-        ])
+        result = self.runner.invoke(
+            app,
+            [
+                "process",
+                str(structure_file),
+                "Fe",
+                "--config",
+                str(config_file),
+                "--edge",
+                "K",
+                "--method",
+                "pymatgen",
+                "--show",
+                "--plot-style",
+                "presentation",
+                "--plot-frames",
+                "--force",
+            ],
+        )
 
         assert result.exit_code == 0
 
@@ -376,7 +400,7 @@ kmax: 14.0
         """Test process-output with trajectory frames."""
         feff_dir = tmp_path / "feff"
         feff_dir.mkdir()
-        
+
         # Create frame directories
         for i in range(3):
             frame_dir = feff_dir / f"frame_{i:04d}"
@@ -388,7 +412,7 @@ kmax: 14.0
             exafs_group=Mock(),
             plot_paths={"pdf": feff_dir / "trajectory_avg.pdf"},
             processing_mode="trajectory",
-            nframes=3
+            nframes=3,
         )
 
         mock_wrapper = Mock()
@@ -421,15 +445,14 @@ kmax: 14.0
         """Test config-example command with default settings."""
         output_file = tmp_path / "config.yaml"
 
-        result = self.runner.invoke(app, [
-            "config-example",
-            "--output", str(output_file)
-        ])
+        result = self.runner.invoke(
+            app, ["config-example", "--output", str(output_file)]
+        )
 
         assert result.exit_code == 0
         assert output_file.exists()
         assert "Configuration example created" in result.stdout
-        
+
         # Check content
         content = output_file.read_text()
         assert "spectrum_type:" in content
@@ -440,11 +463,9 @@ kmax: 14.0
         """Test config-example with specific preset."""
         output_file = tmp_path / "config.yaml"
 
-        result = self.runner.invoke(app, [
-            "config-example",
-            "--output", str(output_file),
-            "--preset", "quick"
-        ])
+        result = self.runner.invoke(
+            app, ["config-example", "--output", str(output_file), "--preset", "quick"]
+        )
 
         assert result.exit_code == 0
         assert output_file.exists()
@@ -452,10 +473,9 @@ kmax: 14.0
 
     def test_config_example_invalid_preset(self):
         """Test config-example with invalid preset."""
-        result = self.runner.invoke(app, [
-            "config-example",
-            "--preset", "invalid_preset"
-        ])
+        result = self.runner.invoke(
+            app, ["config-example", "--preset", "invalid_preset"]
+        )
 
         assert result.exit_code == 1
         assert "Unknown preset" in result.stdout
@@ -470,7 +490,7 @@ kmax: 14.0
             "enabled": True,
             "cache_dir": "/home/user/.larch_cache",
             "files": 5,
-            "size_mb": 12.5
+            "size_mb": 12.5,
         }
         mock_wrapper_class.return_value = mock_wrapper
 
@@ -490,7 +510,7 @@ kmax: 14.0
             "enabled": False,
             "cache_dir": None,
             "files": 0,
-            "size_mb": 0
+            "size_mb": 0,
         }
         mock_wrapper_class.return_value = mock_wrapper
 
@@ -506,7 +526,7 @@ kmax: 14.0
         mock_wrapper.get_cache_info.return_value = {
             "enabled": True,
             "files": 3,
-            "size_mb": 5.2
+            "size_mb": 5.2,
         }
         mock_wrapper.clear_cache.return_value = None
         mock_wrapper_class.return_value = mock_wrapper
@@ -524,7 +544,7 @@ kmax: 14.0
         mock_wrapper.get_cache_info.return_value = {
             "enabled": True,
             "files": 0,
-            "size_mb": 0
+            "size_mb": 0,
         }
         mock_wrapper_class.return_value = mock_wrapper
 
@@ -547,10 +567,9 @@ kmax: 14.0
         structure_file = tmp_path / "structure.cif"
         structure_file.write_text("fake content")
 
-        result = self.runner.invoke(app, [
-            "generate", str(structure_file), "Fe",
-            "--edge", "invalid_edge"
-        ])
+        result = self.runner.invoke(
+            app, ["generate", str(structure_file), "Fe", "--edge", "invalid_edge"]
+        )
 
         # Should not fail at CLI level (validation happens in wrapper)
         assert result.exit_code == 1
@@ -578,17 +597,17 @@ kmax: 14.0
 
         def mock_process(*args, **kwargs):
             # Simulate calling the progress callback
-            progress_callback = kwargs.get('progress_callback')
+            progress_callback = kwargs.get("progress_callback")
             if progress_callback:
                 progress_callback(0, 3, "Starting...")
                 progress_callback(1, 3, "Processing...")
                 progress_callback(3, 3, "Complete!")
-            
+
             return ProcessingResult(
                 exafs_group=Mock(),
                 plot_paths={"pdf": tmp_path / "plot.pdf"},
                 processing_mode="trajectory",
-                nframes=3
+                nframes=3,
             )
 
         mock_wrapper = Mock()
@@ -597,13 +616,12 @@ kmax: 14.0
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe",
-            "--trajectory"
-        ])
+        result = self.runner.invoke(
+            app, ["process", str(structure_file), "Fe", "--trajectory"]
+        )
 
         assert result.exit_code == 0
         # Verify progress callback was called
         args, kwargs = mock_wrapper.process.call_args
-        assert 'progress_callback' in kwargs
-        assert callable(kwargs['progress_callback'])
+        assert "progress_callback" in kwargs
+        assert callable(kwargs["progress_callback"])

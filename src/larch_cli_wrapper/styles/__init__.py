@@ -1,5 +1,4 @@
-"""
-Matplotlib style files for EXAFS plotting.
+"""Matplotlib style files for EXAFS plotting.
 
 This module contains matplotlib style files that provide consistent,
 publication-quality formatting for EXAFS plots matching the marimo

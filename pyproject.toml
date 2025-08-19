@@ -143,6 +143,7 @@ exclude = [
     "__pypackages__",
 ]
 
+[tool.ruff.lint]
 select = [
     "E",   # pycodestyle
     "W",   # stylistic issues
@@ -157,13 +158,14 @@ select = [
     "D",   # docstrings (pydocstyle)
 ]
 
-[tool.ruff.pydocstyle]
+[tool.ruff.lint.pydocstyle]
 convention = "google"
 
-[tool.ruff.per-file-ignores]
-"tests/**/*" = ["S101"]  # Allow assert in tests
-"**/test_*.py" = ["S101"]
-"__init__.py" = ["F401"]  # Unused imports in __init__ often intentional
+[tool.ruff.lint.per-file-ignores]
+'tests/**/*' = ['D', 'S101']
+'**/test_*.py' = ['D', 'S101']
+'__init__.py' = ['D', 'F401']
+'src/larch_cli_wrapper/cli.py' = ['B008']
 
 
 # =======================

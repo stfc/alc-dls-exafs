@@ -1,11 +1,8 @@
 """Performance and stress tests for CLI commands."""
 
 import time
-import threading
-from pathlib import Path
 from unittest.mock import Mock, patch
 
-import pytest
 from typer.testing import CliRunner
 
 from larch_cli_wrapper.cli import app
@@ -33,15 +30,15 @@ class TestCLIPerformance:
             exafs_group=Mock(),
             plot_paths={"pdf": tmp_path / "plot.pdf"},
             processing_mode="trajectory",
-            nframes=1000
+            nframes=1000,
         )
-        
+
         mock_result.cache_hits = 800
         mock_result.cache_misses = 200
 
         def slow_process(*args, **kwargs):
             # Simulate progress updates for many frames
-            progress_callback = kwargs.get('progress_callback')
+            progress_callback = kwargs.get("progress_callback")
             if progress_callback:
                 for i in range(0, 1001, 100):
                     progress_callback(i, 1000, f"Processing frame {i}/1000...")
@@ -54,18 +51,24 @@ class TestCLIPerformance:
         mock_wrapper_class.return_value = mock_wrapper
 
         start_time = time.time()
-        result = self.runner.invoke(app, [
-            "process", str(trajectory_file), "Fe",
-            "--trajectory",
-            "--parallel",
-            "--workers", "8"
-        ])
+        result = self.runner.invoke(
+            app,
+            [
+                "process",
+                str(trajectory_file),
+                "Fe",
+                "--trajectory",
+                "--parallel",
+                "--workers",
+                "8",
+            ],
+        )
         end_time = time.time()
 
         assert result.exit_code == 0
         assert "Frames processed: 1000" in result.stdout
         assert "Cache:" in result.stdout
-        
+
         # Should complete reasonably quickly (mocked, so very fast)
         assert end_time - start_time < 10.0
 
@@ -79,7 +82,7 @@ class TestCLIPerformance:
         mock_result = ProcessingResult(
             exafs_group=Mock(),
             plot_paths={"pdf": tmp_path / "plot.pdf"},
-            processing_mode="single_frame"
+            processing_mode="single_frame",
         )
 
         mock_wrapper = Mock()
@@ -88,10 +91,16 @@ class TestCLIPerformance:
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe",
-            "--workers", "16"  # High worker count
-        ])
+        result = self.runner.invoke(
+            app,
+            [
+                "process",
+                str(structure_file),
+                "Fe",
+                "--workers",
+                "16",  # High worker count
+            ],
+        )
 
         assert result.exit_code == 0
 
@@ -111,10 +120,16 @@ class TestCLIPerformance:
 
         # Execute same command multiple times rapidly
         for i in range(10):
-            result = self.runner.invoke(app, [
-                "generate", str(structure_file), "Fe",
-                "--output", str(tmp_path / f"output_{i}")
-            ])
+            result = self.runner.invoke(
+                app,
+                [
+                    "generate",
+                    str(structure_file),
+                    "Fe",
+                    "--output",
+                    str(tmp_path / f"output_{i}"),
+                ],
+            )
             assert result.exit_code == 0
 
     # ================== RESOURCE EXHAUSTION TESTS ==================
@@ -129,7 +144,7 @@ class TestCLIPerformance:
             exafs_group=Mock(),
             plot_paths={"pdf": tmp_path / "plot.pdf"},
             processing_mode="trajectory",
-            nframes=10
+            nframes=10,
         )
 
         mock_wrapper = Mock()
@@ -139,11 +154,17 @@ class TestCLIPerformance:
         mock_wrapper_class.return_value = mock_wrapper
 
         # Test with very high worker count
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe",
-            "--trajectory",
-            "--workers", "1000"  # Unrealistically high
-        ])
+        result = self.runner.invoke(
+            app,
+            [
+                "process",
+                str(structure_file),
+                "Fe",
+                "--trajectory",
+                "--workers",
+                "1000",  # Unrealistically high
+            ],
+        )
 
         # Should handle gracefully (validation might cap the number)
         assert result.exit_code in [0, 1]  # Either succeed or fail gracefully
@@ -161,9 +182,7 @@ class TestCLIPerformance:
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe"
-        ])
+        result = self.runner.invoke(app, ["process", str(structure_file), "Fe"])
 
         assert result.exit_code == 1
         assert "Error:" in result.stdout
@@ -205,18 +224,18 @@ class TestCLIPerformance:
 
         # Mock a scenario where some frames fail but others succeed
         def partial_failure(*args, **kwargs):
-            progress_callback = kwargs.get('progress_callback')
+            progress_callback = kwargs.get("progress_callback")
             if progress_callback:
                 progress_callback(0, 5, "Starting...")
                 progress_callback(3, 5, "Partial failure occurred")
                 progress_callback(5, 5, "Completed with some failures")
-            
+
             # Return partial result
             return ProcessingResult(
                 exafs_group=Mock(),
                 plot_paths={"pdf": tmp_path / "plot.pdf"},
                 processing_mode="trajectory",
-                nframes=3  # Fewer than expected
+                nframes=3,  # Fewer than expected
             )
 
         mock_wrapper = Mock()
@@ -225,10 +244,9 @@ class TestCLIPerformance:
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe",
-            "--trajectory"
-        ])
+        result = self.runner.invoke(
+            app, ["process", str(structure_file), "Fe", "--trajectory"]
+        )
 
         assert result.exit_code == 0
         assert "Frames processed: 3" in result.stdout
@@ -255,9 +273,7 @@ class TestCLIPerformance:
             mock_wrapper.__exit__ = Mock(return_value=None)
             mock_wrapper_class.return_value = mock_wrapper
 
-            result = self.runner.invoke(app, [
-                "process", str(structure_file), "Fe"
-            ])
+            result = self.runner.invoke(app, ["process", str(structure_file), "Fe"])
 
             # KeyboardInterrupt should return exit code 130 (128 + SIGINT signal 2)
             if isinstance(exception, KeyboardInterrupt):
@@ -273,13 +289,13 @@ class TestCLIPerformance:
     def test_large_cache_operations(self, mock_wrapper_class):
         """Test cache operations with large cache sizes."""
         mock_wrapper = Mock()
-        
+
         # Mock large cache
         mock_wrapper.get_cache_info.return_value = {
             "enabled": True,
             "cache_dir": "/tmp/large_cache",
             "files": 10000,
-            "size_mb": 5000.0
+            "size_mb": 5000.0,
         }
         mock_wrapper_class.return_value = mock_wrapper
 
@@ -301,11 +317,11 @@ class TestCLIPerformance:
 
         cache_scenarios = [
             # (hits, misses, expected_percentage)
-            (100, 0, 100.0),    # Perfect cache
-            (0, 100, 0.0),      # No cache hits
-            (50, 50, 50.0),     # 50% hit rate
-            (80, 20, 80.0),     # Good hit rate
-            (1, 9, 10.0),       # Poor hit rate
+            (100, 0, 100.0),  # Perfect cache
+            (0, 100, 0.0),  # No cache hits
+            (50, 50, 50.0),  # 50% hit rate
+            (80, 20, 80.0),  # Good hit rate
+            (1, 9, 10.0),  # Poor hit rate
         ]
 
         for hits, misses, expected_pct in cache_scenarios:
@@ -313,7 +329,7 @@ class TestCLIPerformance:
                 exafs_group=Mock(),
                 plot_paths={"pdf": tmp_path / "plot.pdf"},
                 processing_mode="trajectory",
-                nframes=10
+                nframes=10,
             )
             mock_result.cache_hits = hits
             mock_result.cache_misses = misses
@@ -324,10 +340,9 @@ class TestCLIPerformance:
             mock_wrapper.__exit__ = Mock(return_value=None)
             mock_wrapper_class.return_value = mock_wrapper
 
-            result = self.runner.invoke(app, [
-                "process", str(structure_file), "Fe",
-                "--trajectory"
-            ])
+            result = self.runner.invoke(
+                app, ["process", str(structure_file), "Fe", "--trajectory"]
+            )
 
             assert result.exit_code == 0
             assert f"{hits} hits" in result.stdout
@@ -343,17 +358,17 @@ class TestCLIPerformance:
         structure_file.write_text("fake content")
 
         def frequent_updates(*args, **kwargs):
-            progress_callback = kwargs.get('progress_callback')
+            progress_callback = kwargs.get("progress_callback")
             if progress_callback:
                 # Very frequent updates
                 for i in range(0, 1001, 1):  # Every single frame
                     progress_callback(i, 1000, f"Processing frame {i}/1000...")
-            
+
             return ProcessingResult(
                 exafs_group=Mock(),
                 plot_paths={"pdf": tmp_path / "plot.pdf"},
                 processing_mode="trajectory",
-                nframes=1000
+                nframes=1000,
             )
 
         mock_wrapper = Mock()
@@ -363,10 +378,9 @@ class TestCLIPerformance:
         mock_wrapper_class.return_value = mock_wrapper
 
         start_time = time.time()
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe",
-            "--trajectory"
-        ])
+        result = self.runner.invoke(
+            app, ["process", str(structure_file), "Fe", "--trajectory"]
+        )
         end_time = time.time()
 
         assert result.exit_code == 0
@@ -388,9 +402,7 @@ class TestCLIPerformance:
         }
 
         mock_result = ProcessingResult(
-            exafs_group=Mock(),
-            plot_paths=many_formats,
-            processing_mode="single_frame"
+            exafs_group=Mock(), plot_paths=many_formats, processing_mode="single_frame"
         )
 
         mock_wrapper = Mock()
@@ -399,9 +411,7 @@ class TestCLIPerformance:
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe"
-        ])
+        result = self.runner.invoke(app, ["process", str(structure_file), "Fe"])
 
         assert result.exit_code == 0
         # Should list all formats
@@ -416,7 +426,7 @@ class TestCLIPerformance:
         for i in range(20):  # Create deep directory structure
             deep_path = deep_path / f"very_long_directory_name_level_{i:02d}"
         deep_path.mkdir(parents=True)
-        
+
         structure_file = deep_path / "structure_with_very_long_filename.cif"
         structure_file.write_text("fake content")
 
@@ -429,11 +439,19 @@ class TestCLIPerformance:
             mock_wrapper.__exit__ = Mock(return_value=None)
             mock_wrapper_class.return_value = mock_wrapper
 
-            result = self.runner.invoke(app, [
-                "generate", str(structure_file), "Fe",
-                "--output", str(output_path),
-                "--method", "larixite",
-                "--edge", "K"
-            ])
+            result = self.runner.invoke(
+                app,
+                [
+                    "generate",
+                    str(structure_file),
+                    "Fe",
+                    "--output",
+                    str(output_path),
+                    "--method",
+                    "larixite",
+                    "--edge",
+                    "K",
+                ],
+            )
 
             assert result.exit_code == 0

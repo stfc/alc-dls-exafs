@@ -1,10 +1,7 @@
 """Tests for CLI argument validation and edge cases."""
 
-import tempfile
-from pathlib import Path
 from unittest.mock import Mock, patch
 
-import pytest
 from typer.testing import CliRunner
 
 from larch_cli_wrapper.cli import app
@@ -45,7 +42,6 @@ class TestCLIValidation:
             (["process", "/nonexistent/trajectory.xyz", "Fe"], 1),
             (["run-feff", "/nonexistent/directory"], 1),
             (["process-output", "/nonexistent/directory"], 1),
-            
             # Files that exist but are directories
             # (will be tested separately with actual directories)
         ]
@@ -62,7 +58,8 @@ class TestCLIValidation:
 
         # generate and process expect files, not directories (in most cases)
         result1 = self.runner.invoke(app, ["generate", str(test_dir), "Fe"])
-        # This might succeed depending on implementation, so we just check it doesn't crash
+        # This might succeed depending on implementation, so we just check it
+        # doesn't crash
         assert result1.exit_code in [0, 1]
 
     def test_file_instead_of_directory(self, tmp_path):
@@ -87,10 +84,9 @@ class TestCLIValidation:
         invalid_edges = ["X", "K1", "L4", "M6", "invalid", ""]
 
         for edge in invalid_edges:
-            result = self.runner.invoke(app, [
-                "generate", str(structure_file), "Fe",
-                "--edge", edge
-            ])
+            result = self.runner.invoke(
+                app, ["generate", str(structure_file), "Fe", "--edge", edge]
+            )
             # Should either fail at CLI level or in the wrapper
             assert result.exit_code == 1
 
@@ -105,15 +101,16 @@ class TestCLIValidation:
             with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
                 # Mock wrapper to avoid actual processing
                 mock_wrapper = Mock()
-                mock_wrapper.generate_feff_input.side_effect = ValueError(f"Invalid method: {method}")
+                mock_wrapper.generate_feff_input.side_effect = ValueError(
+                    f"Invalid method: {method}"
+                )
                 mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
                 mock_wrapper.__exit__ = Mock(return_value=None)
                 mock_wrapper_class.return_value = mock_wrapper
 
-                result = self.runner.invoke(app, [
-                    "generate", str(structure_file), "Fe",
-                    "--method", method
-                ])
+                result = self.runner.invoke(
+                    app, ["generate", str(structure_file), "Fe", "--method", method]
+                )
                 assert result.exit_code == 1
 
     def test_invalid_preset_values(self, tmp_path):
@@ -124,10 +121,9 @@ class TestCLIValidation:
         invalid_presets = ["invalid_preset", "custom", "user_defined", ""]
 
         for preset in invalid_presets:
-            result = self.runner.invoke(app, [
-                "generate", str(structure_file), "Fe",
-                "--preset", preset
-            ])
+            result = self.runner.invoke(
+                app, ["generate", str(structure_file), "Fe", "--preset", preset]
+            )
             assert result.exit_code == 1
             assert "Unknown preset" in result.stdout or "Error:" in result.stdout
 
@@ -141,15 +137,16 @@ class TestCLIValidation:
         for style in invalid_styles:
             with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
                 mock_wrapper = Mock()
-                mock_wrapper.process.side_effect = ValueError(f"Invalid plot style: {style}")
+                mock_wrapper.process.side_effect = ValueError(
+                    f"Invalid plot style: {style}"
+                )
                 mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
                 mock_wrapper.__exit__ = Mock(return_value=None)
                 mock_wrapper_class.return_value = mock_wrapper
 
-                result = self.runner.invoke(app, [
-                    "process", str(structure_file), "Fe",
-                    "--plot-style", style
-                ])
+                result = self.runner.invoke(
+                    app, ["process", str(structure_file), "Fe", "--plot-style", style]
+                )
                 assert result.exit_code == 1
 
     # ================== NUMERIC PARAMETER VALIDATION ==================
@@ -159,36 +156,25 @@ class TestCLIValidation:
         structure_file = tmp_path / "structure.cif"
         structure_file.write_text("fake content")
 
-        test_cases = [
-            # Invalid interval values
-            (["process", str(structure_file), "Fe", "--interval", "0"], 2),
-            (["process", str(structure_file), "Fe", "--interval", "-1"], 2),
-            (["process", str(structure_file), "Fe", "--interval", "abc"], 2),
-            
-            # Invalid worker counts
-            (["process", str(structure_file), "Fe", "--workers", "0"], 2),
-            (["process", str(structure_file), "Fe", "--workers", "-1"], 2),
-            (["process", str(structure_file), "Fe", "--workers", "abc"], 2),
-        ]
-
         # Test invalid numeric values - these get parsed by Typer first
         invalid_number_cases = [
             (["process", str(structure_file), "Fe", "--interval", "abc"], 2),
             (["process", str(structure_file), "Fe", "--workers", "abc"], 2),
         ]
-        
+
         for cmd, expected_code in invalid_number_cases:
             result = self.runner.invoke(app, cmd)
             assert result.exit_code == expected_code
-            
-        # Test invalid numeric ranges - these pass Typer validation but fail at app level
+
+        # Test invalid numeric ranges - these pass Typer validation but fail
+        # at app level
         invalid_range_cases = [
             (["process", str(structure_file), "Fe", "--interval", "0"], 1),
             (["process", str(structure_file), "Fe", "--interval", "-1"], 1),
             (["process", str(structure_file), "Fe", "--workers", "0"], 1),
             (["process", str(structure_file), "Fe", "--workers", "-1"], 1),
         ]
-        
+
         for cmd, expected_code in invalid_range_cases:
             result = self.runner.invoke(app, cmd)
             # These fail when trying to process the file
@@ -202,8 +188,7 @@ class TestCLIValidation:
         with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
             mock_wrapper = Mock()
             mock_wrapper.process.return_value = Mock(
-                plot_paths={"pdf": tmp_path / "plot.pdf"},
-                nframes=1
+                plot_paths={"pdf": tmp_path / "plot.pdf"}, nframes=1
             )
             mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
             mock_wrapper.__exit__ = Mock(return_value=None)
@@ -218,9 +203,9 @@ class TestCLIValidation:
             ]
 
             for options in valid_cases:
-                result = self.runner.invoke(app, [
-                    "process", str(structure_file), "Fe"
-                ] + options)
+                result = self.runner.invoke(
+                    app, ["process", str(structure_file), "Fe"] + options
+                )
                 # File doesn't exist, but should still validate CLI args
                 assert result.exit_code == 1  # File not found
 
@@ -231,7 +216,7 @@ class TestCLIValidation:
         # Create test structure in temp directory
         structure_file = tmp_path / "structure.cif"
         structure_file.write_text("fake content")
-        
+
         output_dir = tmp_path / "outputs"
 
         with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
@@ -242,22 +227,28 @@ class TestCLIValidation:
             mock_wrapper_class.return_value = mock_wrapper
 
             # Test absolute path (should work)
-            result1 = self.runner.invoke(app, [
-                "generate", str(structure_file), "Fe",
-                "--output", str(output_dir)
-            ])
+            result1 = self.runner.invoke(
+                app,
+                ["generate", str(structure_file), "Fe", "--output", str(output_dir)],
+            )
             assert result1.exit_code == 0
 
             # Test relative path (should also work)
-            result2 = self.runner.invoke(app, [
-                "generate", str(structure_file.name), "Fe"
-            ], cwd=str(tmp_path))
-            # Note: cwd parameter might not work in CliRunner, so this might need adjustment
+            self.runner.invoke(
+                app, ["generate", str(structure_file.name), "Fe"], cwd=str(tmp_path)
+            )
+            # Note: cwd parameter might not work in CliRunner, so this might
+            # need adjustment
 
     def test_special_characters_in_paths(self, tmp_path):
         """Test handling of special characters in file paths."""
-        special_chars = ["spaces in name", "file-with-dashes", "file_with_underscores", 
-                        "file.with.dots", "file(with)parentheses"]
+        special_chars = [
+            "spaces in name",
+            "file-with-dashes",
+            "file_with_underscores",
+            "file.with.dots",
+            "file(with)parentheses",
+        ]
 
         for char_name in special_chars:
             structure_file = tmp_path / f"{char_name}.cif"
@@ -270,9 +261,9 @@ class TestCLIValidation:
                 mock_wrapper.__exit__ = Mock(return_value=None)
                 mock_wrapper_class.return_value = mock_wrapper
 
-                result = self.runner.invoke(app, [
-                    "generate", str(structure_file), "Fe"
-                ])
+                result = self.runner.invoke(
+                    app, ["generate", str(structure_file), "Fe"]
+                )
                 assert result.exit_code == 0
 
     # ================== CONFIG FILE VALIDATION ==================
@@ -301,10 +292,10 @@ class TestCLIValidation:
             else:
                 config_file.write_text(content)
 
-            result = self.runner.invoke(app, [
-                "generate", str(structure_file), "Fe",
-                "--config", str(config_file)
-            ])
+            result = self.runner.invoke(
+                app,
+                ["generate", str(structure_file), "Fe", "--config", str(config_file)],
+            )
             assert result.exit_code == 1
 
     def test_missing_config_file(self, tmp_path):
@@ -314,10 +305,16 @@ class TestCLIValidation:
 
         nonexistent_config = tmp_path / "nonexistent_config.yaml"
 
-        result = self.runner.invoke(app, [
-            "generate", str(structure_file), "Fe",
-            "--config", str(nonexistent_config)
-        ])
+        result = self.runner.invoke(
+            app,
+            [
+                "generate",
+                str(structure_file),
+                "Fe",
+                "--config",
+                str(nonexistent_config),
+            ],
+        )
         assert result.exit_code == 1
 
     # ================== OUTPUT PATH VALIDATION ==================
@@ -326,7 +323,7 @@ class TestCLIValidation:
         """Test automatic creation of output paths."""
         structure_file = tmp_path / "structure.cif"
         structure_file.write_text("fake content")
-        
+
         # Deep nested output path that doesn't exist
         deep_output = tmp_path / "level1" / "level2" / "level3" / "outputs"
 
@@ -337,25 +334,31 @@ class TestCLIValidation:
             mock_wrapper.__exit__ = Mock(return_value=None)
             mock_wrapper_class.return_value = mock_wrapper
 
-            result = self.runner.invoke(app, [
-                "generate", str(structure_file), "Fe",
-                "--output", str(deep_output)
-            ])
+            result = self.runner.invoke(
+                app,
+                ["generate", str(structure_file), "Fe", "--output", str(deep_output)],
+            )
             assert result.exit_code == 0
 
     def test_readonly_output_path(self, tmp_path):
         """Test handling of read-only output paths."""
         structure_file = tmp_path / "structure.cif"
         structure_file.write_text("fake content")
-        
+
         readonly_dir = tmp_path / "readonly"
         readonly_dir.mkdir(mode=0o444)  # Read-only
 
         try:
-            result = self.runner.invoke(app, [
-                "generate", str(structure_file), "Fe",
-                "--output", str(readonly_dir / "subdir")
-            ])
+            result = self.runner.invoke(
+                app,
+                [
+                    "generate",
+                    str(structure_file),
+                    "Fe",
+                    "--output",
+                    str(readonly_dir / "subdir"),
+                ],
+            )
             # Should handle permission error gracefully
             assert result.exit_code == 1
         finally:
@@ -381,11 +384,18 @@ class TestCLIValidation:
             mock_wrapper_class.return_value = mock_wrapper
 
             # Both preset and config file specified - config file should take precedence
-            result = self.runner.invoke(app, [
-                "generate", str(structure_file), "Fe",
-                "--config", str(config_file),
-                "--preset", "publication"
-            ])
+            result = self.runner.invoke(
+                app,
+                [
+                    "generate",
+                    str(structure_file),
+                    "Fe",
+                    "--config",
+                    str(config_file),
+                    "--preset",
+                    "publication",
+                ],
+            )
             assert result.exit_code == 0
 
     def test_option_precedence(self, tmp_path):
@@ -405,15 +415,23 @@ class TestCLIValidation:
             mock_wrapper_class.return_value = mock_wrapper
 
             # Command-line edge should override config file
-            result = self.runner.invoke(app, [
-                "generate", str(structure_file), "Fe",
-                "--config", str(config_file),
-                "--edge", "K"  # Should override L3 from config
-            ])
+            result = self.runner.invoke(
+                app,
+                [
+                    "generate",
+                    str(structure_file),
+                    "Fe",
+                    "--config",
+                    str(config_file),
+                    "--edge",
+                    "K",  # Should override L3 from config
+                ],
+            )
             assert result.exit_code == 0
 
             # Verify the command-line option took precedence
-            # Note: generate_feff_input gets (structure, absorber, output_dir, config) as positional args
+            # Note: generate_feff_input gets (structure, absorber, output_dir,
+            # config) as positional args
             args, kwargs = mock_wrapper.generate_feff_input.call_args
             config = args[3]  # config is the 4th positional argument
             assert config.edge == "K"
@@ -428,7 +446,7 @@ class TestCLIValidation:
         with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
             # Test valid absorber specifications
             valid_absorbers = ["Fe", "Cu", "Zn", "0", "1", "10"]
-            
+
             for absorber in valid_absorbers:
                 mock_wrapper = Mock()
                 mock_wrapper.generate_feff_input.return_value = tmp_path / "output"
@@ -436,17 +454,24 @@ class TestCLIValidation:
                 mock_wrapper.__exit__ = Mock(return_value=None)
                 mock_wrapper_class.return_value = mock_wrapper
 
-                result = self.runner.invoke(app, [
-                    "generate", str(structure_file), absorber
-                ])
+                result = self.runner.invoke(
+                    app, ["generate", str(structure_file), absorber]
+                )
                 assert result.exit_code == 0
 
     # ================== HELP AND DOCUMENTATION TESTS ==================
 
     def test_help_for_all_commands(self):
         """Test help output for all commands."""
-        commands = ["generate", "run-feff", "process", "process-output", 
-                   "config-example", "cache", "info"]
+        commands = [
+            "generate",
+            "run-feff",
+            "process",
+            "process-output",
+            "config-example",
+            "cache",
+            "info",
+        ]
 
         for command in commands:
             result = self.runner.invoke(app, [command, "--help"])
@@ -458,7 +483,7 @@ class TestCLIValidation:
         """Test that command descriptions are informative."""
         result = self.runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        
+
         # Check that main commands are listed with descriptions
         expected_commands = ["generate", "run-feff", "process", "process-output"]
         for cmd in expected_commands:
@@ -475,6 +500,6 @@ class TestCLIValidation:
 
         # Verify app is configured with no_args_is_help=True
         result_no_args = self.runner.invoke(app, [])
-        # With no_args_is_help=True and invoke_without_command=True, 
+        # With no_args_is_help=True and invoke_without_command=True,
         # Typer returns exit code 2 for missing arguments
         assert result_no_args.exit_code == 2

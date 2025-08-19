@@ -1,15 +1,12 @@
 """Integration tests for CLI commands with realistic scenarios."""
 
-import tempfile
-import yaml
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
-import pytest
+import yaml
 from typer.testing import CliRunner
 
 from larch_cli_wrapper.cli import app
-from larch_cli_wrapper.feff_utils import FeffConfig, EdgeType, PRESETS
+from larch_cli_wrapper.feff_utils import PRESETS
 from larch_cli_wrapper.wrapper import ProcessingResult
 
 
@@ -52,11 +49,18 @@ _cell_angle_gamma 90
         mock_wrapper_class.return_value = mock_wrapper
 
         # Step 1: Generate FEFF input
-        result1 = self.runner.invoke(app, [
-            "generate", str(structure_file), "Fe",
-            "--output", str(feff_dir),
-            "--method", "larixite"
-        ])
+        result1 = self.runner.invoke(
+            app,
+            [
+                "generate",
+                str(structure_file),
+                "Fe",
+                "--output",
+                str(feff_dir),
+                "--method",
+                "larixite",
+            ],
+        )
         assert result1.exit_code == 0
 
         # Create feff.inp for next step
@@ -95,10 +99,10 @@ O 0.0 1.0 0.0
             exafs_group=Mock(),
             plot_paths={
                 "pdf": output_dir / "trajectory_avg_EXAFS_FT.pdf",
-                "png": output_dir / "trajectory_avg_EXAFS_FT.png"
+                "png": output_dir / "trajectory_avg_EXAFS_FT.png",
             },
             processing_mode="trajectory",
-            nframes=5
+            nframes=5,
         )
 
         mock_wrapper = Mock()
@@ -107,25 +111,34 @@ O 0.0 1.0 0.0
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "process", str(trajectory_file), "Fe",
-            "--trajectory",
-            "--output", str(output_dir),
-            "--interval", "2",
-            "--parallel",
-            "--workers", "4",
-            "--plot-style", "publication"
-        ])
+        result = self.runner.invoke(
+            app,
+            [
+                "process",
+                str(trajectory_file),
+                "Fe",
+                "--trajectory",
+                "--output",
+                str(output_dir),
+                "--interval",
+                "2",
+                "--parallel",
+                "--workers",
+                "4",
+                "--plot-style",
+                "publication",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "Frames processed: 5" in result.stdout
-        
+
         # Verify all options were passed correctly
         args, kwargs = mock_wrapper.process.call_args
-        assert kwargs['trajectory'] is True
-        assert kwargs['config'].sample_interval == 2
-        assert kwargs['config'].parallel is True
-        assert kwargs['config'].n_workers == 4
+        assert kwargs["trajectory"] is True
+        assert kwargs["config"].sample_interval == 2
+        assert kwargs["config"].parallel is True
+        assert kwargs["config"].n_workers == 4
 
     # ================== CONFIGURATION SCENARIOS ==================
 
@@ -148,11 +161,11 @@ O 0.0 1.0 0.0
             "user_tag_settings": {
                 "S02": "0.85",
                 "SCF": "6.0 0 30 0.1 1",
-                "EXCHANGE": "0"
-            }
+                "EXCHANGE": "0",
+            },
         }
-        
-        with open(config_file, 'w') as f:
+
+        with open(config_file, "w") as f:
             yaml.dump(config_data, f)
 
         structure_file = tmp_path / "structure.cif"
@@ -162,19 +175,19 @@ O 0.0 1.0 0.0
             mock_result = ProcessingResult(
                 exafs_group=Mock(),
                 plot_paths={"pdf": tmp_path / "plot.pdf"},
-                processing_mode="single_frame"
+                processing_mode="single_frame",
             )
-            
+
             mock_wrapper = Mock()
             mock_wrapper.process.return_value = mock_result
             mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
             mock_wrapper.__exit__ = Mock(return_value=None)
             mock_wrapper_class.return_value = mock_wrapper
 
-            result = self.runner.invoke(app, [
-                "process", str(structure_file), "Fe",
-                "--config", str(config_file)
-            ])
+            result = self.runner.invoke(
+                app,
+                ["process", str(structure_file), "Fe", "--config", str(config_file)],
+            )
 
             assert result.exit_code == 0
 
@@ -196,10 +209,10 @@ O 0.0 1.0 0.0
                 mock_wrapper.__exit__ = Mock(return_value=None)
                 mock_wrapper_class.return_value = mock_wrapper
 
-                result = self.runner.invoke(app, [
-                    "generate", str(structure_file), "Fe",
-                    "--preset", preset_name
-                ])
+                result = self.runner.invoke(
+                    app,
+                    ["generate", str(structure_file), "Fe", "--preset", preset_name],
+                )
 
                 assert result.exit_code == 0, f"Failed with preset {preset_name}"
 
@@ -215,10 +228,10 @@ O 0.0 1.0 0.0
         readonly_dir.mkdir(mode=0o444)
 
         try:
-            result = self.runner.invoke(app, [
-                "generate", str(structure_file), "Fe",
-                "--output", str(readonly_dir)
-            ])
+            result = self.runner.invoke(
+                app,
+                ["generate", str(structure_file), "Fe", "--output", str(readonly_dir)],
+            )
             # Should handle the error gracefully
             assert result.exit_code == 1
         finally:
@@ -238,11 +251,17 @@ O 0.0 1.0 0.0
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe",
-            "--trajectory",
-            "--workers", "16"  # High number of workers
-        ])
+        result = self.runner.invoke(
+            app,
+            [
+                "process",
+                str(structure_file),
+                "Fe",
+                "--trajectory",
+                "--workers",
+                "16",  # High number of workers
+            ],
+        )
 
         assert result.exit_code == 1
         assert "Error:" in result.stdout
@@ -260,13 +279,11 @@ O 0.0 1.0 0.0
             "pdf": tmp_path / "plot.pdf",
             "png": tmp_path / "plot.png",
             "svg": tmp_path / "plot.svg",
-            "eps": tmp_path / "plot.eps"
+            "eps": tmp_path / "plot.eps",
         }
 
         mock_result = ProcessingResult(
-            exafs_group=Mock(),
-            plot_paths=plot_paths,
-            processing_mode="single_frame"
+            exafs_group=Mock(), plot_paths=plot_paths, processing_mode="single_frame"
         )
 
         mock_wrapper = Mock()
@@ -275,9 +292,7 @@ O 0.0 1.0 0.0
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe"
-        ])
+        result = self.runner.invoke(app, ["process", str(structure_file), "Fe"])
 
         assert result.exit_code == 0
         assert "PDF" in result.stdout
@@ -297,7 +312,7 @@ O 0.0 1.0 0.0
             mock_result = ProcessingResult(
                 exafs_group=Mock(),
                 plot_paths={"pdf": tmp_path / f"plot_{style}.pdf"},
-                processing_mode="single_frame"
+                processing_mode="single_frame",
             )
 
             mock_wrapper = Mock()
@@ -306,16 +321,15 @@ O 0.0 1.0 0.0
             mock_wrapper.__exit__ = Mock(return_value=None)
             mock_wrapper_class.return_value = mock_wrapper
 
-            result = self.runner.invoke(app, [
-                "process", str(structure_file), "Fe",
-                "--plot-style", style
-            ])
+            result = self.runner.invoke(
+                app, ["process", str(structure_file), "Fe", "--plot-style", style]
+            )
 
             assert result.exit_code == 0
 
             # Verify style was passed to wrapper
             args, kwargs = mock_wrapper.process.call_args
-            assert kwargs['plot_style'] == style
+            assert kwargs["plot_style"] == style
 
     # ================== CACHE OPERATION SCENARIOS ==================
 
@@ -328,7 +342,7 @@ O 0.0 1.0 0.0
         cache_states = [
             {"enabled": True, "cache_dir": "/tmp/cache", "files": 0, "size_mb": 0},
             {"enabled": True, "cache_dir": "/tmp/cache", "files": 10, "size_mb": 25.5},
-            {"enabled": False, "cache_dir": None, "files": 0, "size_mb": 0}
+            {"enabled": False, "cache_dir": None, "files": 0, "size_mb": 0},
         ]
 
         for state in cache_states:
@@ -363,16 +377,26 @@ O 0.0 1.0 0.0
                     mock_wrapper.__exit__ = Mock(return_value=None)
                     mock_wrapper_class.return_value = mock_wrapper
 
-                    result = self.runner.invoke(app, [
-                        "generate", str(structure_file), "Fe",
-                        "--edge", edge,
-                        "--method", method
-                    ])
+                    result = self.runner.invoke(
+                        app,
+                        [
+                            "generate",
+                            str(structure_file),
+                            "Fe",
+                            "--edge",
+                            edge,
+                            "--method",
+                            method,
+                        ],
+                    )
 
-                    assert result.exit_code == 0, f"Failed with edge={edge}, method={method}"
+                    assert result.exit_code == 0, (
+                        f"Failed with edge={edge}, method={method}"
+                    )
 
                     # Verify parameters were passed correctly
-                    # Note: generate_feff_input gets (structure, absorber, output_dir, config) as positional args
+                    # Note: generate_feff_input gets (structure, absorber,
+                    # output_dir, config) as positional args
                     args, kwargs = mock_wrapper.generate_feff_input.call_args
                     config = args[3]  # config is the 4th positional argument
                     assert config.edge == edge
@@ -390,7 +414,7 @@ O 0.0 1.0 0.0
             {"parallel": True, "workers": None},
             {"parallel": True, "workers": 2},
             {"parallel": True, "workers": 8},
-            {"parallel": False, "workers": None}
+            {"parallel": False, "workers": None},
         ]
 
         for config in parallel_configs:
@@ -398,7 +422,7 @@ O 0.0 1.0 0.0
                 exafs_group=Mock(),
                 plot_paths={"pdf": tmp_path / "plot.pdf"},
                 processing_mode="trajectory",
-                nframes=10
+                nframes=10,
             )
 
             mock_wrapper = Mock()
@@ -408,12 +432,12 @@ O 0.0 1.0 0.0
             mock_wrapper_class.return_value = mock_wrapper
 
             cmd = ["process", str(structure_file), "Fe", "--trajectory"]
-            
+
             if config["parallel"]:
                 cmd.append("--parallel")
             else:
                 cmd.append("--sequential")
-                
+
             if config["workers"]:
                 cmd.extend(["--workers", str(config["workers"])])
 
@@ -422,7 +446,7 @@ O 0.0 1.0 0.0
 
             # Verify configuration was passed
             args, kwargs = mock_wrapper.process.call_args
-            wrapper_config = kwargs['config']
+            wrapper_config = kwargs["config"]
             assert wrapper_config.parallel == config["parallel"]
             if config["workers"]:
                 assert wrapper_config.n_workers == config["workers"]
@@ -436,17 +460,17 @@ O 0.0 1.0 0.0
         structure_file.write_text("fake long trajectory")
 
         def simulate_long_process(*args, **kwargs):
-            progress_callback = kwargs.get('progress_callback')
+            progress_callback = kwargs.get("progress_callback")
             if progress_callback:
                 # Simulate processing 100 frames
                 for i in range(0, 101, 10):
                     progress_callback(i, 100, f"Processing frame {i}/100...")
-            
+
             return ProcessingResult(
                 exafs_group=Mock(),
                 plot_paths={"pdf": tmp_path / "plot.pdf"},
                 processing_mode="trajectory",
-                nframes=100
+                nframes=100,
             )
 
         mock_wrapper = Mock()
@@ -455,10 +479,9 @@ O 0.0 1.0 0.0
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
 
-        result = self.runner.invoke(app, [
-            "process", str(structure_file), "Fe",
-            "--trajectory"
-        ])
+        result = self.runner.invoke(
+            app, ["process", str(structure_file), "Fe", "--trajectory"]
+        )
 
         assert result.exit_code == 0
         assert "Frames processed: 100" in result.stdout
@@ -480,7 +503,7 @@ O 0.0 1.0 0.0
 
         result = self.runner.invoke(app, ["process", str(structure_file), "Fe"])
 
-        # Should handle KeyboardInterrupt gracefully 
+        # Should handle KeyboardInterrupt gracefully
         # Exit code 130 is standard for KeyboardInterrupt (128 + SIGINT signal 2)
         assert result.exit_code == 130
         # Verify __exit__ was called for proper cleanup

@@ -1,8 +1,6 @@
 """Test configuration and fixtures for CLI test suite."""
 
-import tempfile
 from pathlib import Path
-from typing import Generator
 
 import pytest
 
@@ -41,7 +39,7 @@ def tmp_trajectory_file(tmp_path: Path) -> Path:
     """Create a temporary trajectory file for testing."""
     trajectory_file = tmp_path / "test_trajectory.xyz"
     trajectory_content = ""
-    
+
     # Create a simple 3-frame trajectory
     for frame in range(3):
         trajectory_content += f"""4
@@ -52,7 +50,7 @@ O 0.0 1.0 0.0
 O 0.0 0.0 1.0
 
 """
-    
+
     trajectory_file.write_text(trajectory_content)
     return trajectory_file
 
@@ -86,7 +84,7 @@ def tmp_feff_directory(tmp_path: Path) -> Path:
     """Create a temporary FEFF directory with input and output files."""
     feff_dir = tmp_path / "feff"
     feff_dir.mkdir()
-    
+
     # Create feff.inp
     feff_inp = feff_dir / "feff.inp"
     feff_inp.write_text("""
@@ -106,7 +104,7 @@ ATOMS
 0.00000   0.00000   1.00000   1   O3
 END
 """)
-    
+
     # Create chi.dat (FEFF output)
     chi_dat = feff_dir / "chi.dat"
     chi_dat.write_text("""
@@ -117,7 +115,7 @@ END
   4.000   0.456   0.456   4.567
   5.000   0.567   0.567   5.678
 """)
-    
+
     # Create feff.log
     feff_log = feff_dir / "feff.log"
     feff_log.write_text("""
@@ -125,7 +123,7 @@ FEFF 9.6.4 test run
 This is a test log file
 Calculation completed successfully
 """)
-    
+
     return feff_dir
 
 
@@ -134,12 +132,12 @@ def tmp_trajectory_output(tmp_path: Path) -> Path:
     """Create a temporary trajectory output directory with frame subdirectories."""
     traj_dir = tmp_path / "trajectory_output"
     traj_dir.mkdir()
-    
+
     # Create frame directories
     for i in range(5):
         frame_dir = traj_dir / f"frame_{i:04d}"
         frame_dir.mkdir()
-        
+
         # Create chi.dat in each frame
         chi_file = frame_dir / "chi.dat"
         chi_file.write_text(f"""
@@ -148,7 +146,7 @@ def tmp_trajectory_output(tmp_path: Path) -> Path:
   2.000   {0.2 + i * 0.01}   {0.2 + i * 0.01}   2.345
   3.000   {0.3 + i * 0.01}   {0.3 + i * 0.01}   3.456
 """)
-    
+
     return traj_dir
 
 
@@ -156,23 +154,23 @@ def tmp_trajectory_output(tmp_path: Path) -> Path:
 def invalid_files(tmp_path: Path) -> dict:
     """Create various invalid files for testing error handling."""
     files = {}
-    
+
     # Empty file
-    files['empty'] = tmp_path / "empty.cif"
-    files['empty'].write_text("")
-    
+    files["empty"] = tmp_path / "empty.cif"
+    files["empty"].write_text("")
+
     # Binary file
-    files['binary'] = tmp_path / "binary.dat"
-    files['binary'].write_bytes(b"\x00\x01\x02\x03\x04\x05")
-    
+    files["binary"] = tmp_path / "binary.dat"
+    files["binary"].write_bytes(b"\x00\x01\x02\x03\x04\x05")
+
     # Text file with invalid content
-    files['invalid'] = tmp_path / "invalid.cif"
-    files['invalid'].write_text("This is not a valid CIF file")
-    
+    files["invalid"] = tmp_path / "invalid.cif"
+    files["invalid"].write_text("This is not a valid CIF file")
+
     # Very large text file
-    files['large'] = tmp_path / "large.txt"
-    files['large'].write_text("x" * 10000)  # 10KB of 'x'
-    
+    files["large"] = tmp_path / "large.txt"
+    files["large"].write_text("x" * 10000)  # 10KB of 'x'
+
     return files
 
 
@@ -182,7 +180,7 @@ pytest_markers = {
     "integration": "Integration tests - test component interaction",
     "performance": "Performance tests - may take longer to run",
     "stress": "Stress tests - test system limits",
-    "slow": "Slow tests - tests that take significant time"
+    "slow": "Slow tests - tests that take significant time",
 }
 
 
@@ -194,19 +192,19 @@ def pytest_configure(config):
 
 class TestConstants:
     """Constants used across test files."""
-    
+
     # Valid edge types
     VALID_EDGES = ["K", "L1", "L2", "L3", "M1", "M2", "M3", "M4", "M5"]
-    
+
     # Valid methods
     VALID_METHODS = ["auto", "larixite", "pymatgen"]
-    
+
     # Valid plot styles
     VALID_PLOT_STYLES = ["publication", "presentation", "quick"]
-    
+
     # Valid absorber symbols
     VALID_ABSORBERS = ["Fe", "Cu", "Zn", "Ni", "Co", "Mn", "Cr"]
-    
+
     # Invalid values for testing
     INVALID_EDGES = ["X", "K1", "L4", "M6", "invalid", ""]
     INVALID_METHODS = ["invalid_method", "feff", "quantum", ""]
@@ -215,13 +213,14 @@ class TestConstants:
 
 class MockHelpers:
     """Helper methods for creating consistent mocks across tests."""
-    
+
     @staticmethod
     def create_successful_wrapper_mock():
         """Create a mock LarchWrapper that simulates successful operations."""
         from unittest.mock import Mock
+
         from larch_cli_wrapper.wrapper import ProcessingResult
-        
+
         mock_wrapper = Mock()
         mock_wrapper.generate_feff_input.return_value = Path("/tmp/output")
         mock_wrapper.run_feff.return_value = True
@@ -230,39 +229,39 @@ class MockHelpers:
         mock_wrapper.process.return_value = ProcessingResult(
             exafs_group=Mock(),
             plot_paths={"pdf": Path("/tmp/plot.pdf")},
-            processing_mode="single_frame"
+            processing_mode="single_frame",
         )
         mock_wrapper.print_diagnostics.return_value = None
         mock_wrapper.get_cache_info.return_value = {
             "enabled": True,
             "cache_dir": "/tmp/cache",
             "files": 5,
-            "size_mb": 12.5
+            "size_mb": 12.5,
         }
         mock_wrapper.clear_cache.return_value = None
-        
+
         # Context manager support
         mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
         mock_wrapper.__exit__ = Mock(return_value=None)
-        
+
         return mock_wrapper
-    
+
     @staticmethod
     def create_failing_wrapper_mock(exception=None):
         """Create a mock LarchWrapper that simulates failures."""
         from unittest.mock import Mock
-        
+
         if exception is None:
             exception = RuntimeError("Mock operation failed")
-        
+
         mock_wrapper = Mock()
         mock_wrapper.generate_feff_input.side_effect = exception
         mock_wrapper.run_feff.return_value = False
         mock_wrapper.process_feff_output.side_effect = exception
         mock_wrapper.process.side_effect = exception
-        
+
         # Context manager support
         mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
         mock_wrapper.__exit__ = Mock(return_value=None)
-        
+
         return mock_wrapper
