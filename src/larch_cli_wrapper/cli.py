@@ -14,8 +14,13 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from .feff_utils import PRESETS, EdgeType, FeffConfig
-from .wrapper import EXAFSProcessingError, LarchWrapper, ProcessingResult
+from .feff_utils import PRESETS, EdgeType, FeffConfig, generate_feff_input
+from .wrapper import (
+    EXAFSProcessingError,
+    LarchWrapper,
+    ProcessingMode,
+    ProcessingResult,
+)
 
 app = typer.Typer(
     name="larch-cli",
@@ -27,7 +32,9 @@ console = Console()
 
 
 def _setup_config(
-    config_file: Path = None, preset: str = None, force_recalculate: bool = False
+    config_file: Path | None = None,
+    preset: str | None = None,
+    force_recalculate: bool = False,
 ) -> FeffConfig:
     """Setup configuration from file, preset, or defaults."""
     if config_file:
@@ -56,14 +63,14 @@ def create_progress() -> Progress:
     )
 
 
-@app.command("info")
-def show_info():
+@app.command("info")  # type: ignore[misc]
+def show_info() -> None:
     """Show system and dependency information."""
     wrapper = LarchWrapper(verbose=True, cache_dir=Path.home() / ".larch_cache")
     wrapper.print_diagnostics()
 
 
-@app.command("generate")
+@app.command("generate")  # type: ignore[misc]
 def generate_inputs(
     structure: Path = typer.Argument(..., help="Path to structure file"),
     absorber: str = typer.Argument(..., help="Absorbing atom symbol or site index"),
@@ -76,13 +83,13 @@ def generate_inputs(
     config_file: Path = typer.Option(
         None, "--config", "-c", help="YAML configuration file"
     ),
-    preset: str = typer.Option(
+    preset: str | None = typer.Option(
         None, "--preset", "-p", help=f"Configuration preset: {list(PRESETS.keys())}"
     ),
     method: str = typer.Option(
         "auto", "--method", "-m", help="Method: auto, larixite, pymatgen"
     ),
-):
+) -> None:
     """Generate FEFF input files only."""
     if not structure.exists():
         console.print(f"[red]Error: Structure file {structure} not found[/red]")
@@ -92,18 +99,14 @@ def generate_inputs(
         config = _setup_config(config_file, preset)
         config.edge = edge
         config.method = method
-        with LarchWrapper(
-            verbose=True, cache_dir=Path.home() / ".larch_cache"
-        ) as wrapper:
+        with LarchWrapper(verbose=True, cache_dir=Path.home() / ".larch_cache"):
             console.print(
                 f"[cyan]Generating FEFF input for {absorber} using "
                 f"{config.method} method...[/cyan]"
             )
 
             # Generate FEFF input using the unified method
-            input_path = wrapper.generate_feff_input(
-                structure, absorber, output_dir, config
-            )
+            input_path = generate_feff_input(structure, absorber, output_dir, config)
 
             console.print(f"[green]✓ FEFF input generated: {input_path}[/green]")
             console.print(f"  Check {input_path / 'feff.inp'} for details")
@@ -115,11 +118,11 @@ def generate_inputs(
         raise typer.Exit(1) from e
 
 
-@app.command("run-feff")
+@app.command("run-feff")  # type: ignore[misc]
 def run_feff_calculation(
     feff_dir: Path,
     verbose: bool = False,
-):
+) -> None:
     """Run FEFF calculation in specified directory."""
     # Apply defaults
     if feff_dir is None:
@@ -138,7 +141,7 @@ def run_feff_calculation(
             verbose=True, cache_dir=Path.home() / ".larch_cache"
         ) as wrapper:
             console.print(f"[cyan]Running FEFF calculation in {feff_dir}...[/cyan]")
-            success = wrapper.run_feff(feff_dir, verbose=verbose)
+            success = wrapper.run_feff(feff_dir)
             if success:
                 console.print(
                     "[green]✓ FEFF calculation completed successfully[/green]"
@@ -166,7 +169,7 @@ def run_feff_calculation(
         raise typer.Exit(1) from e
 
 
-@app.command("process")
+@app.command("process")  # type: ignore[misc]
 def process(
     structure: Path = typer.Argument(..., help="Path to structure file or trajectory"),
     absorber: str = typer.Argument(..., help="Absorbing atom symbol or site index"),
@@ -210,8 +213,10 @@ def process(
     force_recalculate: bool = typer.Option(
         False, "--force", help="Skip cache and recalculate"
     ),
-):
+ ) -> None:
     """Process structure or trajectory for EXAFS analysis."""
+    # Explicitly indicate no return value for CLI commands
+    # (Typer handles exits and prints internally)
     if not structure.exists():
         console.print(f"[red]Error: Structure file {structure} not found[/red]")
         raise typer.Exit(1)
@@ -233,10 +238,12 @@ def process(
             )
 
             with create_progress() as progress:
-                task_id = None
+                task_id: int | None = None
                 total_frames = 1
 
-                def progress_callback(current: int, total: int, description: str):
+                def progress_callback(
+                    current: int, total: int, description: str
+                ) -> None:
                     nonlocal task_id, total_frames
                     if task_id is None:
                         # First call - create the task with correct total
@@ -314,12 +321,12 @@ def process(
         raise typer.Exit(1) from e
 
 
-@app.command("process-output")
+@app.command("process-output")  # type: ignore[misc]
 def process_feff_output(
     feff_dir: Path = typer.Argument(
         ..., help="Directory containing FEFF output (chi.dat or trajectory frames)"
     ),
-    output_dir: Path = typer.Option(
+    output_dir: Path | None = typer.Option(
         None, "--output", "-o", help="Output directory (default: same as feff_dir)"
     ),
     config_file: Path = typer.Option(
@@ -337,7 +344,7 @@ def process_feff_output(
         "--plot-style",
         help="Plot style: publication, presentation, quick",
     ),
-):
+ ) -> None:
     """Process existing FEFF output files (single or trajectory) and generate plots."""
     if not feff_dir.exists():
         console.print(f"[red]Error: Directory {feff_dir} not found[/red]")
@@ -368,15 +375,19 @@ def process_feff_output(
                 # For trajectory processing, we need to create a virtual structure path
                 # that the wrapper can process as a trajectory
                 with create_progress() as progress:
-                    task_id = None
+                    task_id: int | None = None
 
-                    def progress_callback(current: int, total: int, description: str):
+                    def progress_callback(
+                        current: int, total: int, description: str
+                    ) -> None:
                         nonlocal task_id
                         if task_id is None:
                             task_id = progress.add_task(description, total=total)
-                        progress.update(
-                            task_id, completed=current, description=description
-                        )
+                            progress.update(task_id, completed=current)
+                        else:
+                            progress.update(
+                                task_id, completed=current, description=description
+                            )
 
                     # Process using the main process method
                     result = wrapper.process(
@@ -416,7 +427,7 @@ def process_feff_output(
                 result = ProcessingResult(
                     exafs_group=exafs_group,
                     plot_paths=plot_paths,
-                    processing_mode="single_frame",
+                    processing_mode=ProcessingMode.SINGLE_FRAME,
                 )
 
                 formats = ", ".join(f"{k.upper()}" for k in plot_paths.keys())
@@ -443,7 +454,7 @@ def process_feff_output(
         raise typer.Exit(1) from e
 
 
-@app.command("config-example")
+@app.command("config-example")  # type: ignore[misc]
 def create_config_example(
     output_file: Path = typer.Option(
         Path("config.yaml"), "--output", "-o", help="Output file path"
@@ -451,7 +462,7 @@ def create_config_example(
     preset: str = typer.Option(
         "publication", "--preset", "-p", help=f"Base preset: {list(PRESETS.keys())}"
     ),
-):
+ ) -> None:
     """Create an example configuration file."""
     if preset not in PRESETS:
         console.print(f"[red]Error: Unknown preset '{preset}'[/red]")
@@ -499,10 +510,10 @@ user_tag_settings: {dict(config.user_tag_settings) or "{}"}
         raise typer.Exit(1) from e
 
 
-@app.command("cache")
+@app.command("cache")  # type: ignore[misc]
 def cache_management(
     action: str = typer.Argument(..., help="Cache action: info, clear"),
-):
+) -> None:
     """Manage processing cache."""
     if action not in ["info", "clear"]:
         console.print(

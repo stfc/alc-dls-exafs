@@ -153,11 +153,6 @@ def _(EdgeType, PRESETS, mo):
     return (form,)
 
 
-@app.cell
-def _():
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     plot_type = mo.ui.radio(["χ(k)", "|χ(R)|"], value="χ(k)")
@@ -273,8 +268,8 @@ def _(
                 )
             return success_message(result, is_traj, output_dir), result
         finally:
-            if temp_path.exists():
-                os.unlink(temp_path)
+                if temp_path.exists():
+                    temp_path.unlink()
 
     def success_message(result, is_traj, output_dir):
         """Generate success message based on processing mode"""
@@ -546,11 +541,6 @@ def _(CACHE_DIR, LarchWrapper, mo):
         # return message
 
     return clear_cache, show_cache
-
-
-@app.cell
-def _():
-    return
 
 
 @app.cell(hide_code=True)

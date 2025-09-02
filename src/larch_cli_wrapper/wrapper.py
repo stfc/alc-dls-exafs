@@ -40,11 +40,11 @@ except ImportError:
 try:
     import numba
 
-    @numba.jit(nopython=True, cache=True)
+    @numba.jit(nopython=True, cache=True)  # type: ignore[misc]
     def _fast_average(data: np.ndarray) -> np.ndarray:
         return np.mean(data, axis=0)
 
-    @numba.jit(nopython=True, cache=True)
+    @numba.jit(nopython=True, cache=True)  # type: ignore[misc]
     def _fast_std(data: np.ndarray) -> np.ndarray:
         return np.std(data, axis=0)
 
@@ -85,7 +85,6 @@ class ProcessingMode(Enum):
 
     SINGLE_FRAME = "single_frame"
     TRAJECTORY = "trajectory"
-    AVERAGE = "average"
 
 
 # ================== PROGRESS REPORTING ==================
@@ -134,6 +133,13 @@ class TQDMReporter:
             print(f"\r[{percent:6.2f}%] {description}", end="", flush=True)
             if current == total:
                 print()
+
+    def set_description(self, description: str) -> None:
+        """Set the current operation description."""
+        if self.pbar:
+            self.pbar.set_description(description)
+        else:
+            self.desc = description
 
     def close(self) -> None:
         """Close and clean up the progress bar."""
@@ -246,7 +252,7 @@ class ParallelProcessor:
         self.n_workers = n_workers or mp.cpu_count() // 2
 
     @contextmanager
-    def process_pool(self):
+    def process_pool(self) -> Any:
         """Context manager for multiprocessing pool."""
         pool = None
         try:
@@ -262,7 +268,7 @@ class ParallelProcessor:
                 pool.join()
 
     @staticmethod
-    def _worker_init(log_level):
+    def _worker_init(log_level: int) -> None:
         logging.basicConfig(
             level=log_level,
             format="[Worker] [%(levelname)s] %(message)s",
@@ -288,8 +294,8 @@ class LarchWrapper:
             cache_dir: Directory for caching. If None, no caching is used.
         """
         self.cleanup_on_exit = cleanup_on_exit
-        self._temp_files = []
-        self._temp_dirs = []
+        self._temp_files: list[Path] = []
+        self._temp_dirs: list[Path] = []
         self.logger = self._setup_logger(verbose)
         self.parallel_processor = ParallelProcessor()
         # Add caching capability
@@ -312,20 +318,19 @@ class LarchWrapper:
             logger.addHandler(handler)
         return logger
 
-    def __enter__(self):
+    def __enter__(self) -> "LarchWrapper":
         """Context manager entry."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Context manager exit with cleanup."""
         if self.cleanup_on_exit:
             self.cleanup_temp_files()
             self.cleanup_temp_dirs()
         if exc_type is not None:
             self.logger.error(f"Error during processing: {exc_val}")
-        return False
 
-    def cleanup_temp_files(self):
+    def cleanup_temp_files(self) -> None:
         """Clean up temporary files."""
         for temp_file in self._temp_files[:]:
             try:
@@ -336,7 +341,7 @@ class LarchWrapper:
                 self.logger.warning(f"Could not remove temp file {temp_file}: {e}")
         gc.collect()
 
-    def cleanup_temp_dirs(self):
+    def cleanup_temp_dirs(self) -> None:
         """Clean up temporary directories."""
         import shutil
 
@@ -349,7 +354,7 @@ class LarchWrapper:
                 self.logger.warning(f"Could not remove temp dir {temp_dir}: {e}")
 
     # ================== CACHING METHODS ==================
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         """Clear all cached results."""
         if not self.cache_dir or not self.cache_dir.exists():
             self.logger.info("No cache directory to clear")
@@ -456,7 +461,7 @@ class LarchWrapper:
         styles_dir = PathlibPath(__file__).parent / "styles"
 
         # Style configurations with external style files
-        styles = {
+        styles: dict[str, dict[str, Any]] = {
             "publication": {
                 "style_file": styles_dir / "exafs_publication.mplstyle",
                 "figsize": (12, 5),
@@ -468,11 +473,12 @@ class LarchWrapper:
         }
 
         style_config = styles.get(plot_style, styles["publication"])
+        style_file_path = style_config["style_file"]
 
         # Check if style file exists and warn if not
-        if not style_config["style_file"].exists():
+        if not style_file_path.exists():
             self.logger.warning(
-                f"Style file {style_config['style_file']} not found. "
+                f"Style file {style_file_path} not found. "
                 "Using matplotlib default style."
             )
 
@@ -481,8 +487,8 @@ class LarchWrapper:
 
         try:
             # Apply style if file exists
-            if style_config["style_file"].exists():
-                plt.style.use(str(style_config["style_file"]))
+            if style_file_path.exists():
+                plt.style.use(str(style_file_path))
 
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=style_config["figsize"])
 
@@ -739,6 +745,15 @@ class LarchWrapper:
                         )
                         continue
 
+                    # Skip frames with invalid data
+                    if frame_result.k is None or frame_result.chi is None:
+                        self.logger.warning(
+                            f"Frame {frame_result.frame_idx} "
+                            "has invalid data (k or chi is None), skipping"
+                        )
+                        continue
+
+                    # Set reference k-grid from first successful frame
                     if k_ref is None:
                         k_ref = frame_result.k.copy()
 
@@ -783,6 +798,11 @@ class LarchWrapper:
                 "No frames were processed successfully. Cannot generate result."
             )
 
+        if k_ref is None:
+            raise RuntimeError(
+                "No valid k-space data found in any frame. Cannot generate result."
+            )
+
         # Always use k_ref (defined from first success)
         avg_chi = _fast_average(np.array(chi_list))
         result_group = Group()
@@ -823,7 +843,7 @@ class LarchWrapper:
         )
 
     @staticmethod
-    def _process_frame_worker(frame_data: tuple) -> FrameProcessingResult:
+    def _process_frame_worker(frame_data: tuple[Any, ...]) -> FrameProcessingResult:
         """Worker function for parallel frame processing - uses utility functions."""
         try:
             from .cache_utils import get_cache_key, load_from_cache, save_to_cache
@@ -910,9 +930,12 @@ class LarchWrapper:
             if trajectory:
                 raise ValueError("trajectory mode not supported for single Atoms")
             result = self._process_single_frame(structure, absorber, output_dir, config)
-            if result.error or result.chi is None or result.k is None:
+            if result is None or result.error or result.chi is None or result.k is None:
+                error_msg = (
+                    result.error if result is not None else "Processing returned None"
+                )
                 raise FEFFCalculationError(
-                    f"Single frame processing failed: {result.error}"
+                    f"Single frame processing failed: {error_msg}"
                 )
 
             group = Group()
@@ -950,6 +973,7 @@ class LarchWrapper:
             structures = [structures]
 
         # Initialize reporter with proper fallback behavior
+        reporter: ProgressReporter
         if progress_callback is None:
             reporter = TQDMReporter(len(structures), "Starting")
         else:
@@ -1009,7 +1033,7 @@ class LarchWrapper:
             },
         }
 
-    def print_diagnostics(self):
+    def print_diagnostics(self) -> None:
         """Print formatted diagnostics information to console."""
         diag = self.get_diagnostics()
         print("=" * 50)

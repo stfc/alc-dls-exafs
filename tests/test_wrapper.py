@@ -55,7 +55,6 @@ class TestProcessingMode:
         """Test enum contains expected values."""
         assert ProcessingMode.SINGLE_FRAME.value == "single_frame"
         assert ProcessingMode.TRAJECTORY.value == "trajectory"
-        assert ProcessingMode.AVERAGE.value == "average"
 
 
 class TestProgressReporters:

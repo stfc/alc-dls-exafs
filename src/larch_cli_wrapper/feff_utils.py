@@ -112,7 +112,7 @@ class FeffConfig:
     sample_interval: int = 1
     force_recalculate: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Post-initialization validation of configuration parameters."""
         self._validate_spectrum_type()
         self._validate_energy_range()
@@ -123,38 +123,38 @@ class FeffConfig:
         self._validate_sample_interval()
         # No automatic defaults - let each method use its own defaults
 
-    def _validate_spectrum_type(self):
+    def _validate_spectrum_type(self) -> None:
         if self.spectrum_type not in SpectrumType.__members__:
             raise ValueError(f"Invalid spectrum_type: {self.spectrum_type}")
 
-    def _validate_energy_range(self):
+    def _validate_energy_range(self) -> None:
         if self.kmin >= self.kmax:
             raise ValueError(f"kmin ({self.kmin}) must be less than kmax ({self.kmax})")
         if self.kmin < 0:
             raise ValueError(f"kmin must be positive, got {self.kmin}")
 
-    def _validate_fourier_params(self):
+    def _validate_fourier_params(self) -> None:
         if self.dk <= 0:
             raise ValueError(f"dk must be positive, got {self.dk}")
         if not 1 <= self.kweight <= 3:
             logging.warning(f"Unusual kweight value: {self.kweight}")
 
-    def _validate_radius(self):
+    def _validate_radius(self) -> None:
         if self.radius <= 0:
             raise ValueError(f"Radius must be positive, got {self.radius}")
 
-    def _validate_method(self):
+    def _validate_method(self) -> None:
         valid_methods = ["auto", "larixite", "pymatgen"]
         if self.method not in valid_methods:
             raise ValueError(
                 f"Invalid method: {self.method}. Valid methods: {valid_methods}"
             )
 
-    def _validate_n_workers(self):
+    def _validate_n_workers(self) -> None:
         if self.n_workers is not None and self.n_workers <= 0:
             raise ValueError(f"Invalid n_workers: {self.n_workers}")
 
-    def _validate_sample_interval(self):
+    def _validate_sample_interval(self) -> None:
         """Validate sample_interval parameter."""
         if self.sample_interval < 1:
             raise ValueError(
@@ -169,7 +169,8 @@ class FeffConfig:
                 f"Unknown preset: {preset_name}. Available: {list(PRESETS.keys())}"
             )
         preset = PRESETS[preset_name].copy()
-        return cls(**preset)
+        # Type: ignore for the unpacking since we know the preset structure is correct
+        return cls(**preset)  # type: ignore[arg-type]
 
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> "FeffConfig":
@@ -178,16 +179,18 @@ class FeffConfig:
             raise ImportError("PyYAML required for configuration files")
         with open(yaml_path) as f:
             params = yaml.safe_load(f)
+        if not isinstance(params, dict):
+            raise ValueError("YAML file must contain a dictionary")
         return cls(**params)
 
-    def to_yaml(self, yaml_path: Path):
+    def to_yaml(self, yaml_path: Path) -> None:
         """Save configuration to a YAML file."""
         if not YAML_AVAILABLE:
             raise ImportError("PyYAML required for configuration files")
         with open(yaml_path, "w") as f:
             yaml.dump(self.as_dict(), f)
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, object]:
         """Convert configuration to dictionary format."""
         return {
             "spectrum_type": self.spectrum_type,
@@ -206,7 +209,7 @@ class FeffConfig:
             "force_recalculate": self.force_recalculate,
         }
 
-    def __repr_json__(self):
+    def __repr_json__(self) -> str:
         """JSON representation for interactive environments."""
         return json.dumps(self.as_dict(), indent=4)
 
@@ -216,7 +219,7 @@ def validate_absorber(atoms: Atoms, absorber: str | int) -> str:
     if isinstance(absorber, int):
         if not 0 <= absorber < len(atoms):
             raise ValueError(f"Absorber index {absorber} out of range")
-        return atoms.get_chemical_symbols()[absorber]
+        return str(atoms.get_chemical_symbols()[absorber])
     else:
         absorber_element = str(absorber).capitalize()
         symbols = atoms.get_chemical_symbols()
@@ -227,7 +230,7 @@ def validate_absorber(atoms: Atoms, absorber: str | int) -> str:
         return absorber_element
 
 
-def extract_larixite_defaults():
+def extract_larixite_defaults() -> dict[str, str]:
     """Extract default parameters from larixite template for consistency."""
     return {
         "S02": "1.0",
@@ -241,7 +244,7 @@ def extract_larixite_defaults():
 
 
 def generate_pymatgen_input(
-    atoms: Atoms, absorber: str | int, output_dir: Path, config
+    atoms: Atoms, absorber: str | int, output_dir: Path, config: FeffConfig
 ) -> Path:
     """Generate FEFF input using pymatgen with larixite-compatible defaults."""
     if not PYMATGEN_AVAILABLE:
@@ -261,10 +264,22 @@ def generate_pymatgen_input(
 
     # Remove problematic settings for FEFF8L compatibility
     user_settings.pop("COREHOLE", None)
+
+    # Ensure _del is a list
     if "_del" not in user_settings:
-        user_settings["_del"] = []
-    if "COREHOLE" not in user_settings["_del"]:
-        user_settings["_del"].append("COREHOLE")
+        del_list: list[str] = []
+    else:
+        del_value = user_settings["_del"]
+        if isinstance(del_value, str):
+            del_list = [del_value]
+        elif isinstance(del_value, list):
+            del_list = del_value
+        else:
+            raise ValueError("_del must be a string or list of strings")
+
+    user_settings["_del"] = del_list  # type: ignore[assignment]
+    if "COREHOLE" not in del_list:
+        del_list.append("COREHOLE")
 
     # Create FEFF set with consistent parameters
     if config.spectrum_type == "EXAFS":
@@ -286,7 +301,7 @@ def generate_pymatgen_input(
 
 
 def generate_larixite_input(
-    atoms: Atoms, absorber: str | int, output_dir: Path, config
+    atoms: Atoms, absorber: str | int, output_dir: Path, config: FeffConfig
 ) -> Path:
     """Generate FEFF input using larixite with optional user overrides."""
     if not LARIXITE_AVAILABLE:
@@ -365,7 +380,7 @@ def generate_larixite_input(
 
 
 def generate_feff_input(
-    atoms: Atoms, absorber: str | int, output_dir: Path, config
+    atoms: Atoms, absorber: str | int, output_dir: Path, config: FeffConfig
 ) -> Path:
     """Generate FEFF input using the specified method with improved error handling."""
     # Determine method
@@ -558,9 +573,13 @@ def run_feff_calculation(feff_dir: Path, verbose: bool = False) -> bool:
         sys.stderr = original_stderr
 
 
-def read_feff_output(feff_dir: Path):
+def read_feff_output(feff_dir: Path) -> tuple[object, object]:
     """Read FEFF chi.dat output with fallback methods and improved error handling."""
-    import numpy as np
+    try:
+        import numpy as np
+    except ImportError:
+        raise ImportError("NumPy is required for reading FEFF output") from None
+
     from larch.io import read_ascii
 
     chi_file = feff_dir / "chi.dat"
