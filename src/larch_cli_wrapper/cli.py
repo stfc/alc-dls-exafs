@@ -213,7 +213,7 @@ def process(
     force_recalculate: bool = typer.Option(
         False, "--force", help="Skip cache and recalculate"
     ),
- ) -> None:
+) -> None:
     """Process structure or trajectory for EXAFS analysis."""
     # Explicitly indicate no return value for CLI commands
     # (Typer handles exits and prints internally)
@@ -344,7 +344,7 @@ def process_feff_output(
         "--plot-style",
         help="Plot style: publication, presentation, quick",
     ),
- ) -> None:
+) -> None:
     """Process existing FEFF output files (single or trajectory) and generate plots."""
     if not feff_dir.exists():
         console.print(f"[red]Error: Directory {feff_dir} not found[/red]")
@@ -462,7 +462,7 @@ def create_config_example(
     preset: str = typer.Option(
         "publication", "--preset", "-p", help=f"Base preset: {list(PRESETS.keys())}"
     ),
- ) -> None:
+) -> None:
     """Create an example configuration file."""
     if preset not in PRESETS:
         console.print(f"[red]Error: Unknown preset '{preset}'[/red]")

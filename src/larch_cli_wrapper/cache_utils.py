@@ -28,9 +28,7 @@ def get_cache_key(atoms: Atoms, absorber: str, config: Any) -> str:
 
 
 def load_from_cache(
-    cache_key: str,
-    cache_dir: str | Path | None,
-    force_recalculate: bool = False
+    cache_key: str, cache_dir: str | Path | None, force_recalculate: bool = False
 ) -> tuple[Any, Any] | None:
     """Load cached results if available and not forcing recalculation.
 
@@ -62,16 +60,13 @@ def load_from_cache(
                 warnings.warn(
                     f"Failed to delete cache file {cache_file}",
                     UserWarning,
-                    stacklevel=2
+                    stacklevel=2,
                 )
     return None
 
 
 def save_to_cache(
-    cache_key: str,
-    chi: Any,
-    k: Any,
-    cache_dir: str | Path | None
+    cache_key: str, chi: Any, k: Any, cache_dir: str | Path | None
 ) -> None:
     """Save processing results to cache for future use.
 
@@ -96,6 +91,5 @@ def save_to_cache(
     except OSError:
         # If we can't write to cache, continue without caching but inform the user
         warnings.warn(
-            f"Failed to write cache file {cache_file}",
-            UserWarning,
-            stacklevel=2)
+            f"Failed to write cache file {cache_file}", UserWarning, stacklevel=2
+        )

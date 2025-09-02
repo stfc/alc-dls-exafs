@@ -185,6 +185,7 @@ class ProcessingResult:
     Stores the processed EXAFS data along with plotting information,
     processing mode, and caching statistics.
     """
+
     exafs_group: Group
     plot_paths: dict[str, Path]  # e.g., {"pdf": ..., "svg": ..., "png": ...}
     processing_mode: ProcessingMode
