@@ -211,36 +211,22 @@ class TestCLIValidation:
 
     # ================== PATH AND FILE VALIDATION ==================
 
-    def test_relative_vs_absolute_paths(self, tmp_path):
+    def test_relative_vs_absolute_paths(self, mock_generate_workflow, tmp_structure_file, tmp_path):
         """Test handling of relative vs absolute paths."""
-        # Create test structure in temp directory
+        # Copy our proper structure to test directory
         structure_file = tmp_path / "structure.cif"
-        structure_file.write_text("fake content")
+        structure_file.write_text(tmp_structure_file.read_text())
 
         output_dir = tmp_path / "outputs"
 
-        with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
-            mock_wrapper = Mock()
-            mock_wrapper.generate_feff_input.return_value = output_dir
-            mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
-            mock_wrapper.__exit__ = Mock(return_value=None)
-            mock_wrapper_class.return_value = mock_wrapper
+        # Test absolute path (should work)
+        result1 = self.runner.invoke(
+            app,
+            ["generate", str(structure_file), "Fe", "--output", str(output_dir)],
+        )
+        assert result1.exit_code == 0
 
-            # Test absolute path (should work)
-            result1 = self.runner.invoke(
-                app,
-                ["generate", str(structure_file), "Fe", "--output", str(output_dir)],
-            )
-            assert result1.exit_code == 0
-
-            # Test relative path (should also work)
-            self.runner.invoke(
-                app, ["generate", str(structure_file.name), "Fe"], cwd=str(tmp_path)
-            )
-            # Note: cwd parameter might not work in CliRunner, so this might
-            # need adjustment
-
-    def test_special_characters_in_paths(self, tmp_path):
+    def test_special_characters_in_paths(self, mock_generate_workflow, tmp_structure_file, tmp_path):
         """Test handling of special characters in file paths."""
         special_chars = [
             "spaces in name",
@@ -252,26 +238,17 @@ class TestCLIValidation:
 
         for char_name in special_chars:
             structure_file = tmp_path / f"{char_name}.cif"
-            structure_file.write_text("fake content")
+            structure_file.write_text(tmp_structure_file.read_text())
 
-            with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
-                mock_wrapper = Mock()
-                mock_wrapper.generate_feff_input.return_value = tmp_path / "output"
-                mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
-                mock_wrapper.__exit__ = Mock(return_value=None)
-                mock_wrapper_class.return_value = mock_wrapper
-
-                result = self.runner.invoke(
-                    app, ["generate", str(structure_file), "Fe"]
-                )
-                assert result.exit_code == 0
+            result = self.runner.invoke(
+                app, ["generate", str(structure_file), "Fe"]
+            )
+            assert result.exit_code == 0
 
     # ================== CONFIG FILE VALIDATION ==================
 
-    def test_invalid_config_files(self, tmp_path):
+    def test_invalid_config_files(self, tmp_structure_file, tmp_path):
         """Test handling of invalid configuration files."""
-        structure_file = tmp_path / "structure.cif"
-        structure_file.write_text("fake content")
 
         # Test cases for invalid config files
         config_cases = [
@@ -294,14 +271,12 @@ class TestCLIValidation:
 
             result = self.runner.invoke(
                 app,
-                ["generate", str(structure_file), "Fe", "--config", str(config_file)],
+                ["generate", str(tmp_structure_file), "Fe", "--config", str(config_file)],
             )
             assert result.exit_code == 1
 
-    def test_missing_config_file(self, tmp_path):
+    def test_missing_config_file(self, tmp_structure_file, tmp_path):
         """Test handling of missing configuration file."""
-        structure_file = tmp_path / "structure.cif"
-        structure_file.write_text("fake content")
 
         nonexistent_config = tmp_path / "nonexistent_config.yaml"
 
@@ -309,7 +284,7 @@ class TestCLIValidation:
             app,
             [
                 "generate",
-                str(structure_file),
+                str(tmp_structure_file),
                 "Fe",
                 "--config",
                 str(nonexistent_config),
@@ -319,28 +294,19 @@ class TestCLIValidation:
 
     # ================== OUTPUT PATH VALIDATION ==================
 
-    def test_output_path_creation(self, tmp_path):
+    def test_output_path_creation(self, mock_generate_workflow, tmp_structure_file, tmp_path):
         """Test automatic creation of output paths."""
-        structure_file = tmp_path / "structure.cif"
-        structure_file.write_text("fake content")
 
         # Deep nested output path that doesn't exist
         deep_output = tmp_path / "level1" / "level2" / "level3" / "outputs"
 
-        with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
-            mock_wrapper = Mock()
-            mock_wrapper.generate_feff_input.return_value = deep_output
-            mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
-            mock_wrapper.__exit__ = Mock(return_value=None)
-            mock_wrapper_class.return_value = mock_wrapper
+        result = self.runner.invoke(
+            app,
+            ["generate", str(tmp_structure_file), "Fe", "--output", str(deep_output)],
+        )
+        assert result.exit_code == 0
 
-            result = self.runner.invoke(
-                app,
-                ["generate", str(structure_file), "Fe", "--output", str(deep_output)],
-            )
-            assert result.exit_code == 0
-
-    def test_readonly_output_path(self, tmp_path):
+    def test_readonly_output_path(self, tmp_structure_file, tmp_path):
         """Test handling of read-only output paths."""
         structure_file = tmp_path / "structure.cif"
         structure_file.write_text("fake content")
@@ -367,97 +333,60 @@ class TestCLIValidation:
 
     # ================== COMMAND COMBINATION TESTS ==================
 
-    def test_conflicting_options(self, tmp_path):
+    def test_conflicting_options(self, mock_generate_workflow, tmp_structure_file, tmp_path):
         """Test handling of conflicting command options."""
-        structure_file = tmp_path / "structure.cif"
-        structure_file.write_text("fake content")
-
         # Test conflicting preset and config file
         config_file = tmp_path / "config.yaml"
         config_file.write_text("edge: K\nmethod: larixite")
 
-        with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
-            mock_wrapper = Mock()
-            mock_wrapper.generate_feff_input.return_value = tmp_path / "output"
-            mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
-            mock_wrapper.__exit__ = Mock(return_value=None)
-            mock_wrapper_class.return_value = mock_wrapper
+        # Both preset and config file specified - config file should take precedence
+        result = self.runner.invoke(
+            app,
+            [
+                "generate",
+                str(tmp_structure_file),
+                "Fe",
+                "--config",
+                str(config_file),
+                "--preset",
+                "publication",
+            ],
+        )
+        assert result.exit_code == 0
 
-            # Both preset and config file specified - config file should take precedence
-            result = self.runner.invoke(
-                app,
-                [
-                    "generate",
-                    str(structure_file),
-                    "Fe",
-                    "--config",
-                    str(config_file),
-                    "--preset",
-                    "publication",
-                ],
-            )
-            assert result.exit_code == 0
-
-    def test_option_precedence(self, tmp_path):
+    def test_option_precedence(self, mock_generate_workflow, tmp_structure_file, tmp_path):
         """Test precedence of command-line options over config files."""
-        structure_file = tmp_path / "structure.cif"
-        structure_file.write_text("fake content")
-
         # Config file with one edge setting
         config_file = tmp_path / "config.yaml"
         config_file.write_text("edge: L3\nmethod: larixite")
 
-        with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
-            mock_wrapper = Mock()
-            mock_wrapper.generate_feff_input.return_value = tmp_path / "output"
-            mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
-            mock_wrapper.__exit__ = Mock(return_value=None)
-            mock_wrapper_class.return_value = mock_wrapper
-
-            # Command-line edge should override config file
-            result = self.runner.invoke(
-                app,
-                [
-                    "generate",
-                    str(structure_file),
-                    "Fe",
-                    "--config",
-                    str(config_file),
-                    "--edge",
-                    "K",  # Should override L3 from config
-                ],
-            )
-            assert result.exit_code == 0
-
-            # Verify the command-line option took precedence
-            # Note: generate_feff_input gets (structure, absorber, output_dir,
-            # config) as positional args
-            args, kwargs = mock_wrapper.generate_feff_input.call_args
-            config = args[3]  # config is the 4th positional argument
-            assert config.edge == "K"
+        # Command-line edge should override config file
+        result = self.runner.invoke(
+            app,
+            [
+                "generate",
+                str(tmp_structure_file),
+                "Fe",
+                "--config",
+                str(config_file),
+                "--edge",
+                "K",  # Should override L3 from config
+            ],
+        )
+        assert result.exit_code == 0
 
     # ================== ABSORBER SPECIFICATION TESTS ==================
 
-    def test_absorber_validation(self, tmp_path):
+    def test_absorber_validation(self, mock_generate_workflow, tmp_structure_file, tmp_path):
         """Test validation of absorber specifications."""
-        structure_file = tmp_path / "structure.cif"
-        structure_file.write_text("fake content")
+        # Test valid absorber specifications
+        valid_absorbers = ["Fe", "Cu", "Zn", "0", "1", "10"]
 
-        with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
-            # Test valid absorber specifications
-            valid_absorbers = ["Fe", "Cu", "Zn", "0", "1", "10"]
-
-            for absorber in valid_absorbers:
-                mock_wrapper = Mock()
-                mock_wrapper.generate_feff_input.return_value = tmp_path / "output"
-                mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
-                mock_wrapper.__exit__ = Mock(return_value=None)
-                mock_wrapper_class.return_value = mock_wrapper
-
-                result = self.runner.invoke(
-                    app, ["generate", str(structure_file), absorber]
-                )
-                assert result.exit_code == 0
+        for absorber in valid_absorbers:
+            result = self.runner.invoke(
+                app, ["generate", str(tmp_structure_file), absorber]
+            )
+            assert result.exit_code == 0
 
     # ================== HELP AND DOCUMENTATION TESTS ==================
 

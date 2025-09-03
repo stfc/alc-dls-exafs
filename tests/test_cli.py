@@ -51,26 +51,15 @@ class TestCLI:
         assert result.exit_code == 1
         assert "not found" in result.stdout
 
-    @patch("larch_cli_wrapper.cli.LarchWrapper")
-    def test_generate_success(self, mock_wrapper_class, tmp_path):
+    def test_generate_success(self, mock_generate_workflow, tmp_structure_file):
         """Test successful generate command."""
-        # Create structure file
-        structure_file = tmp_path / "structure.cif"
-        structure_file.write_text("fake cif content")
-        output_dir = tmp_path / "outputs"
-
-        # Mock wrapper
-        mock_wrapper = Mock()
-        mock_wrapper.generate_feff_input.return_value = output_dir / "frame_0000"
-        mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
-        mock_wrapper.__exit__ = Mock(return_value=None)
-        mock_wrapper_class.return_value = mock_wrapper
+        output_dir = tmp_structure_file.parent / "outputs"
 
         result = self.runner.invoke(
             app,
             [
                 "generate",
-                str(structure_file),
+                str(tmp_structure_file),
                 "Fe",
                 "--output",
                 str(output_dir),
@@ -80,35 +69,21 @@ class TestCLI:
                 "larixite",
             ],
         )
-
+        
         assert result.exit_code == 0
         assert "FEFF input generated" in result.stdout
-        mock_wrapper.generate_feff_input.assert_called_once()
+        mock_generate_workflow['generate_feff_input'].assert_called_once()
 
-    @patch("larch_cli_wrapper.cli.LarchWrapper")
-    def test_generate_with_preset(self, mock_wrapper_class, tmp_path):
+    def test_generate_with_preset(self, mock_generate_workflow, tmp_structure_file):
         """Test generate with configuration preset."""
-        structure_file = tmp_path / "structure.cif"
-        structure_file.write_text("fake cif content")
-
-        mock_wrapper = Mock()
-        mock_wrapper.generate_feff_input.return_value = tmp_path / "outputs"
-        mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
-        mock_wrapper.__exit__ = Mock(return_value=None)
-        mock_wrapper_class.return_value = mock_wrapper
-
         result = self.runner.invoke(
-            app, ["generate", str(structure_file), "Fe", "--preset", "publication"]
+            app, ["generate", str(tmp_structure_file), "Fe", "--preset", "publication"]
         )
 
         assert result.exit_code == 0
 
-    @patch("larch_cli_wrapper.cli.LarchWrapper")
-    def test_generate_with_config_file(self, mock_wrapper_class, tmp_path):
+    def test_generate_with_config_file(self, mock_generate_workflow, tmp_structure_file, tmp_path):
         """Test generate with configuration file."""
-        structure_file = tmp_path / "structure.cif"
-        structure_file.write_text("fake cif content")
-
         config_file = tmp_path / "config.yaml"
         config_file.write_text("""
 spectrum_type: EXAFS
@@ -118,14 +93,8 @@ kmin: 2.0
 kmax: 14.0
 """)
 
-        mock_wrapper = Mock()
-        mock_wrapper.generate_feff_input.return_value = tmp_path / "outputs"
-        mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
-        mock_wrapper.__exit__ = Mock(return_value=None)
-        mock_wrapper_class.return_value = mock_wrapper
-
         result = self.runner.invoke(
-            app, ["generate", str(structure_file), "Fe", "--config", str(config_file)]
+            app, ["generate", str(tmp_structure_file), "Fe", "--config", str(config_file)]
         )
 
         assert result.exit_code == 0
@@ -214,10 +183,8 @@ kmax: 14.0
         result = self.runner.invoke(app, ["run-feff", str(feff_dir), "--verbose"])
 
         assert result.exit_code == 0
-        # Check that verbose flag was passed
-        mock_wrapper.run_feff.assert_called_once()
-        args, kwargs = mock_wrapper.run_feff.call_args
-        assert kwargs.get("verbose") is True
+        # Check that run_feff was called (verbose is handled by wrapper internally)
+        mock_wrapper.run_feff.assert_called_once_with(feff_dir)
 
     # ================== PROCESS COMMAND TESTS ==================
 

@@ -1,37 +1,31 @@
 """Test configuration and fixtures for CLI test suite."""
 
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import pytest
 
 
 @pytest.fixture
-def tmp_structure_file(tmp_path: Path) -> Path:
-    """Create a temporary structure file for testing."""
-    structure_file = tmp_path / "test_structure.cif"
-    structure_file.write_text("""
-# CIF file for testing
-_chemical_name_common 'Test Structure'
-_cell_length_a 5.0
-_cell_length_b 5.0
-_cell_length_c 5.0
-_cell_angle_alpha 90
-_cell_angle_beta 90
-_cell_angle_gamma 90
-_space_group_name_H-M 'P m -3 m'
-
-loop_
-_atom_site_label
-_atom_site_symbol
-_atom_site_fract_x
-_atom_site_fract_y
-_atom_site_fract_z
-Fe1 Fe 0.0 0.0 0.0
-O1 O 0.5 0.0 0.0
-O2 O 0.0 0.5 0.0
-O3 O 0.0 0.0 0.5
-""")
-    return structure_file
+def mock_generate_workflow(tmp_path):
+    """Mock the generate workflow for CLI tests."""
+    with patch("larch_cli_wrapper.cli.generate_feff_input") as mock_generate, \
+         patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
+        
+        # Mock generate_feff_input function
+        mock_generate.return_value = tmp_path / "outputs" / "frame_0000"
+        
+        # Mock wrapper context manager
+        mock_wrapper = Mock()
+        mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
+        mock_wrapper.__exit__ = Mock(return_value=None)
+        mock_wrapper_class.return_value = mock_wrapper
+        
+        yield {
+            'generate_feff_input': mock_generate,
+            'wrapper_class': mock_wrapper_class,
+            'wrapper': mock_wrapper,
+        }
 
 
 @pytest.fixture
@@ -53,6 +47,52 @@ O 0.0 0.0 1.0
 
     trajectory_file.write_text(trajectory_content)
     return trajectory_file
+
+@pytest.fixture  
+def tmp_structure_file(tmp_path: Path) -> Path:
+    """Create a simple CIF file with minimal crystal structure.
+    
+    This fixture provides a magnetite (Fe3O4) structure that can be used
+    across all tests requiring a valid crystal structure file.
+    """
+    cif_file = tmp_path / "simple_structure.cif"
+    cif_content = """#------------------------------------------------------------------------------
+# STRUCTURE: Magnetite Fe3O4
+#------------------------------------------------------------------------------
+data_magnetite
+_chemical_name_systematic        'Iron oxide'
+_chemical_name_mineral           'Magnetite'
+_chemical_compound_source        'synthetic'
+_chemical_formula_analytical     'Fe3 O4'
+_chemical_formula_sum            'Fe3 O4'
+_chemical_formula_weight         231.54
+_cell_length_a                   8.3970
+_cell_length_b                   8.3970
+_cell_length_c                   8.3970
+_cell_angle_alpha               90.0000
+_cell_angle_beta                90.0000
+_cell_angle_gamma               90.0000
+_cell_volume                    591.85
+_cell_formula_units_Z            8
+_space_group_name_H-M_alt       'F d -3 m'
+_space_group_IT_number          227
+_symmetry_space_group_name_Hall 'F 4d 2 3 -1d'
+_symmetry_space_group_name_H-M  'F d -3 m :2'
+
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+_atom_site_occupancy
+_atom_site_U_iso_or_equiv
+Fe1 Fe 0.12500 0.12500 0.12500 1.0 0.0050
+Fe2 Fe 0.50000 0.50000 0.50000 1.0 0.0050
+O1  O  0.25470 0.25470 0.25470 1.0 0.0050
+"""
+    cif_file.write_text(cif_content)
+    return cif_file
 
 
 @pytest.fixture

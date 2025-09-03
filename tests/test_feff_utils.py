@@ -1,7 +1,7 @@
 """Comprehensive tests for the feff_utils module."""
 
 from pathlib import Path
-from unittest.mock import Mock, mock_open, patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -62,24 +62,34 @@ class TestEnums:
 class TestRunFeffCalculation:
     """Test FEFF calculation execution."""
 
-    @patch("larch.xafs.feffrunner.feff8l")
-    @patch("builtins.open", mock_open())
-    def test_run_calculation_success(self, mock_feff8l):
+    @patch("sys.stdout")
+    @patch("sys.stderr") 
+    def test_run_calculation_success(self, mock_stderr, mock_stdout):
         """Test successful FEFF calculation."""
-        feff_dir = Path("/test/feff_dir")
-        mock_feff8l.return_value = True
-
-        # Due to the complexity of mocking Path.exists(), let's just test the
-        # function doesn't crash. This test focuses on the core functionality
-        # rather than file system mocking
-        try:
-            result = run_feff_calculation(feff_dir, verbose=True)
-            # The function should return either True or False, or raise
-            # FileNotFoundError
-            assert isinstance(result, bool)
-        except FileNotFoundError:
-            # This is expected when the input file doesn't exist
-            pass
+        # Create a real temporary directory for this test
+        import tempfile
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            feff_dir = Path(temp_dir)
+            
+            # Create the required input file
+            input_file = feff_dir / "feff.inp"
+            input_file.write_text("TITLE Test FEFF calculation")
+            
+            # Create the chi.dat file that the function expects to check success
+            chi_file = feff_dir / "chi.dat"
+            chi_file.write_text("# Test chi.dat\n0.0 1.0 0.5\n1.0 2.0 1.0\n")
+            
+            # Mock the imported feff8l function inside the function scope
+            with patch.object(
+                __import__("larch.xafs.feffrunner", fromlist=["feff8l"]), 
+                "feff8l"
+            ) as mock_feff8l:
+                mock_feff8l.return_value = True
+                
+                result = run_feff_calculation(feff_dir, verbose=False)
+                assert result is True
+                mock_feff8l.assert_called_once()
 
     def test_run_calculation_missing_input(self):
         """Test calculation with missing input file."""

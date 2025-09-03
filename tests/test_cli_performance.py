@@ -106,28 +106,18 @@ class TestCLIPerformance:
 
     # ================== STRESS TESTS ==================
 
-    @patch("larch_cli_wrapper.cli.LarchWrapper")
-    def test_rapid_sequential_commands(self, mock_wrapper_class, tmp_path):
+    def test_rapid_sequential_commands(self, tmp_structure_file):
         """Test rapid execution of sequential commands."""
-        structure_file = tmp_path / "structure.cif"
-        structure_file.write_text("fake content")
-
-        mock_wrapper = Mock()
-        mock_wrapper.generate_feff_input.return_value = tmp_path / "output"
-        mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
-        mock_wrapper.__exit__ = Mock(return_value=None)
-        mock_wrapper_class.return_value = mock_wrapper
-
         # Execute same command multiple times rapidly
         for i in range(10):
             result = self.runner.invoke(
                 app,
                 [
                     "generate",
-                    str(structure_file),
+                    str(tmp_structure_file),
                     "Fe",
                     "--output",
-                    str(tmp_path / f"output_{i}"),
+                    str(tmp_structure_file.parent / f"output_{i}"),
                 ],
             )
             assert result.exit_code == 0
@@ -419,7 +409,7 @@ class TestCLIPerformance:
 
     # ================== COMMAND LINE LENGTH TESTS ==================
 
-    def test_very_long_command_lines(self, tmp_path):
+    def test_very_long_command_lines(self, mock_generate_workflow, tmp_structure_file, tmp_path):
         """Test handling of very long command lines."""
         # Create files with very long paths
         deep_path = tmp_path
@@ -427,31 +417,25 @@ class TestCLIPerformance:
             deep_path = deep_path / f"very_long_directory_name_level_{i:02d}"
         deep_path.mkdir(parents=True)
 
+        # Copy our proper structure file to the deep path with a long name
         structure_file = deep_path / "structure_with_very_long_filename.cif"
-        structure_file.write_text("fake content")
+        structure_file.write_text(tmp_structure_file.read_text())
 
         output_path = deep_path / "output_with_very_long_name"
 
-        with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
-            mock_wrapper = Mock()
-            mock_wrapper.generate_feff_input.return_value = output_path
-            mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
-            mock_wrapper.__exit__ = Mock(return_value=None)
-            mock_wrapper_class.return_value = mock_wrapper
+        result = self.runner.invoke(
+            app,
+            [
+                "generate",
+                str(structure_file),
+                "Fe",
+                "--output",
+                str(output_path),
+                "--method",
+                "larixite",
+                "--edge",
+                "K",
+            ],
+        )
 
-            result = self.runner.invoke(
-                app,
-                [
-                    "generate",
-                    str(structure_file),
-                    "Fe",
-                    "--output",
-                    str(output_path),
-                    "--method",
-                    "larixite",
-                    "--edge",
-                    "K",
-                ],
-            )
-
-            assert result.exit_code == 0
+        assert result.exit_code == 0

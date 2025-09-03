@@ -9,7 +9,6 @@ from ase import Atoms
 
 from larch_cli_wrapper.feff_utils import FeffConfig
 from larch_cli_wrapper.wrapper import (
-    NUMBA_AVAILABLE,
     CallbackReporter,
     EXAFSProcessingError,
     FEFFCalculationError,
@@ -20,8 +19,6 @@ from larch_cli_wrapper.wrapper import (
     ProcessingResult,
     StructureValidationError,
     TQDMReporter,
-    _fast_average,
-    _fast_std,
 )
 
 
@@ -386,23 +383,6 @@ class TestLarchWrapper:
                     # Method exists but may fail due to complex dependencies
                     print(f"Process test skipped due to: {e}")
                     pass
-
-    def test_numba_availability(self):
-        """Test NUMBA availability flag."""
-        assert isinstance(NUMBA_AVAILABLE, bool)
-
-        # Test the fast functions exist and work
-        data = np.array([[1, 2, 3], [4, 5, 6]])
-        avg_result = _fast_average(data)
-        std_result = _fast_std(data)
-
-        assert avg_result.shape == (3,)
-        assert std_result.shape == (3,)
-
-        # Should match numpy results
-        np.testing.assert_array_almost_equal(avg_result, np.mean(data, axis=0))
-        np.testing.assert_array_almost_equal(std_result, np.std(data, axis=0))
-
 
 class TestLarchWrapperIntegration:
     """Integration tests for LarchWrapper."""

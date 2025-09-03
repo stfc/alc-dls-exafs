@@ -1019,7 +1019,7 @@ class LarchWrapper:
         print(
             f"System: {diag['system']['platform']} | Python: {diag['system']['python']}"
         )
-        print(f"Dependencies: ASE ✓ ")
+        print("Dependencies: ASE ✓ ")
         print(
             f"Cache: {'Enabled' if diag['cache']['enabled'] else 'Disabled'} | "
             f"{diag['cache']['files']} files | {diag['cache']['size_mb']} MB"

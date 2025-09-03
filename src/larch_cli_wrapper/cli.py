@@ -4,6 +4,8 @@
 from pathlib import Path
 
 import typer
+from ase import Atoms
+from ase.io import read as ase_read
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -70,6 +72,11 @@ def show_info() -> None:
     wrapper.print_diagnostics()
 
 
+def load_structure(structure_path: Path) -> Atoms:
+    """Load structure from file using ASE."""
+    return ase_read(str(structure_path))
+
+
 @app.command("generate")  # type: ignore[misc]
 def generate_inputs(
     structure: Path = typer.Argument(..., help="Path to structure file"),
@@ -99,6 +106,10 @@ def generate_inputs(
         config = _setup_config(config_file, preset)
         config.edge = edge
         config.method = method
+
+        # Load structure file
+        atoms = load_structure(structure)
+
         with LarchWrapper(verbose=True, cache_dir=Path.home() / ".larch_cache"):
             console.print(
                 f"[cyan]Generating FEFF input for {absorber} using "
@@ -106,7 +117,7 @@ def generate_inputs(
             )
 
             # Generate FEFF input using the unified method
-            input_path = generate_feff_input(structure, absorber, output_dir, config)
+            input_path = generate_feff_input(atoms, absorber, output_dir, config)
 
             console.print(f"[green]✓ FEFF input generated: {input_path}[/green]")
             console.print(f"  Check {input_path / 'feff.inp'} for details")
