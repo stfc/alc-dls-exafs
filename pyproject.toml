@@ -44,15 +44,8 @@ Documentation = "https://github.com/stfc/alc-dls-exafs/tree/main/docs"
 larch-cli = "larch_cli_wrapper.cli:app"
 
 [project.optional-dependencies]
-advanced = [
-    "pymatgen>=2022.7",  # For advanced spectrum types and FEFF sets
-]
-performance = [
-    "numba>=0.56",  # For fast trajectory processing
-]
 full = [
     "pymatgen>=2022.7",
-    "numba>=0.56",
 ]
 dev = [
     "pytest",
@@ -139,7 +132,6 @@ module = [
     "larixite.*",
     "ase.*",
     "pymatgen.*",
-    "numba.*",
 ]
 ignore_missing_imports = true
 

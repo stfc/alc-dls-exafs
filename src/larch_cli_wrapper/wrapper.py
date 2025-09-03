@@ -36,29 +36,6 @@ try:
 except ImportError:
     raise ImportError("ASE is required. Install with: pip install ase") from None
 
-# Optional dependencies
-try:
-    import numba
-
-    @numba.jit(nopython=True, cache=True)  # type: ignore[misc]
-    def _fast_average(data: np.ndarray) -> np.ndarray:
-        return np.mean(data, axis=0)
-
-    @numba.jit(nopython=True, cache=True)  # type: ignore[misc]
-    def _fast_std(data: np.ndarray) -> np.ndarray:
-        return np.std(data, axis=0)
-
-    NUMBA_AVAILABLE = True
-except ImportError:
-
-    def _fast_average(data: np.ndarray) -> np.ndarray:
-        return np.mean(data, axis=0)
-
-    def _fast_std(data: np.ndarray) -> np.ndarray:
-        return np.std(data, axis=0)
-
-    NUMBA_AVAILABLE = False
-
 
 # ================== EXCEPTIONS ==================
 class EXAFSProcessingError(Exception):
@@ -805,11 +782,11 @@ class LarchWrapper:
             )
 
         # Always use k_ref (defined from first success)
-        avg_chi = _fast_average(np.array(chi_list))
+        avg_chi = np.mean(np.array(chi_list), axis=0)
         result_group = Group()
         result_group.k = k_ref
         result_group.chi = avg_chi
-        result_group.chi_std = _fast_std(np.array(chi_list))
+        result_group.chi_std = np.std(np.array(chi_list), axis=0)
 
         # Apply FT to averaged spectrum
         xftf(
@@ -1024,7 +1001,6 @@ class LarchWrapper:
             "dependencies": {
                 "ase": True,
                 "larch": True,
-                "numba": NUMBA_AVAILABLE,
             },
             "presets": list(PRESETS.keys()),
             "cache": {
@@ -1043,10 +1019,7 @@ class LarchWrapper:
         print(
             f"System: {diag['system']['platform']} | Python: {diag['system']['python']}"
         )
-        print(
-            f"Dependencies: ASE ✓ | Numba "
-            f"{'✓' if diag['dependencies']['numba'] else '✗'}"
-        )
+        print(f"Dependencies: ASE ✓ ")
         print(
             f"Cache: {'Enabled' if diag['cache']['enabled'] else 'Disabled'} | "
             f"{diag['cache']['files']} files | {diag['cache']['size_mb']} MB"
