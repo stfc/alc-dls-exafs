@@ -4,12 +4,12 @@ A comprehensive CLI and interactive toolkit for Extended X-ray Absorption Fine S
 
 ## Features
 
-- 🚀 **Interactive Marimo App**: Web-based interface for EXAFS processing
+- 🌐 **Interactive Marimo App**: Web-based interface for EXAFS processing
 - 🖥️ **Command Line Interface**: Streamlined CLI for batch processing
-- 📊 **Multiple Processing Modes**: Single structure, trajectory/ensemble processing
+- ⇶ **Multiple Processing Modes**: Single structure, trajectory/ensemble processing
 - 🔧 **FEFF Integration**: Automated FEFF input generation and calculation
 - 📈 **Plotting**: Publication-ready plots with matplotlib and plotly
-- ⚡ **Parallel Processing**: Multi-core support for large datasets
+- 📊 **Parallel Processing**: Multi-core support for large datasets
 - 💾 **Smart Caching**: Intelligent caching to avoid redundant calculations
 
 ## Quick Start
