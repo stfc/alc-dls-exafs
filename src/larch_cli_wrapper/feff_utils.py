@@ -90,6 +90,17 @@ class EdgeType(str, Enum):
     M5 = "M5"
 
 
+class WindowType(str, Enum):
+    """Enumeration of supported window types."""
+
+    HANNING = "hanning"  # cosine-squared taper
+    PARZEN = "parzen"  # linear taper
+    WELCH = "welch"  # quadratic taper
+    GAUSSIAN = "gaussian"  # Gaussian (normal) function window
+    SINE = "sine"  # sine function window
+    KAISER = "kaiser"  # Kaiser-Bessel function-derived window
+
+
 # ================== CONFIGURATION ==================
 @dataclass
 class FeffConfig:
@@ -102,15 +113,50 @@ class FeffConfig:
     user_tag_settings: dict[str, str] = field(
         default_factory=dict
     )  # Empty by default - use method defaults
-    kweight: int = 2
-    window: str = "hanning"
-    dk: float = 1.0
-    kmin: float = 2.0
-    kmax: float = 14.0
+    # FFT parameters for EXAFS transform:
+    kmin: float = 2.0  # starting k for FT Window
+    kmax: float = 14.0  # ending k for FT Window
+    kweight: int = 2  # exponent for weighting spectra by k**kweight
+    dk: float = 1.0  # tapering parameter for FT Window
+    dk2: float | None = None  # second tapering parameter for FT Window (larch default)
+    with_phase: bool = False  # output the phase as well as magnitude, real, imag
+    rmax_out: float = 10.0  # highest R for output data (Ang)
+    window: WindowType = WindowType.HANNING  # type of window function
+    nfft: int | None = None  # value to use for N_fft (None = use larch default: 2048)
+    kstep: float | None = (
+        None  # value to use for delta_k (k[1]-k[0] Ang^-1) (None = use larch default)
+    )
+    # Parallel execution settings
     parallel: bool = False
     n_workers: int | None = None
+    # Trajectory sampling settings
     sample_interval: int = 1
+    # Force recalculation even if output exists
     force_recalculate: bool = False
+    # Clean up unnecessary FEFF output files
+    cleanup_feff_files: bool = True
+
+    # Get dictionary of the FT parameters
+    @property
+    def fourier_params(self) -> dict[str, float | int | str]:
+        """Return Fourier transform parameters as a dictionary."""
+        # Build dict then drop parameters explicitly set to None so that
+        # larch's xftf() function can use its internal defaults. Passing
+        # nfft=None leads to numpy.zeros(None) -> 0-d array and an IndexError
+        # "too many indices" inside xftf_fast.
+        params: dict[str, float | int | str | None] = {
+            "kmin": self.kmin,
+            "kmax": self.kmax,
+            "kweight": self.kweight,
+            "dk": self.dk,
+            "dk2": self.dk2,
+            "with_phase": self.with_phase,
+            "window": self.window,
+            "rmax_out": self.rmax_out,
+            "nfft": self.nfft,  # exclude if None
+            "kstep": self.kstep,
+        }
+        return {k: v for k, v in params.items() if v is not None}
 
     def __post_init__(self) -> None:
         """Post-initialization validation of configuration parameters."""

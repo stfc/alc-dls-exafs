@@ -16,7 +16,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from .feff_utils import PRESETS, EdgeType, FeffConfig, generate_feff_input
+from .feff_utils import PRESETS, EdgeType, FeffConfig, WindowType, generate_feff_input
 from .wrapper import (
     EXAFSProcessingError,
     LarchWrapper,
@@ -188,6 +188,26 @@ def process(
     edge: str = typer.Option(
         EdgeType.K.value, help=f"Absorption edge: {[e.value for e in EdgeType]}"
     ),
+    radius: float = typer.Option(8.0, "--radius", "-r", help="Cluster radius (Å)"),
+    kmin: float = typer.Option(2.0, "--kmin", help="Minimum k (Å⁻¹)"),
+    kmax: float = typer.Option(14.0, "--kmax", help="Maximum k (Å⁻¹)"),
+    kweight: int = typer.Option(2, "--kweight", "-k", help="K-weighting factor"),
+    dk: float = typer.Option(1.0, "--dk", help="K-space step size (Å⁻¹)"),
+    dk2: float | None = typer.Option(
+        None, "--dk2", help="second tapering parameter for FT Window (larch default)"
+    ),
+    with_phase: bool = typer.Option(
+        True, "--with-phase/--no-phase", help="Include phase correction in FT"
+    ),
+    window: WindowType = typer.Option(
+        WindowType.HANNING, "--window", "-w", help="K-space window type"
+    ),
+    rmax_out: float = typer.Option(
+        10.0, "--rmax", help="Maximum R for Fourier transform (Å)"
+    ),
+    kstep: float | None = typer.Option(
+        None, "--kstep", help="Delta k step size (Å⁻¹), None = auto (0.05 Å⁻¹)"
+    ),
     output_dir: Path = typer.Option(
         Path("outputs"), "--output", "-o", help="Output directory"
     ),
@@ -238,7 +258,18 @@ def process(
         config.parallel = parallel
         config.n_workers = n_workers
         config.edge = edge
+        config.radius = radius
         config.method = method
+        # Set Fourier parameters
+        config.kmin = kmin
+        config.kmax = kmax
+        config.kweight = kweight
+        config.dk = dk
+        config.dk2 = dk2
+        config.with_phase = with_phase
+        config.window = window
+        config.rmax_out = rmax_out
+        config.kstep = kstep
 
         with LarchWrapper(
             verbose=True, cache_dir=Path.home() / ".larch_cache"

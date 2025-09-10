@@ -749,14 +749,7 @@ class LarchWrapper:
                     frame_group = Group()
                     frame_group.k = k_ref.copy()
                     frame_group.chi = chi_interp
-                    xftf(
-                        frame_group,
-                        kweight=config.kweight,
-                        window=config.window,
-                        dk=config.dk,
-                        kmin=config.kmin,
-                        kmax=config.kmax,
-                    )
+                    xftf(frame_group, **config.fourier_params)
                     individual_groups.append(frame_group)
 
                     # Update progress after each completed frame
@@ -789,14 +782,7 @@ class LarchWrapper:
         result_group.chi_std = np.std(np.array(chi_list), axis=0)
 
         # Apply FT to averaged spectrum
-        xftf(
-            result_group,
-            kweight=config.kweight,
-            window=config.window,
-            dk=config.dk,
-            kmin=config.kmin,
-            kmax=config.kmax,
-        )
+        xftf(result_group, **config.fourier_params)
 
         # Generate plots
         plot_paths = self.plot_results(
@@ -919,14 +905,7 @@ class LarchWrapper:
             group = Group()
             group.k = result.k
             group.chi = result.chi
-            xftf(
-                group,
-                kweight=config.kweight,
-                window=config.window,
-                dk=config.dk,
-                kmin=config.kmin,
-                kmax=config.kmax,
-            )
+            xftf(group, **config.fourier_params)
             plot_paths = self.plot_results(
                 group,
                 output_dir,
