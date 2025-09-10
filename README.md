@@ -40,29 +40,21 @@ You can also get it by going to GitHub: https://github.com/stfc/alc-dls-exafs, c
 #### Linux/macOS
 
 ```bash
-# Clone the repository (if you haven't already)
-git clone https://github.com/stfc/alc-dls-exafs.git
-cd alc-dls-exafs
-
 # Install with pip (recommended). Run this from within the project directory
-pip install -e .
+pip install .
 
 # Or with all optional dependencies
-pip install -e ".[full]"
+pip install ".[full]"
 ```
 
 #### Windows
 
 ```powershell
-# Clone the repository
-git clone https://github.com/stfc/alc-dls-exafs.git
-cd alc-dls-exafs
-
 # Install with pip (recommended). Run this from within the project directory
-pip install -e .
+pip install .
 
 # Or with all optional dependencies
-pip install -e ".[full]"
+pip install ".[full]"
 ```
 
 Note that if you don't have `git` available, you can download the package directly from GitHub (https://github.com/stfc/alc-dls-exafs) and then follow the above steps. Alternatively, you can install the package directly from GitHub like this:
@@ -71,16 +63,6 @@ Note that if you don't have `git` available, you can download the package direct
 # Install with pip directly from git archive
 pip install https://github.com/stfc/alc-dls-exafs/archive/refs/heads/main.zip
 
-```
-
-#### Alternative: Using uv (faster)
-
-```bash
-# Install uv if not already installed
-pip install uv
-
-# Install the project
-uv pip install -e .
 ```
 
 ### Running the Interactive App
