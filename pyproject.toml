@@ -84,6 +84,8 @@ exclude = [
     "env",
     "build",
     "dist",
+    "scripts",
+    "notebooks",
     "__pypackages__",
 ]
 
