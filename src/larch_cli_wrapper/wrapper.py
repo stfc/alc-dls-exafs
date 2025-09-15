@@ -370,8 +370,9 @@ class LarchWrapper:
 
     def run_feff(self, feff_dir: Path, config: FeffConfig | None = None) -> bool:
         """Run FEFF calculation - now uses utility function."""
+        cleanup = config.cleanup_feff_files if config else True
         result = run_feff_calculation(
-            feff_dir, verbose=self.logger.level <= logging.INFO
+            feff_dir, verbose=self.logger.level <= logging.INFO, cleanup=cleanup
         )
         if result:
             self.logger.info("FEFF calculation completed")
@@ -388,15 +389,122 @@ class LarchWrapper:
         g = Group()
         g.k = k
         g.chi = chi
-        xftf(
-            g,
-            kweight=config.kweight,
-            window=config.window,
-            dk=config.dk,
-            kmin=config.kmin,
-            kmax=config.kmax,
-        )
+        xftf(g, **config.fourier_params)
         return g
+
+    def process_trajectory_feff_outputs(
+        self,
+        frame_dirs: list[Path],
+        output_dir: Path,
+        config: FeffConfig,
+        show_plot: bool = False,
+        plot_style: str = "publication",
+        plot_individual_frames: bool = False,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> ProcessingResult:
+        """Process trajectory FEFF outputs from frame_* subdirectories.
+
+        Args:
+            frame_dirs: List of sorted frame_* directories
+            output_dir: Directory for output files
+            config: FEFF configuration parameters
+            show_plot: Display plots after processing
+            plot_style: Plot style ('publication' or 'presentation')
+            plot_individual_frames: Create plots for each frame
+            progress_callback: Callback function for progress updates
+
+        Returns:
+            ProcessingResult containing averaged EXAFS data and metadata
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        chi_list = []
+        individual_groups = []
+        k_ref = None
+        total_frames = len(frame_dirs)
+
+        # Initialize reporter
+        reporter: ProgressReporter
+        if progress_callback is None:
+            reporter = TQDMReporter(total_frames, "Processing trajectory FEFF outputs")
+        else:
+            reporter = CallbackReporter(progress_callback)
+
+        try:
+            for i, frame_dir in enumerate(frame_dirs):
+                # Update progress
+                reporter.update(i, total_frames, f"Processing {frame_dir.name}")
+
+                chi_file = frame_dir / "chi.dat"
+                if not chi_file.exists():
+                    self.logger.warning(f"No chi.dat found in {frame_dir}, skipping")
+                    continue
+
+                try:
+                    # Read FEFF output for this frame
+                    chi, k = read_feff_output(frame_dir)
+
+                    # Set reference k-grid from first successful frame
+                    if k_ref is None:
+                        k_ref = k.copy()
+
+                    # Interpolate to common k-grid if needed
+                    if not np.array_equal(k, k_ref):
+                        chi_interp = np.interp(k_ref, k, chi, left=0, right=0)
+                    else:
+                        chi_interp = chi
+
+                    chi_list.append(chi_interp)
+
+                    # Create frame group for individual plotting
+                    frame_group = Group()
+                    frame_group.k = k_ref.copy()
+                    frame_group.chi = chi_interp
+                    xftf(frame_group, **config.fourier_params)
+                    individual_groups.append(frame_group)
+
+                except Exception as e:
+                    self.logger.error(f"Error processing {frame_dir}: {e}")
+                    continue
+
+            # Finalize progress
+            reporter.update(total_frames, total_frames, "Completing processing")
+
+            if not chi_list:
+                raise FEFFCalculationError("No valid FEFF outputs found in trajectory")
+
+            # Average the chi data
+            chi_avg = np.mean(chi_list, axis=0)
+
+            # Create averaged EXAFS group
+            avg_group = Group()
+            avg_group.k = k_ref
+            avg_group.chi = chi_avg
+            xftf(avg_group, **config.fourier_params)
+
+            # Generate plots
+            plot_paths = self.plot_results(
+                avg_group,
+                output_dir,
+                "EXAFS_FT_trajectory",
+                show_plot=show_plot,
+                plot_style=plot_style,
+                absorber="auto",  # Could be extracted from FEFF input if needed
+                edge=config.edge,
+                individual_frames=individual_groups if plot_individual_frames else None,
+            )
+
+            return ProcessingResult(
+                exafs_group=avg_group,
+                plot_paths=plot_paths,
+                processing_mode=ProcessingMode.TRAJECTORY,
+                nframes=len(chi_list),
+                individual_frame_groups=individual_groups,
+            )
+
+        finally:
+            reporter.close()
 
     def plot_results(
         self,
@@ -859,7 +967,7 @@ class LarchWrapper:
 
     def process(
         self,
-        structure: Path | str | Atoms,
+        structure: Path | str | Atoms | list[Atoms],
         absorber: str,
         output_dir: Path,
         config: FeffConfig | None = None,
@@ -920,14 +1028,22 @@ class LarchWrapper:
                 plot_paths=plot_paths,
                 processing_mode=ProcessingMode.SINGLE_FRAME,
             )
-
-        # Handle file-based input
-        ase_index = self._construct_ase_index(
-            trajectory, frame_index, config.sample_interval
-        )
-        structures = ase_read(str(structure), index=ase_index)
-        if not isinstance(structures, list):
-            structures = [structures]
+        elif isinstance(structure, list) and all(
+            isinstance(s, Atoms) for s in structure
+        ):
+            if not trajectory and len(structure) > 1:
+                raise ValueError("List of Atoms requires trajectory=True")
+            if frame_index is not None:
+                raise ValueError("frame_index not supported for list of Atoms")
+            structures = structure
+        elif isinstance(structure, str | Path):
+            # Handle file-based input
+            ase_index = self._construct_ase_index(
+                trajectory, frame_index, config.sample_interval
+            )
+            structures = ase_read(str(structure), index=ase_index)
+            if not isinstance(structures, list):
+                structures = [structures]
 
         # Initialize reporter with proper fallback behavior
         reporter: ProgressReporter

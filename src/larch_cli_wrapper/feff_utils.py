@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -253,6 +254,7 @@ class FeffConfig:
             "n_workers": self.n_workers,
             "sample_interval": self.sample_interval,
             "force_recalculate": self.force_recalculate,
+            "cleanup_feff_files": self.cleanup_feff_files,
         }
 
     def __repr_json__(self) -> str:
@@ -472,12 +474,15 @@ def generate_feff_input(
         raise
 
 
-def run_feff_calculation(feff_dir: Path, verbose: bool = False) -> bool:
+def run_feff_calculation(
+    feff_dir: Path, verbose: bool = False, cleanup: bool = True
+) -> bool:
     """Run FEFF calculation with proper error handling.
 
     Args:
         feff_dir: Directory containing feff.inp
         verbose: Whether to enable verbose output
+        cleanup: Whether to clean up unnecessary output files
 
     Returns:
         True if calculation succeeded, False otherwise
@@ -559,6 +564,19 @@ def run_feff_calculation(feff_dir: Path, verbose: bool = False) -> bool:
         chi_file = feff_dir / "chi.dat"
         success = chi_file.exists() and bool(result)
 
+        # Clean up unnecessary files if requested and calculation succeeded
+        if success and cleanup:
+            files_removed = cleanup_feff_output(feff_dir, keep_essential=True)
+            try:
+                with open(
+                    log_path, "a", encoding="utf-8", errors="replace"
+                ) as log_file:
+                    log_file.write(
+                        f"\nCleaned up {files_removed} unnecessary output files\n"
+                    )
+            except OSError:
+                pass
+
         # Final log entry with comprehensive information
         try:
             with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
@@ -617,6 +635,71 @@ def run_feff_calculation(feff_dir: Path, verbose: bool = False) -> bool:
         # Always restore original stdout/stderr
         sys.stdout = original_stdout
         sys.stderr = original_stderr
+
+
+def get_feff_numbered_files(feff_dir: Path) -> list[Path]:
+    """Get all feff####.dat files (any number of digits)."""
+    feff_dir = Path(feff_dir)
+    if not feff_dir.exists():
+        return []
+
+    # Simple regex: feff + digits + .dat (case insensitive)
+    pattern = re.compile(r"^feff\d+\.dat$", re.IGNORECASE)
+
+    feff_files = []
+    for file_path in feff_dir.iterdir():
+        if file_path.is_file() and pattern.match(file_path.name):
+            feff_files.append(file_path)
+
+    return feff_files
+
+
+def cleanup_feff_output(feff_dir: Path, keep_essential: bool = True) -> int:
+    """Clean up FEFF output files to save disk space.
+
+    Args:
+        feff_dir: Directory containing FEFF output files
+        keep_essential: If True, keep only essential files
+
+    Returns:
+        Number of files removed
+    """
+    logger = logging.getLogger("larch_wrapper")
+
+    feff_dir = Path(feff_dir)
+    if not feff_dir.exists():
+        return 0
+
+    files_removed = 0
+
+    # Get all numbered FEFF files (feff0001.dat, feff12345.dat, etc.)
+    feff_files = get_feff_numbered_files(feff_dir)
+
+    # Remove the numbered files
+    for feff_file in feff_files:
+        try:
+            feff_file.unlink()
+            files_removed += 1
+            logger.debug(f"Removed: {feff_file.name}")
+        except OSError as e:
+            logger.warning(f"Could not remove {feff_file}: {e}")
+
+    # If keep_essential=True, also remove some other cleanup files
+    if keep_essential:
+        cleanup_patterns = ["feffrun_*.log", "log*.dat", "misc.dat"]
+        for pattern in cleanup_patterns:
+            for file_to_remove in feff_dir.glob(pattern):
+                try:
+                    file_to_remove.unlink()
+                    files_removed += 1
+                    logger.debug(f"Removed: {file_to_remove.name}")
+                except OSError as e:
+                    logger.warning(f"Could not remove {file_to_remove}: {e}")
+
+    if files_removed > 0:
+        logger.info(f"Removed {files_removed} FEFF files from {feff_dir}")
+
+    return files_removed
 
 
 def read_feff_output(feff_dir: Path) -> tuple[object, object]:

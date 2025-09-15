@@ -20,8 +20,6 @@ from .feff_utils import PRESETS, EdgeType, FeffConfig, WindowType, generate_feff
 from .wrapper import (
     EXAFSProcessingError,
     LarchWrapper,
-    ProcessingMode,
-    ProcessingResult,
 )
 
 app = typer.Typer(
@@ -96,6 +94,9 @@ def generate_inputs(
     method: str = typer.Option(
         "auto", "--method", "-m", help="Method: auto, larixite, pymatgen"
     ),
+    cleanup_feff_files: bool = typer.Option(
+        True, "--cleanup/--no-cleanup", help="Clean up unnecessary FEFF output files"
+    ),
 ) -> None:
     """Generate FEFF input files only."""
     if not structure.exists():
@@ -106,6 +107,7 @@ def generate_inputs(
         config = _setup_config(config_file, preset)
         config.edge = edge
         config.method = method
+        config.cleanup_feff_files = cleanup_feff_files
 
         # Load structure file
         atoms = load_structure(structure)
@@ -200,7 +202,7 @@ def process(
         True, "--with-phase/--no-phase", help="Include phase correction in FT"
     ),
     window: WindowType = typer.Option(
-        WindowType.HANNING, "--window", "-w", help="K-space window type"
+        WindowType.HANNING, "--window", help="K-space window type"
     ),
     rmax_out: float = typer.Option(
         10.0, "--rmax", help="Maximum R for Fourier transform (Å)"
@@ -244,6 +246,9 @@ def process(
     force_recalculate: bool = typer.Option(
         False, "--force", help="Skip cache and recalculate"
     ),
+    cleanup_feff_files: bool = typer.Option(
+        True, "--cleanup/--no-cleanup", help="Clean up unnecessary FEFF output files"
+    ),
 ) -> None:
     """Process structure or trajectory for EXAFS analysis."""
     # Explicitly indicate no return value for CLI commands
@@ -260,6 +265,7 @@ def process(
         config.edge = edge
         config.radius = radius
         config.method = method
+        config.cleanup_feff_files = cleanup_feff_files
         # Set Fourier parameters
         config.kmin = kmin
         config.kmax = kmax
@@ -402,11 +408,13 @@ def process_feff_output(
             verbose=True, cache_dir=Path.home() / ".larch_cache"
         ) as wrapper:
             chi_file = feff_dir / "chi.dat"
-            frame_dirs = [
-                d
-                for d in feff_dir.iterdir()
-                if d.is_dir() and d.name.startswith("frame_")
-            ]
+            frame_dirs = sorted(
+                [
+                    d
+                    for d in feff_dir.iterdir()
+                    if d.is_dir() and d.name.startswith("frame_")
+                ]
+            )
 
             if frame_dirs:
                 console.print(
@@ -414,10 +422,9 @@ def process_feff_output(
                     f"{len(frame_dirs)} frames...[/cyan]"
                 )
 
-                # For trajectory processing, we need to create a virtual structure path
-                # that the wrapper can process as a trajectory
                 with create_progress() as progress:
                     task_id: int | None = None
+                    total_frames = len(frame_dirs)
 
                     def progress_callback(
                         current: int, total: int, description: str
@@ -425,24 +432,28 @@ def process_feff_output(
                         nonlocal task_id
                         if task_id is None:
                             task_id = progress.add_task(description, total=total)
-                            progress.update(task_id, completed=current)
-                        else:
-                            progress.update(
-                                task_id, completed=current, description=description
-                            )
+                        progress.update(
+                            task_id, completed=current, description=description
+                        )
 
-                    # Process using the main process method
-                    result = wrapper.process(
-                        structure=feff_dir,  # Not used directly for trajectory output
-                        absorber="auto",  # Will be determined from the data
+                    # Process trajectory FEFF outputs
+                    result = wrapper.process_trajectory_feff_outputs(
+                        frame_dirs=frame_dirs,
                         output_dir=output_dir,
                         config=config,
-                        trajectory=True,
                         show_plot=show_plot,
                         plot_style=plot_style,
                         plot_individual_frames=plot_individual_frames,
                         progress_callback=progress_callback,
                     )
+
+                    # Ensure completion
+                    if task_id is not None:
+                        progress.update(
+                            task_id,
+                            completed=total_frames,
+                            description="[green]✓ Complete![/green]",
+                        )
 
                 console.print("[green]✓ Trajectory processed[/green]")
                 console.print(f"  Output: {output_dir}")
@@ -457,7 +468,7 @@ def process_feff_output(
                 console.print("[cyan]Processing single FEFF output...[/cyan]")
                 exafs_group = wrapper.process_feff_output(feff_dir, config)
 
-                # Create a proper ProcessingResult for consistent output
+                # Create plots
                 plot_paths = wrapper.plot_results(
                     exafs_group,
                     output_dir,
@@ -466,15 +477,7 @@ def process_feff_output(
                     plot_style=plot_style,
                 )
 
-                result = ProcessingResult(
-                    exafs_group=exafs_group,
-                    plot_paths=plot_paths,
-                    processing_mode=ProcessingMode.SINGLE_FRAME,
-                )
-
-                formats = ", ".join(f"{k.upper()}" for k in plot_paths.keys())
                 console.print("[green]✓ Single output processed[/green]")
-                console.print(f"  Plots: {formats}")
                 console.print(f"  Output: {output_dir}")
 
                 # Show plot paths
@@ -523,6 +526,7 @@ window: {config.window}
 dk: {config.dk}
 method: {config.method}
 force_recalculate: false  # Set to true to skip cache
+cleanup_feff_files: true  # Set to false to keep all FEFF output files
 
 # User tag settings (empty = use larixite defaults)
 user_tag_settings: {dict(config.user_tag_settings) or "{}"}
