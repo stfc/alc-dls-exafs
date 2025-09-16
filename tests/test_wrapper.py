@@ -384,6 +384,7 @@ class TestLarchWrapper:
                     print(f"Process test skipped due to: {e}")
                     pass
 
+
 class TestLarchWrapperIntegration:
     """Integration tests for LarchWrapper."""
 

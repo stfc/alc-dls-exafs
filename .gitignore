@@ -124,7 +124,7 @@ examples/*/*.svg
 scripts/*/outputs/
 scripts/*/feff/
 scripts/*/*.png
-scripts/*/*.pdf  
+scripts/*/*.pdf
 scripts/*/*.svg
 scripts/*/chi.dat
 scripts/*/*.dat

@@ -9,22 +9,23 @@ import pytest
 @pytest.fixture
 def mock_generate_workflow(tmp_path):
     """Mock the generate workflow for CLI tests."""
-    with patch("larch_cli_wrapper.cli.generate_feff_input") as mock_generate, \
-         patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
-        
+    with (
+        patch("larch_cli_wrapper.cli.generate_feff_input") as mock_generate,
+        patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class,
+    ):
         # Mock generate_feff_input function
         mock_generate.return_value = tmp_path / "outputs" / "frame_0000"
-        
+
         # Mock wrapper context manager
         mock_wrapper = Mock()
         mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper
-        
+
         yield {
-            'generate_feff_input': mock_generate,
-            'wrapper_class': mock_wrapper_class,
-            'wrapper': mock_wrapper,
+            "generate_feff_input": mock_generate,
+            "wrapper_class": mock_wrapper_class,
+            "wrapper": mock_wrapper,
         }
 
 
@@ -48,10 +49,11 @@ O 0.0 0.0 1.0
     trajectory_file.write_text(trajectory_content)
     return trajectory_file
 
-@pytest.fixture  
+
+@pytest.fixture
 def tmp_structure_file(tmp_path: Path) -> Path:
     """Create a simple CIF file with minimal crystal structure.
-    
+
     This fixture provides a magnetite (Fe3O4) structure that can be used
     across all tests requiring a valid crystal structure file.
     """

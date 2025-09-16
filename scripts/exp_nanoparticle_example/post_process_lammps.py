@@ -159,4 +159,3 @@ avg_ps = info['rdf_avg_steps'] * info['timestep']
 plot_rdfs(r, g, info['species'], info['temp'], avg_ps, info['pair_style'])
 plot_cns(r, cn, info['species'], info['temp'], avg_ps, info['pair_style'])
 read_msd("msd_final.dat", threshold=0.5)
-

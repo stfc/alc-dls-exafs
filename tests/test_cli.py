@@ -69,10 +69,10 @@ class TestCLI:
                 "larixite",
             ],
         )
-        
+
         assert result.exit_code == 0
         assert "FEFF input generated" in result.stdout
-        mock_generate_workflow['generate_feff_input'].assert_called_once()
+        mock_generate_workflow["generate_feff_input"].assert_called_once()
 
     def test_generate_with_preset(self, mock_generate_workflow, tmp_structure_file):
         """Test generate with configuration preset."""
@@ -82,7 +82,9 @@ class TestCLI:
 
         assert result.exit_code == 0
 
-    def test_generate_with_config_file(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_generate_with_config_file(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test generate with configuration file."""
         config_file = tmp_path / "config.yaml"
         config_file.write_text("""
@@ -94,7 +96,8 @@ kmax: 14.0
 """)
 
         result = self.runner.invoke(
-            app, ["generate", str(tmp_structure_file), "Fe", "--config", str(config_file)]
+            app,
+            ["generate", str(tmp_structure_file), "Fe", "--config", str(config_file)],
         )
 
         assert result.exit_code == 0

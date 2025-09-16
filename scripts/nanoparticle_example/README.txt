@@ -11,7 +11,7 @@ lammpsIn_constP:
     Potential file included (zipped)
 
 post_process_lammps.py:
-    Plot RDFs and CNs, report MSDs (total and per species), 
+    Plot RDFs and CNs, report MSDs (total and per species),
     and issue a warning if MSD threshold exceeded (diffusion detected).
     Example RDF plot ('rdfs_plot.png') included.
 

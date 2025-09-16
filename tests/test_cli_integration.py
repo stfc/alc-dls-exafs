@@ -1,6 +1,6 @@
 """Integration tests for CLI commands with realistic scenarios."""
 
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import yaml
 from typer.testing import CliRunner
@@ -19,13 +19,15 @@ class TestCLIIntegration:
 
     # ================== WORKFLOW INTEGRATION TESTS ==================
 
-    def test_full_workflow_generate_run_process(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_full_workflow_generate_run_process(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test complete workflow: generate -> run-feff -> process-output."""
         feff_dir = tmp_path / "feff_output"
         feff_dir.mkdir()
 
         # Mock wrapper with realistic behavior
-        mock_wrapper = mock_generate_workflow['wrapper']
+        mock_wrapper = mock_generate_workflow["wrapper"]
         mock_wrapper.run_feff.return_value = True
         mock_wrapper.process_feff_output.return_value = Mock()
         mock_wrapper.plot_results.return_value = {"pdf": feff_dir / "plot.pdf"}
@@ -85,7 +87,7 @@ O 0.0 1.0 0.0
             processing_mode="trajectory",
             nframes=5,
         )
-        mock_generate_workflow['wrapper'].process.return_value = mock_result
+        mock_generate_workflow["wrapper"].process.return_value = mock_result
 
         result = self.runner.invoke(
             app,
@@ -111,14 +113,16 @@ O 0.0 1.0 0.0
 
         # Verify all options were passed correctly
         # Note: The exact parameter structure may vary
-        if mock_generate_workflow['wrapper'].process.called:
-            args, kwargs = mock_generate_workflow['wrapper'].process.call_args
+        if mock_generate_workflow["wrapper"].process.called:
+            args, kwargs = mock_generate_workflow["wrapper"].process.call_args
             # Just verify the call was made with trajectory processing
             assert result.exit_code == 0
 
     # ================== CONFIGURATION SCENARIOS ==================
 
-    def test_comprehensive_config_file(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_comprehensive_config_file(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test with comprehensive configuration file."""
         config_file = tmp_path / "comprehensive_config.yaml"
         config_data = {
@@ -149,7 +153,7 @@ O 0.0 1.0 0.0
             plot_paths={"pdf": tmp_path / "plot.pdf"},
             processing_mode="single_frame",
         )
-        mock_generate_workflow['wrapper'].process.return_value = mock_result
+        mock_generate_workflow["wrapper"].process.return_value = mock_result
 
         result = self.runner.invoke(
             app,
@@ -159,19 +163,21 @@ O 0.0 1.0 0.0
         assert result.exit_code == 0
 
         # Verify config was loaded correctly (parameters may vary)
-        if mock_generate_workflow['wrapper'].process.called:
+        if mock_generate_workflow["wrapper"].process.called:
             assert result.exit_code == 0
 
-    def test_preset_combinations(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_preset_combinations(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test different preset combinations."""
-        
+
         for preset_name in PRESETS.keys():
             mock_result = ProcessingResult(
                 exafs_group=Mock(),
                 plot_paths={"pdf": tmp_path / "plot.pdf"},
                 processing_mode="single_frame",
             )
-            mock_generate_workflow['wrapper'].process.return_value = mock_result
+            mock_generate_workflow["wrapper"].process.return_value = mock_result
 
             result = self.runner.invoke(
                 app,
@@ -184,7 +190,7 @@ O 0.0 1.0 0.0
 
     def test_permission_errors(self, tmp_structure_file, tmp_path):
         """Test handling of permission errors."""
-        
+
         # Try to write to a read-only directory
         readonly_dir = tmp_path / "readonly"
         readonly_dir.mkdir(mode=0o444)
@@ -192,7 +198,13 @@ O 0.0 1.0 0.0
         try:
             result = self.runner.invoke(
                 app,
-                ["generate", str(tmp_structure_file), "Fe", "--output", str(readonly_dir)],
+                [
+                    "generate",
+                    str(tmp_structure_file),
+                    "Fe",
+                    "--output",
+                    str(readonly_dir),
+                ],
             )
             # Should handle the error gracefully
             assert result.exit_code == 1
@@ -200,11 +212,15 @@ O 0.0 1.0 0.0
             # Cleanup - restore write permissions
             readonly_dir.chmod(0o755)
 
-    def test_memory_intensive_operations(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_memory_intensive_operations(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test handling of memory-intensive operations."""
-        
+
         # Mock a memory error during processing
-        mock_generate_workflow['wrapper'].process.side_effect = MemoryError("Out of memory")
+        mock_generate_workflow["wrapper"].process.side_effect = MemoryError(
+            "Out of memory"
+        )
 
         result = self.runner.invoke(
             app,
@@ -223,9 +239,11 @@ O 0.0 1.0 0.0
 
     # ================== PLOTTING AND OUTPUT SCENARIOS ==================
 
-    def test_different_plot_formats(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_different_plot_formats(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test generation of different plot formats."""
-        
+
         # Mock result with multiple plot formats
         plot_paths = {
             "pdf": tmp_path / "plot.pdf",
@@ -237,7 +255,7 @@ O 0.0 1.0 0.0
         mock_result = ProcessingResult(
             exafs_group=Mock(), plot_paths=plot_paths, processing_mode="single_frame"
         )
-        mock_generate_workflow['wrapper'].process.return_value = mock_result
+        mock_generate_workflow["wrapper"].process.return_value = mock_result
 
         result = self.runner.invoke(app, ["process", str(tmp_structure_file), "Fe"])
 
@@ -247,9 +265,11 @@ O 0.0 1.0 0.0
         assert "SVG" in result.stdout
         assert "EPS" in result.stdout
 
-    def test_plot_style_variations(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_plot_style_variations(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test different plot style options."""
-        
+
         plot_styles = ["publication", "presentation", "quick"]
 
         for style in plot_styles:
@@ -258,7 +278,7 @@ O 0.0 1.0 0.0
                 plot_paths={"pdf": tmp_path / f"plot_{style}.pdf"},
                 processing_mode="single_frame",
             )
-            mock_generate_workflow['wrapper'].process.return_value = mock_result
+            mock_generate_workflow["wrapper"].process.return_value = mock_result
 
             result = self.runner.invoke(
                 app, ["process", str(tmp_structure_file), "Fe", "--plot-style", style]
@@ -267,29 +287,40 @@ O 0.0 1.0 0.0
             assert result.exit_code == 0
 
             # Verify style was passed to workflow (parameters may vary)
-            if mock_generate_workflow['wrapper'].process.called:
+            if mock_generate_workflow["wrapper"].process.called:
                 assert result.exit_code == 0
 
     # ================== CACHE OPERATION SCENARIOS ==================
 
     def test_cache_operations_comprehensive(self, mock_generate_workflow):
         """Test comprehensive cache operations."""
-        
+
         # Mock cache info responses
         def mock_cache_info(*args, **kwargs):
             # For now, return a simple enabled state
-            return {"enabled": True, "cache_dir": "/tmp/cache", "files": 5, "size_mb": 12.3}
+            return {
+                "enabled": True,
+                "cache_dir": "/tmp/cache",
+                "files": 5,
+                "size_mb": 12.3,
+            }
 
-        # Test cache info command  
+        # Test cache info command
         result = self.runner.invoke(app, ["cache", "info"])
         # Cache operations may not be fully implemented yet, so accept various exit codes
-        assert result.exit_code in [0, 1, 2]  # 0 for success, 1 for error, 2 for command not found
+        assert result.exit_code in [
+            0,
+            1,
+            2,
+        ]  # 0 for success, 1 for error, 2 for command not found
 
     # ================== EDGE TYPE AND METHOD COMBINATIONS ==================
 
-    def test_edge_type_method_combinations(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_edge_type_method_combinations(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test various edge type and method combinations."""
-        
+
         edge_types = ["K", "L1", "L2", "L3"]
         methods = ["auto", "larixite", "pymatgen"]
 
@@ -300,7 +331,9 @@ O 0.0 1.0 0.0
                     plot_paths={"pdf": tmp_path / f"plot_{edge}_{method}.pdf"},
                     processing_mode="single_frame",
                 )
-                mock_generate_workflow['generate_feff_input'].return_value = tmp_path / "output"
+                mock_generate_workflow["generate_feff_input"].return_value = (
+                    tmp_path / "output"
+                )
 
                 result = self.runner.invoke(
                     app,
@@ -320,7 +353,7 @@ O 0.0 1.0 0.0
                 )
 
                 # Verify parameters were passed correctly
-                args, kwargs = mock_generate_workflow['generate_feff_input'].call_args
+                args, kwargs = mock_generate_workflow["generate_feff_input"].call_args
                 atoms_arg, absorber_arg, output_dir_arg, config_arg = args
                 assert absorber_arg == "Fe"
                 assert config_arg.edge == edge
@@ -328,9 +361,11 @@ O 0.0 1.0 0.0
 
     # ================== PARALLEL PROCESSING SCENARIOS ==================
 
-    def test_parallel_processing_scenarios(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_parallel_processing_scenarios(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test different parallel processing configurations."""
-        
+
         parallel_configs = [
             {"parallel": True, "workers": None},
             {"parallel": True, "workers": 2},
@@ -345,7 +380,7 @@ O 0.0 1.0 0.0
                 processing_mode="trajectory",
                 nframes=10,
             )
-            mock_generate_workflow['wrapper'].process.return_value = mock_result
+            mock_generate_workflow["wrapper"].process.return_value = mock_result
 
             cmd = ["process", str(tmp_structure_file), "Fe", "--trajectory"]
 
@@ -361,15 +396,17 @@ O 0.0 1.0 0.0
             assert result.exit_code == 0
 
             # Verify configuration was passed (parameters may vary)
-            if mock_generate_workflow['wrapper'].process.called:
-                # Just verify the call was successful 
+            if mock_generate_workflow["wrapper"].process.called:
+                # Just verify the call was successful
                 assert result.exit_code == 0
 
     # ================== LONG OUTPUT AND PROGRESS TESTS ==================
 
-    def test_long_trajectory_with_progress(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_long_trajectory_with_progress(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test processing of long trajectory with progress updates."""
-        
+
         def simulate_long_process(*args, **kwargs):
             progress_callback = kwargs.get("progress_callback")
             if progress_callback:
@@ -384,7 +421,7 @@ O 0.0 1.0 0.0
                 nframes=100,
             )
 
-        mock_generate_workflow['wrapper'].process.side_effect = simulate_long_process
+        mock_generate_workflow["wrapper"].process.side_effect = simulate_long_process
 
         result = self.runner.invoke(
             app, ["process", str(tmp_structure_file), "Fe", "--trajectory"]
@@ -395,11 +432,15 @@ O 0.0 1.0 0.0
 
     # ================== CLEANUP AND RESOURCE MANAGEMENT ==================
 
-    def test_resource_cleanup_on_interrupt(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_resource_cleanup_on_interrupt(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test proper cleanup when operations are interrupted."""
-        
+
         # Mock an interrupted operation
-        mock_generate_workflow['wrapper'].process.side_effect = KeyboardInterrupt("User interrupted")
+        mock_generate_workflow["wrapper"].process.side_effect = KeyboardInterrupt(
+            "User interrupted"
+        )
 
         result = self.runner.invoke(app, ["process", str(tmp_structure_file), "Fe"])
 

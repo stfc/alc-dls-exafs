@@ -11,7 +11,7 @@ TITLE SpaceGroup: R-3c
 *    with the corresponding site index (counting from 1)
 * site    X       Y       Z     Wyckoff  species
 *   1   0.00000 0.00000 0.35530    12c   Fe   <- absorber
-*   2   0.30590 0.00000 0.25000    18e   O 
+*   2   0.30590 0.00000 0.25000    18e   O
 *
 
 *  <central> <edge> edge energy = <eedge> eV

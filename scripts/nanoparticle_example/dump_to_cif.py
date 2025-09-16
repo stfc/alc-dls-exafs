@@ -72,4 +72,3 @@ atoms = atoms[[i for i, _ in sorted(enumerate(atoms.get_chemical_symbols()), key
 # Write CIF
 write(output_cif, atoms, format="cif")
 print(f"CIF written: {output_cif}")
-

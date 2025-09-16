@@ -79,7 +79,7 @@ def _(mo):
         """
     # EXAFS Pipeline Processing
 
-    Interactive EXAFS processing using the larch wrapper. 
+    Interactive EXAFS processing using the larch wrapper.
     Process single structures or trajectories with customizable parameters.
     """
     )
@@ -155,16 +155,16 @@ def _(
         <style>
           .mo-tabs input {{ display: none; }}
           .mo-tabs .tab-labels {{
-            display: flex; 
-            gap: 0.5rem; 
-            border-bottom: 1px solid #e5e7eb; 
+            display: flex;
+            gap: 0.5rem;
+            border-bottom: 1px solid #e5e7eb;
             margin-bottom: 1rem;
           }}
           .mo-tabs .tab-label {{
-            padding: 0.5rem 1rem; 
-            cursor: pointer; 
+            padding: 0.5rem 1rem;
+            cursor: pointer;
             border: 1px solid #e5e7eb;
-            border-radius: 0.375rem 0.375rem 0 0; 
+            border-radius: 0.375rem 0.375rem 0 0;
             background: var(--background);
           }}
           .mo-tabs .tab-label:hover {{ background: var(--background); }}
@@ -175,20 +175,20 @@ def _(
             border-bottom-color: white;
             font-weight: 600;
           }}
-          .mo-tabs .tab-panels {{ 
-            border: 1px solid #e5e7eb; 
-            border-radius: 0 0.375rem 0.375rem 0.375rem; 
-            padding: 1rem; 
-            background: var(--background); 
+          .mo-tabs .tab-panels {{
+            border: 1px solid #e5e7eb;
+            border-radius: 0 0.375rem 0.375rem 0.375rem;
+            padding: 1rem;
+            background: var(--background);
           }}
           .mo-tabs .panel {{ display: none; }}
           #tab-run:checked ~ .tab-panels .panel-run,
           #tab-analysis:checked ~ .tab-panels .panel-analysis,
           #tab-par:checked ~ .tab-panels .panel-par {{ display: block; }}
-          .settings-grid {{ 
-            display: grid; 
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); 
-            gap: 1rem; 
+          .settings-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
           }}
           .main-config {{
             display: grid;
@@ -257,9 +257,7 @@ def _(
                 label="Absorbing Species",
             ),
             edge=mo.ui.dropdown(
-                options=[e.name for e in EdgeType], 
-                value="K", 
-                label="Edge"
+                options=[e.name for e in EdgeType], value="K", label="Edge"
             ),
             preset=mo.ui.dropdown(
                 options={name.title(): name for name in PRESETS.keys()},
@@ -354,7 +352,7 @@ def _(mo):
     5. **Run processing** or use existing outputs
     6. **Explore results** using the plot options
 
-    💡 **Tips**: 
+    💡 **Tips**:
     - Use "Process output only" to reanalyze existing FEFF results
     - Enable "Force recalculate" to bypass cache
     - Cache speeds up repeated calculations
@@ -380,6 +378,7 @@ def _(ASEAdapter, AtomsViewer, BaseWidget, guiConfig):
         v.color_type = "VESTA"
         v.cell.settings["showAxes"] = True
         return v._widget
+
     return (view_atoms,)
 
 
@@ -414,6 +413,7 @@ def _(ast, mo):
             return kwargs, mo.md(
                 f"**Error parsing kwargs**: {e}. Using existing kwargs."
             )
+
     return (parse_kwargs_string,)
 
 
@@ -479,6 +479,7 @@ def _(Path, read, tempfile):
         atoms = read(temp_path, **input_kwargs)
         temp_path.unlink()  # Delete the temporary file
         return atoms
+
     return (process_uploaded_structure,)
 
 
@@ -574,6 +575,7 @@ def _(mo, sampling_method):
         elif sampling_method.value == "every Nth":
             index = f"::{int(parameter_input.value)}"
         return {"index": index}
+
     return get_sampling_config, parameter_input
 
 
@@ -603,6 +605,7 @@ def _(FeffConfig):
             # Map cleanup setting
             cleanup_feff_files=settings.get("cleanup_feff_files"),
         )
+
     return (create_feff_config,)
 
 
@@ -638,7 +641,11 @@ def _(ProcessingMode, SimpleNamespace, mo, traceback):
         """Process single existing FEFF output"""
         exafs_group = wrapper.process_feff_output(output_dir, config)
         wrapper.plot_results(
-            exafs_group, output_dir, absorber=absorber, edge=config.edge, chi_weighting="chi"
+            exafs_group,
+            output_dir,
+            absorber=absorber,
+            edge=config.edge,
+            chi_weighting="chi",
         )
         return SimpleNamespace(
             exafs_group=exafs_group,
@@ -696,6 +703,7 @@ def _(ProcessingMode, SimpleNamespace, mo, traceback):
             ### ✅ Single Structure Processed
             - **Output**: `{output_dir}`
         """)
+
     return process_existing_outputs, process_new_structures
 
 
@@ -800,7 +808,9 @@ def _(
     def run_exafs_processing():
         """Function to execute the whole EXAFS processing pipeline."""
         if not settings or not structure_list or not settings.get("absorber"):
-            return mo.md("### ❌ Processing Failed: Missing inputs or configuration."), None
+            return mo.md(
+                "### ❌ Processing Failed: Missing inputs or configuration."
+            ), None
 
         processing_absorber = settings["absorber"].strip()
         output_dir = Path(settings.get("output_dir", DEFAULT_OUTPUT_DIR))
@@ -835,13 +845,14 @@ def _(
             message = mo.md(f"""
                 ### ❌ Processing Failed
                 **Error:** {str(e)}
-                ``` 
-                {traceback.format_exc()} 
+                ```
+                {traceback.format_exc()}
                 ```
                 """)
             result = None
 
         return message, result
+
     return (run_exafs_processing,)
 
 
@@ -921,6 +932,7 @@ def _(go, message, mo, plot_type, result, settings):
 
     def add_chi_plot(fig, exafs_group, individual_frames, chi_weighting, show_legend):
         """Add chi(k) plot traces"""
+
         # Apply weighting to data
         def apply_weighting(k, chi):
             if chi_weighting == "k²χ(k)":
@@ -945,16 +957,18 @@ def _(go, message, mo, plot_type, result, settings):
                     )
                 )
 
-    
         weighted_chi = apply_weighting(exafs_group.k, exafs_group.chi)
         k = exafs_group.k
 
         if hasattr(exafs_group, "chi_std") and should_plot_frames:
-            weighted_std = apply_weighting(k, exafs_group.chi_std) # TODO: Check if this is correct
+            weighted_std = apply_weighting(
+                k, exafs_group.chi_std
+            )  # TODO: Check if this is correct
             fig.add_trace(
                 go.Scatter(
                     x=list(k) + list(k[::-1]),
-                    y=list(weighted_chi + weighted_std) + list((weighted_chi - weighted_std)[::-1]),
+                    y=list(weighted_chi + weighted_std)
+                    + list((weighted_chi - weighted_std)[::-1]),
                     fill="toself",
                     fillcolor="rgba(0,0,0,0.1)",
                     line={"color": "rgba(255,255,255,0)"},
@@ -966,7 +980,9 @@ def _(go, message, mo, plot_type, result, settings):
             go.Scatter(
                 x=k,
                 y=weighted_chi,
-                name=f"{chi_weighting} Average ± σ" if should_plot_frames else chi_weighting,
+                name=f"{chi_weighting} Average ± σ"
+                if should_plot_frames
+                else chi_weighting,
                 line={"width": 2.5, "color": "black"},
             )
         )
@@ -974,7 +990,7 @@ def _(go, message, mo, plot_type, result, settings):
     def add_ft_plot(fig, exafs_group, individual_frames, show_legend):
         """Add Fourier transform plot traces"""
         should_plot_frames = individual_frames and len(individual_frames) > 1
-    
+
         if should_plot_frames:
             for i, frame in enumerate(individual_frames):
                 fig.add_trace(
@@ -1055,6 +1071,7 @@ def _(CACHE_DIR, LarchWrapper, mo):
             message = mo.md(f"### ❌ Cache Error\n{str(e)}")
         mo.output.append(message)
         # return message
+
     return clear_cache, show_cache
 
 

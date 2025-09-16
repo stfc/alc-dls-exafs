@@ -53,12 +53,10 @@ variable msd_all_z equal c_msd_all[4]
 variable msd_Ag_z  equal c_msd_Ag[4]
 variable msd_Au_z  equal c_msd_Au[4]
 
-fix msd_out all ave/time 1 ${NUMMDSTEPS} ${NUMMDSTEPS} v_msd_all_z v_msd_Ag_z v_msd_Au_z file msd_final.dat 
+fix msd_out all ave/time 1 ${NUMMDSTEPS} ${NUMMDSTEPS} v_msd_all_z v_msd_Ag_z v_msd_Au_z file msd_final.dat
 
 run ${NUMMDSTEPS}
 run 0
 
 unfix store_rdf
 undump prod
-
-

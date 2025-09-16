@@ -409,7 +409,9 @@ class TestCLIPerformance:
 
     # ================== COMMAND LINE LENGTH TESTS ==================
 
-    def test_very_long_command_lines(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_very_long_command_lines(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test handling of very long command lines."""
         # Create files with very long paths
         deep_path = tmp_path
