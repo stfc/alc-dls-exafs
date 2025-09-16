@@ -722,7 +722,11 @@ def read_feff_output(feff_dir: Path) -> tuple[object, object]:
         try:
             data = np.loadtxt(str(chi_file), comments="#", usecols=(0, 1, 2))
             k = data[:, 0]
-            chi = data[:, 2]
+            mag = data[:, 2]
+            phase = data[:, 3]
+
+            # reconstruct complex chi
+            chi = mag * np.exp(1j * phase)
             return chi, k
         except (OSError, ValueError, IndexError) as fallback_error:
             error_msg = (
