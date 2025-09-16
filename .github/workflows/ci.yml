@@ -27,7 +27,7 @@ jobs:
         env:
           # show timings of tests
           PYTEST_ADDOPTS: "--durations=0"
-        run: uv run --no-sync pytest --cov alc-exafs --cov-append .
+        run: uv run --no-sync pytest --cov larch_cli_wrapper  --cov-append .
 
 
       - name: Report coverage to Coveralls
@@ -36,7 +36,7 @@ jobs:
           parallel: true
           flag-name: run-${{ matrix.python-version }}
           file: coverage.xml
-          base-path: alc-exafs
+          base-path: larch_cli_wrapper
 
   coverage:
     needs: tests
