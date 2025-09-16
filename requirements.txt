@@ -1,1 +1,5 @@
 xraylarch
+typer[all]
+rich
+matplotlib
+marimo

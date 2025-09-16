@@ -1,0 +1,59 @@
+# Presentation-style matplotlib configuration
+# Optimized for slides and presentations with larger fonts and elements
+
+# Figure settings
+figure.facecolor: white
+figure.edgecolor: white
+figure.dpi: 150
+
+# Font settings
+font.family: serif
+font.serif: Liberation Serif, DejaVu Serif, Noto Serif, FreeSerif, Times New Roman, Times, serif
+font.size: 20
+
+# Axes settings
+axes.facecolor: white
+axes.edgecolor: black
+axes.linewidth: 2.5
+axes.labelsize: 24
+axes.titlesize: 26
+axes.grid: True
+axes.axisbelow: True
+
+# Grid settings
+grid.color: lightgray
+grid.alpha: 0.6
+grid.linestyle: -
+grid.linewidth: 0.8
+
+# Tick settings
+xtick.major.size: 8
+xtick.major.width: 2.5
+xtick.minor.size: 4
+xtick.minor.width: 1.5
+xtick.color: black
+xtick.labelsize: 20
+xtick.direction: out
+
+ytick.major.size: 8
+ytick.major.width: 2.5
+ytick.minor.size: 4
+ytick.minor.width: 1.5
+ytick.color: black
+ytick.labelsize: 20
+ytick.direction: out
+
+# Legend settings
+legend.fontsize: 18
+legend.frameon: False
+legend.loc: best
+
+# Line settings
+lines.linewidth: 3.0
+lines.solid_capstyle: round
+
+# Savefig settings
+savefig.dpi: 150
+savefig.bbox: tight
+savefig.facecolor: white
+savefig.edgecolor: none
