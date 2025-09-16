@@ -243,6 +243,11 @@ def process(
         "--plot-style",
         help="Plot style: publication, presentation, quick",
     ),
+    chi_weighting: str = typer.Option(
+        "chi",
+        "--chi-weighting",
+        help="Chi weighting for plots: chi, k2chi, k3chi",
+    ),
     force_recalculate: bool = typer.Option(
         False, "--force", help="Skip cache and recalculate"
     ),
@@ -313,6 +318,7 @@ def process(
                     show_plot=show_plot,
                     plot_style=plot_style,
                     plot_individual_frames=plot_individual_frames,
+                    chi_weighting=chi_weighting,
                     progress_callback=progress_callback,
                 )
 
@@ -392,6 +398,11 @@ def process_feff_output(
         "--plot-style",
         help="Plot style: publication, presentation, quick",
     ),
+    chi_weighting: str = typer.Option(
+        "chi",
+        "--chi-weighting",
+        help="Chi weighting for plots: chi, k2chi, k3chi",
+    ),
 ) -> None:
     """Process existing FEFF output files (single or trajectory) and generate plots."""
     if not feff_dir.exists():
@@ -444,6 +455,7 @@ def process_feff_output(
                         show_plot=show_plot,
                         plot_style=plot_style,
                         plot_individual_frames=plot_individual_frames,
+                        chi_weighting=chi_weighting,
                         progress_callback=progress_callback,
                     )
 
@@ -475,6 +487,7 @@ def process_feff_output(
                     filename_base="EXAFS_FT",
                     show_plot=show_plot,
                     plot_style=plot_style,
+                    chi_weighting=chi_weighting,
                 )
 
                 console.print("[green]✓ Single output processed[/green]")

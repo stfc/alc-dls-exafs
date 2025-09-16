@@ -400,6 +400,7 @@ class LarchWrapper:
         show_plot: bool = False,
         plot_style: str = "publication",
         plot_individual_frames: bool = False,
+        chi_weighting: str = "chi",
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> ProcessingResult:
         """Process trajectory FEFF outputs from frame_* subdirectories.
@@ -411,6 +412,7 @@ class LarchWrapper:
             show_plot: Display plots after processing
             plot_style: Plot style ('publication' or 'presentation')
             plot_individual_frames: Create plots for each frame
+            chi_weighting: Chi weighting for plots ('chi', 'k2chi', 'k3chi')
             progress_callback: Callback function for progress updates
 
         Returns:
@@ -493,6 +495,7 @@ class LarchWrapper:
                 absorber="auto",  # Could be extracted from FEFF input if needed
                 edge=config.edge,
                 individual_frames=individual_groups if plot_individual_frames else None,
+                chi_weighting=chi_weighting,
             )
 
             return ProcessingResult(
@@ -518,6 +521,7 @@ class LarchWrapper:
         individual_frames: list[Group] | None = None,
         show_individual_legend: bool = True,
         max_individual_frames: int = 100,
+        chi_weighting: str = "chi",
     ) -> dict[str, Path]:
         """Generate plots for EXAFS results with marimo-style formatting.
 
@@ -532,6 +536,7 @@ class LarchWrapper:
             individual_frames: Optional list of individual trajectory frames
             show_individual_legend: Whether to show legend for individual frames
             max_individual_frames: Maximum number of individual frames to plot
+            chi_weighting: Chi weighting ('chi', 'k2chi', 'k3chi')
 
         Returns:
             Dictionary mapping format names to output file paths
@@ -578,14 +583,34 @@ class LarchWrapper:
 
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=style_config["figsize"])
 
+            # Compute weighted chi based on chi_weighting
+            if chi_weighting == "k2chi":
+                chi_weighted = exafs_group.chi * exafs_group.k**2
+                ylabel = r"$k^{2}\chi(k)$"
+                title = r"EXAFS $k^{2}\chi(k)$"
+            elif chi_weighting == "k3chi":
+                chi_weighted = exafs_group.chi * exafs_group.k**3
+                ylabel = r"$k^{3}\chi(k)$"
+                title = r"EXAFS $k^{3}\chi(k)$"
+            else:  # default "chi"
+                chi_weighted = exafs_group.chi
+                ylabel = r"$\chi(k)$"
+                title = r"EXAFS $\chi(k)$"
+
             # === Left plot: χ(k) in k-space ===
             # Plot individual frames first (background)
             if individual_frames and show_individual_legend:
                 frames_to_plot = individual_frames[:max_individual_frames]
                 for i, frame in enumerate(frames_to_plot):
+                    if chi_weighting == "k2chi":
+                        chi_frame_weighted = frame.chi * frame.k**2
+                    elif chi_weighting == "k3chi":
+                        chi_frame_weighted = frame.chi * frame.k**3
+                    else:
+                        chi_frame_weighted = frame.chi
                     ax1.plot(
                         frame.k,
-                        frame.chi,
+                        chi_frame_weighted,
                         color="gray",
                         alpha=0.3,
                         linewidth=1,
@@ -599,32 +624,38 @@ class LarchWrapper:
                 and exafs_group.chi_std is not None
                 and individual_frames
             ):
+                if chi_weighting == "k2chi":
+                    chi_std_weighted = exafs_group.chi_std * exafs_group.k**2
+                elif chi_weighting == "k3chi":
+                    chi_std_weighted = exafs_group.chi_std * exafs_group.k**3
+                else:
+                    chi_std_weighted = exafs_group.chi_std
                 ax1.fill_between(
                     exafs_group.k,
-                    exafs_group.chi - exafs_group.chi_std,
-                    exafs_group.chi + exafs_group.chi_std,
+                    chi_weighted - chi_std_weighted,
+                    chi_weighted + chi_std_weighted,
                     alpha=0.1,
                     color="black",
                     label="±1σ",
                     zorder=2,
                 )
-                main_label = "χ(k) Average ± σ"
+                main_label = f"{ylabel} Average ± σ"
             else:
-                main_label = "χ(k)"
+                main_label = ylabel
 
             # Plot main spectrum
             ax1.plot(
                 exafs_group.k,
-                exafs_group.chi,
+                chi_weighted,
                 color="black",
                 linewidth=2.5,
                 label=main_label,
                 zorder=3,
             )
 
-            ax1.set_xlabel(r"k [Å$^{-1}$]")
-            ax1.set_ylabel(r"χ(k)")
-            ax1.set_title(r"EXAFS χ(k)")
+            ax1.set_xlabel(r"$k [\text{Å}^{-1}]$")
+            ax1.set_ylabel(ylabel)
+            ax1.set_title(title)
 
             if individual_frames or (
                 hasattr(exafs_group, "chi_std") and exafs_group.chi_std is not None
@@ -785,6 +816,7 @@ class LarchWrapper:
         config: FeffConfig,
         reporter: ProgressReporter,
         plot_individual_frames: bool = False,
+        chi_weighting: str = "chi",
     ) -> ProcessingResult:
         chi_list = []
         individual_groups = []
@@ -902,6 +934,7 @@ class LarchWrapper:
             absorber=absorber,
             edge=config.edge,
             individual_frames=individual_groups if plot_individual_frames else None,
+            chi_weighting=chi_weighting,
         )
 
         return ProcessingResult(
@@ -976,6 +1009,7 @@ class LarchWrapper:
         plot_individual_frames: bool = False,
         frame_index: int | None = None,
         plot_style: str = "publication",
+        chi_weighting: str = "chi",
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> ProcessingResult:
         """Process a structure or trajectory to generate EXAFS data.
@@ -990,6 +1024,7 @@ class LarchWrapper:
             plot_individual_frames: Create plots for each frame
             frame_index: Process specific frame (if None, processes all)
             plot_style: Plot style ('publication' or 'presentation')
+            chi_weighting: Chi weighting for plots ('chi', 'k2chi', 'k3chi')
             progress_callback: Callback function for progress updates
 
         Returns:
@@ -1014,6 +1049,7 @@ class LarchWrapper:
             group.k = result.k
             group.chi = result.chi
             xftf(group, **config.fourier_params)
+
             plot_paths = self.plot_results(
                 group,
                 output_dir,
@@ -1022,6 +1058,7 @@ class LarchWrapper:
                 plot_style=plot_style,
                 absorber=absorber,
                 edge=config.edge,
+                chi_weighting=chi_weighting,
             )
             return ProcessingResult(
                 exafs_group=group,
@@ -1060,6 +1097,7 @@ class LarchWrapper:
                 config,
                 reporter,
                 plot_individual_frames,
+                chi_weighting,
             )
         finally:
             reporter.close()
