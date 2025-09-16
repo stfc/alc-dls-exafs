@@ -32,6 +32,7 @@ dependencies = [
     "ase>=3.22.1",
     "larixite>=0.1.0",
     "marimo>=0.14.16",
+    "weas-widget>=0.1.26",
 ]
 
 [project.urls]
