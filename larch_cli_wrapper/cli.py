@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Streamlined CLI interface for Larch Wrapper - EXAFS processing pipeline."""
 
-import os
 from pathlib import Path
 
 import typer
@@ -29,7 +28,7 @@ app = typer.Typer(
     invoke_without_command=True,
     no_args_is_help=True,
 )
-console = Console(no_color=bool(os.getenv("NO_COLOR")))
+console = Console()
 
 
 def _setup_config(
