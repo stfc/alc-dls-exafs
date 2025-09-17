@@ -466,7 +466,9 @@ class LarchWrapper:
                     xftf(frame_group, **config.fourier_params)
                     individual_groups.append(frame_group)
 
-                except Exception as e:
+                except (OSError, ValueError, RuntimeError, KeyError) as e:
+                    # OSError: file I/O, ValueError: data processing errors,
+                    # RuntimeError: calculation failures, KeyError: missing data keys
                     self.logger.error(f"Error processing {frame_dir}: {e}")
                     continue
 

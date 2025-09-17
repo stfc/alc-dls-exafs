@@ -345,6 +345,7 @@ class TestLarchWrapper:
                             output_dir,
                             filename_base="test_plot",
                             show_plot=False,
+                            chi_weighting="chi",
                         )
 
                         assert isinstance(plot_paths, dict)

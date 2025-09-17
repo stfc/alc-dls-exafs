@@ -297,17 +297,20 @@ O 0.0 1.0 0.0
 
         # Mock cache info responses
         def mock_cache_info(*args, **kwargs):
+            import tempfile
+
             # For now, return a simple enabled state
+            temp_cache = tempfile.mkdtemp()
             return {
                 "enabled": True,
-                "cache_dir": "/tmp/cache",
+                "cache_dir": temp_cache,
                 "files": 5,
                 "size_mb": 12.3,
             }
 
         # Test cache info command
         result = self.runner.invoke(app, ["cache", "info"])
-        # Cache operations may not be fully implemented yet, so accept various exit codes
+        # Cache operations may not be fully implemented yet, so accept various codes
         assert result.exit_code in [
             0,
             1,
@@ -326,7 +329,7 @@ O 0.0 1.0 0.0
 
         for edge in edge_types:
             for method in methods:
-                mock_result = ProcessingResult(
+                _ = ProcessingResult(
                     exafs_group=Mock(),
                     plot_paths={"pdf": tmp_path / f"plot_{edge}_{method}.pdf"},
                     processing_mode="single_frame",

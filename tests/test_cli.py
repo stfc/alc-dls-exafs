@@ -49,7 +49,32 @@ class TestCLI:
         """Test generate with missing structure file."""
         result = self.runner.invoke(app, ["generate", "nonexistent.cif", "Fe"])
         assert result.exit_code == 1
-        assert "not found" in result.stdout
+        assert "Error: Structure file" in result.stdout
+
+    def test_generate_command_cleanup_option(self):
+        """Test generate command accepts cleanup options."""
+        # Test --cleanup option (default)
+        result = self.runner.invoke(app, ["generate", "--help"])
+        assert result.exit_code == 0
+        assert "--cleanup" in result.stdout
+        assert "--no-cleanup" in result.stdout
+        assert "Clean up unnecessary FEFF output files" in result.stdout
+
+    def test_process_command_cleanup_option(self):
+        """Test process command accepts cleanup options."""
+        # Test cleanup option exists in help
+        result = self.runner.invoke(app, ["process", "--help"])
+        assert result.exit_code == 0
+        assert "--cleanup" in result.output
+        assert "--no-cleanup" in result.output
+
+        # Test that the cleanup option can be used (but don't actually run the command)
+        # This will fail if the option isn't recognized
+        result = self.runner.invoke(app, ["process", "--cleanup", "--help"])
+        assert result.exit_code == 0
+
+        result = self.runner.invoke(app, ["process", "--no-cleanup", "--help"])
+        assert result.exit_code == 0
 
     def test_generate_success(self, mock_generate_workflow, tmp_structure_file):
         """Test successful generate command."""
@@ -380,13 +405,13 @@ kmax: 14.0
 
         mock_result = ProcessingResult(
             exafs_group=Mock(),
-            plot_paths={"pdf": feff_dir / "trajectory_avg.pdf"},
+            plot_paths={"pdf": str(feff_dir / "trajectory_avg.pdf")},
             processing_mode="trajectory",
             nframes=3,
         )
 
         mock_wrapper = Mock()
-        mock_wrapper.process.return_value = mock_result
+        mock_wrapper.process_trajectory_feff_outputs.return_value = mock_result
         mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
         mock_wrapper.__exit__ = Mock(return_value=None)
         mock_wrapper_class.return_value = mock_wrapper

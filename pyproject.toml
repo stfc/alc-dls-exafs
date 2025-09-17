@@ -125,7 +125,14 @@ convention = "google"
 'tests/**/*' = ['D', 'S101']
 '**/test_*.py' = ['D', 'S101']
 '__init__.py' = ['D', 'F401']
-'src/larch_cli_wrapper/cli.py' = ['B008']
+'larch_cli_wrapper/cli.py' = ['B008']
+'exafs_pipeline.py' = [
+    'D', # docstrings (pydocstyle)
+    'S101', # bandit security
+    'B018', # Useless expressions
+    'F841', # Unused variable
+    'E402'] # Module level import not at top of file
+'notebooks/**/*' = ['D', 'S101', 'B018', 'F841', 'F402']
 
 
 # =======================

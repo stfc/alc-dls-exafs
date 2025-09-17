@@ -58,9 +58,9 @@ def tmp_structure_file(tmp_path: Path) -> Path:
     across all tests requiring a valid crystal structure file.
     """
     cif_file = tmp_path / "simple_structure.cif"
-    cif_content = """#------------------------------------------------------------------------------
+    cif_content = """#------------------------------------------------------------------
 # STRUCTURE: Magnetite Fe3O4
-#------------------------------------------------------------------------------
+#------------------------------------------------------------------
 data_magnetite
 _chemical_name_systematic        'Iron oxide'
 _chemical_name_mineral           'Magnetite'
@@ -259,24 +259,30 @@ class MockHelpers:
     @staticmethod
     def create_successful_wrapper_mock():
         """Create a mock LarchWrapper that simulates successful operations."""
+        import tempfile
         from unittest.mock import Mock
 
         from larch_cli_wrapper.wrapper import ProcessingResult
 
+        temp_dir = tempfile.mkdtemp()
+        temp_output = Path(temp_dir) / "output"
+        temp_plot = Path(temp_dir) / "plot.pdf"
+        temp_cache = Path(temp_dir) / "cache"
+
         mock_wrapper = Mock()
-        mock_wrapper.generate_feff_input.return_value = Path("/tmp/output")
+        mock_wrapper.generate_feff_input.return_value = temp_output
         mock_wrapper.run_feff.return_value = True
         mock_wrapper.process_feff_output.return_value = Mock()
-        mock_wrapper.plot_results.return_value = {"pdf": Path("/tmp/plot.pdf")}
+        mock_wrapper.plot_results.return_value = {"pdf": temp_plot}
         mock_wrapper.process.return_value = ProcessingResult(
             exafs_group=Mock(),
-            plot_paths={"pdf": Path("/tmp/plot.pdf")},
+            plot_paths={"pdf": temp_plot},
             processing_mode="single_frame",
         )
         mock_wrapper.print_diagnostics.return_value = None
         mock_wrapper.get_cache_info.return_value = {
             "enabled": True,
-            "cache_dir": "/tmp/cache",
+            "cache_dir": str(temp_cache),
             "files": 5,
             "size_mb": 12.5,
         }

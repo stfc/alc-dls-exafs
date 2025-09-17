@@ -1,3 +1,5 @@
+"""EXAFS processing pipeline using Marimo app."""
+
 import marimo
 
 __generated_with = "0.15.2"
@@ -46,7 +48,8 @@ def _():
     CACHE_DIR = Path.home() / ".larch_cache"
     DEFAULT_OUTPUT_DIR = "outputs/exafs_pipeline"
 
-    # I disabled the controls in the GUi, because the style is not loaded properly inside Marimo notebook
+    # I disabled the controls in the GUi, because the style is not loaded
+    # properly inside Marimo notebook
     guiConfig = {"controls": {"enabled": False}}
     return (
         ASEAdapter,
@@ -112,7 +115,9 @@ def _(
                 )
                 if isinstance(structure_list, Atoms):
                     structure_list = [structure_list]
-            except Exception as e:
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                # OSError: file reading issues, ValueError: parsing errors,
+                # KeyError/TypeError: invalid input_kwargs
                 structure_list = None
                 reading_structure_message = mo.md(
                     f"**❌ Error reading structure:** {e}"
@@ -366,10 +371,16 @@ def _(ASEAdapter, AtomsViewer, BaseWidget, guiConfig):
     def view_atoms(
         atoms,
         model_style=1,
-        boundary=[[-0.1, 1.1], [-0.1, 1.1], [-0.1, 1.1]],
+        boundary=None,
         show_bonded_atoms=True,
     ):
-        """Function to visualise an ASE Atoms object (of list of them) using weas_widget."""
+        """Function to visualise an ASE Atoms object
+        (or list of them) using weas_widget.
+
+        using weas_widget.
+        """
+        if boundary is None:
+            boundary = [[-0.1, 1.1], [-0.1, 1.1], [-0.1, 1.1]]
         v = AtomsViewer(BaseWidget(guiConfig=guiConfig))
         v.atoms = ASEAdapter.to_weas(atoms)
         v.model_style = model_style
@@ -390,6 +401,7 @@ def _(ast, mo):
         text: str, existing_kwargs: dict | None = None
     ) -> tuple[dict, mo.md]:
         """Safely parse user input as a dict.
+
         Accepts Python-style dicts (single or double quotes, True/False)
         and JSON-style dicts.
         Returns existing_kwargs (or {}) if parsing fails.
@@ -409,7 +421,8 @@ def _(ast, mo):
                 return kwargs, mo.md(
                     "**Warning**: Input is not a dict, using existing kwargs."
                 )
-        except Exception as e:
+        except (ValueError, SyntaxError) as e:
+            # ValueError: invalid literal, SyntaxError: malformed expression
             return kwargs, mo.md(
                 f"**Error parsing kwargs**: {e}. Using existing kwargs."
             )
@@ -503,9 +516,12 @@ def _(mo, model_style, show_bonded_atoms, structure_list, view_atoms):
             if structure_list
             else mo.md("Upload a file to view the structure.")
         )
-    except Exception as e:
-        # If we're dealing with the exception that weas can't display multiple structures with different atoms types,
-        # then we can show the first structure only and warn the user
+    except (ValueError, AttributeError, TypeError) as e:
+        # ValueError: incompatible structures, AttributeError: missing properties,
+        # TypeError: invalid input types for visualization
+        # If we're dealing with the exception that weas can't display multiple
+        # structures with different atoms types, then we can show the first
+        # structure only and warn the user
         if (
             "All atoms must have the same species" in str(e)
             and isinstance(structure_list, list)
@@ -521,11 +537,13 @@ def _(mo, model_style, show_bonded_atoms, structure_list, view_atoms):
                     [
                         v,
                         mo.md(
-                            "**Warning**: Displaying only the first structure due to differing atom types in trajectory."
+                            "**Warning**: Displaying only the first structure due to "
+                            "differing atom types in trajectory."
                         ),
                     ]
                 )
-            except Exception as e2:
+            except (ValueError, AttributeError, TypeError) as e2:
+                # Same visualization errors for fallback attempt
                 v = mo.md(f"**Error displaying structure(s):** {e2}")
         else:
             v = mo.md(f"**Error displaying structure(s):** {e}")
@@ -682,7 +700,9 @@ def _(ProcessingMode, SimpleNamespace, mo, traceback):
                     progress_callback=progress_callback,
                 )
             return success_message(result, is_traj, output_dir), result
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError, FileNotFoundError) as e:
+            # OSError: file operations, ValueError: invalid parameters,
+            # RuntimeError: processing failures, FileNotFoundError: missing files
             return mo.md(f"""
                 ### ❌ Processing Failed
                 **Error:** {str(e)}
@@ -841,7 +861,9 @@ def _(
                         processing_absorber,
                         is_traj,
                     )
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError, FileNotFoundError) as e:
+            # OSError: file operations, ValueError: invalid parameters,
+            # RuntimeError: processing failures, FileNotFoundError: missing files
             message = mo.md(f"""
                 ### ❌ Processing Failed
                 **Error:** {str(e)}
@@ -1047,7 +1069,9 @@ def _(CACHE_DIR, LarchWrapper, mo):
                 wrapper.clear_cache()
                 message = mo.md("### 🗑️ Cache Cleared Successfully")
 
-        except Exception as e:
+        except (OSError, PermissionError, FileNotFoundError) as e:
+            # OSError: file system errors, PermissionError: access denied,
+            # FileNotFoundError: cache directory missing
             message = mo.md(f"### ❌ Cache Error\n{str(e)}")
         mo.output.append(message)
         # return None
@@ -1067,7 +1091,9 @@ def _(CACHE_DIR, LarchWrapper, mo):
                         | **Size** | {info["size_mb"]} MB |
                     """)
 
-        except Exception as e:
+        except (OSError, PermissionError, FileNotFoundError) as e:
+            # OSError: file system errors, PermissionError: access denied,
+            # FileNotFoundError: cache directory missing
             message = mo.md(f"### ❌ Cache Error\n{str(e)}")
         mo.output.append(message)
         # return message
