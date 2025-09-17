@@ -27,19 +27,19 @@ jobs:
         env:
           # show timings of tests
           PYTEST_ADDOPTS: "--durations=0"
-        run: uv run --no-sync pytest --cov larch_cli_wrapper  --cov-append .
-
+        run: uv run --no-sync pytest --cov=larch_cli_wrapper --cov-report=xml:coverage.xml tests/
 
       - name: Report coverage to Coveralls
         uses: coverallsapp/github-action@v2
+        if: success()
         with:
           parallel: true
           flag-name: run-${{ matrix.python-version }}
           file: coverage.xml
-          base-path: larch_cli_wrapper
 
   coverage:
     needs: tests
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Close parallel build
