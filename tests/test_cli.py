@@ -13,7 +13,7 @@ class TestCLI:
 
     def setup_method(self):
         """Setup test runner."""
-        self.runner = CliRunner()
+        self.runner = CliRunner(env={"NO_COLOR": "1"})
 
     # ================== BASIC COMMAND TESTS ==================
 
