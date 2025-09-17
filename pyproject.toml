@@ -73,13 +73,6 @@ build-backend = "uv_build"
 module-name = "larch_cli_wrapper"
 module-root = ""
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["larch_cli_wrapper*"]
-
-[tool.setuptools.package-dir]
-"" = "src"
-
 
 # =======================
 # Linting: Ruff
