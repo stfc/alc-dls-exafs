@@ -20,14 +20,14 @@ classifiers = [
 ]
 keywords = ["xafs", "exafs", "spectroscopy", "larch", "feff", "materials-science"]
 dependencies = [
-    "numpy>=1.21",
+    "ase<4.0,>=3.25",
+    "numpy<3.0.0,>=1.26.4",
     "xraylarch>=0.9.47",
-    "typer>=0.12.0",
-    "rich",
+    "typer<1.0.0,>=0.17.3",
+    "rich<14.0.0,>=13.9.1",
     "matplotlib>=3.5",
-    "ase>=3.22.1",
     "larixite>=0.1.0",
-    "marimo>=0.14.16",
+    "marimo<0.15.0,>=0.14.16",
     "weas-widget>=0.1.26",
 ]
 
@@ -43,12 +43,12 @@ larch-cli = "larch_cli_wrapper.cli:app"
 
 [project.optional-dependencies]
 full = [
-    "pymatgen>=2022.7",
+     "pymatgen<2026.0,>=2025.1.24",
 ]
 [dependency-groups]
 dev = [
-    "pytest",
-    "pytest-cov",
+    "pytest<9.0,>=8.0",
+    "pytest-cov<5.0.0,>=4.1.0",
     "mypy>=1.11.0",
     "types-setuptools",
     "types-PyYAML",
@@ -92,7 +92,6 @@ exclude = [
     "build",
     "dist",
     "scripts",
-    "notebooks",
     "__pypackages__",
 ]
 
