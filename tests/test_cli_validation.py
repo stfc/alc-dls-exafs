@@ -211,7 +211,9 @@ class TestCLIValidation:
 
     # ================== PATH AND FILE VALIDATION ==================
 
-    def test_relative_vs_absolute_paths(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_relative_vs_absolute_paths(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test handling of relative vs absolute paths."""
         # Copy our proper structure to test directory
         structure_file = tmp_path / "structure.cif"
@@ -226,7 +228,9 @@ class TestCLIValidation:
         )
         assert result1.exit_code == 0
 
-    def test_special_characters_in_paths(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_special_characters_in_paths(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test handling of special characters in file paths."""
         special_chars = [
             "spaces in name",
@@ -240,9 +244,7 @@ class TestCLIValidation:
             structure_file = tmp_path / f"{char_name}.cif"
             structure_file.write_text(tmp_structure_file.read_text())
 
-            result = self.runner.invoke(
-                app, ["generate", str(structure_file), "Fe"]
-            )
+            result = self.runner.invoke(app, ["generate", str(structure_file), "Fe"])
             assert result.exit_code == 0
 
     # ================== CONFIG FILE VALIDATION ==================
@@ -271,7 +273,13 @@ class TestCLIValidation:
 
             result = self.runner.invoke(
                 app,
-                ["generate", str(tmp_structure_file), "Fe", "--config", str(config_file)],
+                [
+                    "generate",
+                    str(tmp_structure_file),
+                    "Fe",
+                    "--config",
+                    str(config_file),
+                ],
             )
             assert result.exit_code == 1
 
@@ -294,7 +302,9 @@ class TestCLIValidation:
 
     # ================== OUTPUT PATH VALIDATION ==================
 
-    def test_output_path_creation(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_output_path_creation(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test automatic creation of output paths."""
 
         # Deep nested output path that doesn't exist
@@ -333,7 +343,9 @@ class TestCLIValidation:
 
     # ================== COMMAND COMBINATION TESTS ==================
 
-    def test_conflicting_options(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_conflicting_options(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test handling of conflicting command options."""
         # Test conflicting preset and config file
         config_file = tmp_path / "config.yaml"
@@ -354,7 +366,9 @@ class TestCLIValidation:
         )
         assert result.exit_code == 0
 
-    def test_option_precedence(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_option_precedence(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test precedence of command-line options over config files."""
         # Config file with one edge setting
         config_file = tmp_path / "config.yaml"
@@ -377,7 +391,9 @@ class TestCLIValidation:
 
     # ================== ABSORBER SPECIFICATION TESTS ==================
 
-    def test_absorber_validation(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_absorber_validation(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test validation of absorber specifications."""
         # Test valid absorber specifications
         valid_absorbers = ["Fe", "Cu", "Zn", "0", "1", "10"]

@@ -278,12 +278,15 @@ class TestCLIPerformance:
     @patch("larch_cli_wrapper.cli.LarchWrapper")
     def test_large_cache_operations(self, mock_wrapper_class):
         """Test cache operations with large cache sizes."""
+        import tempfile
+
         mock_wrapper = Mock()
 
         # Mock large cache
+        temp_cache = tempfile.mkdtemp()
         mock_wrapper.get_cache_info.return_value = {
             "enabled": True,
-            "cache_dir": "/tmp/large_cache",
+            "cache_dir": temp_cache,
             "files": 10000,
             "size_mb": 5000.0,
         }
@@ -409,7 +412,9 @@ class TestCLIPerformance:
 
     # ================== COMMAND LINE LENGTH TESTS ==================
 
-    def test_very_long_command_lines(self, mock_generate_workflow, tmp_structure_file, tmp_path):
+    def test_very_long_command_lines(
+        self, mock_generate_workflow, tmp_structure_file, tmp_path
+    ):
         """Test handling of very long command lines."""
         # Create files with very long paths
         deep_path = tmp_path

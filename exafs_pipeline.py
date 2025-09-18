@@ -1,3 +1,5 @@
+"""EXAFS processing pipeline using Marimo app."""
+
 import marimo
 
 __generated_with = "0.15.2"
@@ -46,7 +48,8 @@ def _():
     CACHE_DIR = Path.home() / ".larch_cache"
     DEFAULT_OUTPUT_DIR = "outputs/exafs_pipeline"
 
-    # I disabled the controls in the GUi, because the style is not loaded properly inside Marimo notebook
+    # I disabled the controls in the GUi, because the style is not loaded
+    # properly inside Marimo notebook
     guiConfig = {"controls": {"enabled": False}}
     return (
         ASEAdapter,
@@ -79,7 +82,7 @@ def _(mo):
         """
     # EXAFS Pipeline Processing
 
-    Interactive EXAFS processing using the larch wrapper. 
+    Interactive EXAFS processing using the larch wrapper.
     Process single structures or trajectories with customizable parameters.
     """
     )
@@ -112,7 +115,9 @@ def _(
                 )
                 if isinstance(structure_list, Atoms):
                     structure_list = [structure_list]
-            except Exception as e:
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                # OSError: file reading issues, ValueError: parsing errors,
+                # KeyError/TypeError: invalid input_kwargs
                 structure_list = None
                 reading_structure_message = mo.md(
                     f"**❌ Error reading structure:** {e}"
@@ -155,16 +160,16 @@ def _(
         <style>
           .mo-tabs input {{ display: none; }}
           .mo-tabs .tab-labels {{
-            display: flex; 
-            gap: 0.5rem; 
-            border-bottom: 1px solid #e5e7eb; 
+            display: flex;
+            gap: 0.5rem;
+            border-bottom: 1px solid #e5e7eb;
             margin-bottom: 1rem;
           }}
           .mo-tabs .tab-label {{
-            padding: 0.5rem 1rem; 
-            cursor: pointer; 
+            padding: 0.5rem 1rem;
+            cursor: pointer;
             border: 1px solid #e5e7eb;
-            border-radius: 0.375rem 0.375rem 0 0; 
+            border-radius: 0.375rem 0.375rem 0 0;
             background: var(--background);
           }}
           .mo-tabs .tab-label:hover {{ background: var(--background); }}
@@ -175,20 +180,20 @@ def _(
             border-bottom-color: white;
             font-weight: 600;
           }}
-          .mo-tabs .tab-panels {{ 
-            border: 1px solid #e5e7eb; 
-            border-radius: 0 0.375rem 0.375rem 0.375rem; 
-            padding: 1rem; 
-            background: var(--background); 
+          .mo-tabs .tab-panels {{
+            border: 1px solid #e5e7eb;
+            border-radius: 0 0.375rem 0.375rem 0.375rem;
+            padding: 1rem;
+            background: var(--background);
           }}
           .mo-tabs .panel {{ display: none; }}
           #tab-run:checked ~ .tab-panels .panel-run,
           #tab-analysis:checked ~ .tab-panels .panel-analysis,
           #tab-par:checked ~ .tab-panels .panel-par {{ display: block; }}
-          .settings-grid {{ 
-            display: grid; 
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); 
-            gap: 1rem; 
+          .settings-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
           }}
           .main-config {{
             display: grid;
@@ -257,9 +262,7 @@ def _(
                 label="Absorbing Species",
             ),
             edge=mo.ui.dropdown(
-                options=[e.name for e in EdgeType], 
-                value="K", 
-                label="Edge"
+                options=[e.name for e in EdgeType], value="K", label="Edge"
             ),
             preset=mo.ui.dropdown(
                 options={name.title(): name for name in PRESETS.keys()},
@@ -354,7 +357,7 @@ def _(mo):
     5. **Run processing** or use existing outputs
     6. **Explore results** using the plot options
 
-    💡 **Tips**: 
+    💡 **Tips**:
     - Use "Process output only" to reanalyze existing FEFF results
     - Enable "Force recalculate" to bypass cache
     - Cache speeds up repeated calculations
@@ -368,10 +371,16 @@ def _(ASEAdapter, AtomsViewer, BaseWidget, guiConfig):
     def view_atoms(
         atoms,
         model_style=1,
-        boundary=[[-0.1, 1.1], [-0.1, 1.1], [-0.1, 1.1]],
+        boundary=None,
         show_bonded_atoms=True,
     ):
-        """Function to visualise an ASE Atoms object (of list of them) using weas_widget."""
+        """Function to visualise an ASE Atoms object
+        (or list of them) using weas_widget.
+
+        using weas_widget.
+        """
+        if boundary is None:
+            boundary = [[-0.1, 1.1], [-0.1, 1.1], [-0.1, 1.1]]
         v = AtomsViewer(BaseWidget(guiConfig=guiConfig))
         v.atoms = ASEAdapter.to_weas(atoms)
         v.model_style = model_style
@@ -380,6 +389,7 @@ def _(ASEAdapter, AtomsViewer, BaseWidget, guiConfig):
         v.color_type = "VESTA"
         v.cell.settings["showAxes"] = True
         return v._widget
+
     return (view_atoms,)
 
 
@@ -391,6 +401,7 @@ def _(ast, mo):
         text: str, existing_kwargs: dict | None = None
     ) -> tuple[dict, mo.md]:
         """Safely parse user input as a dict.
+
         Accepts Python-style dicts (single or double quotes, True/False)
         and JSON-style dicts.
         Returns existing_kwargs (or {}) if parsing fails.
@@ -410,10 +421,12 @@ def _(ast, mo):
                 return kwargs, mo.md(
                     "**Warning**: Input is not a dict, using existing kwargs."
                 )
-        except Exception as e:
+        except (ValueError, SyntaxError) as e:
+            # ValueError: invalid literal, SyntaxError: malformed expression
             return kwargs, mo.md(
                 f"**Error parsing kwargs**: {e}. Using existing kwargs."
             )
+
     return (parse_kwargs_string,)
 
 
@@ -479,6 +492,7 @@ def _(Path, read, tempfile):
         atoms = read(temp_path, **input_kwargs)
         temp_path.unlink()  # Delete the temporary file
         return atoms
+
     return (process_uploaded_structure,)
 
 
@@ -502,9 +516,12 @@ def _(mo, model_style, show_bonded_atoms, structure_list, view_atoms):
             if structure_list
             else mo.md("Upload a file to view the structure.")
         )
-    except Exception as e:
-        # If we're dealing with the exception that weas can't display multiple structures with different atoms types,
-        # then we can show the first structure only and warn the user
+    except (ValueError, AttributeError, TypeError) as e:
+        # ValueError: incompatible structures, AttributeError: missing properties,
+        # TypeError: invalid input types for visualization
+        # If we're dealing with the exception that weas can't display multiple
+        # structures with different atoms types, then we can show the first
+        # structure only and warn the user
         if (
             "All atoms must have the same species" in str(e)
             and isinstance(structure_list, list)
@@ -520,11 +537,13 @@ def _(mo, model_style, show_bonded_atoms, structure_list, view_atoms):
                     [
                         v,
                         mo.md(
-                            "**Warning**: Displaying only the first structure due to differing atom types in trajectory."
+                            "**Warning**: Displaying only the first structure due to "
+                            "differing atom types in trajectory."
                         ),
                     ]
                 )
-            except Exception as e2:
+            except (ValueError, AttributeError, TypeError) as e2:
+                # Same visualization errors for fallback attempt
                 v = mo.md(f"**Error displaying structure(s):** {e2}")
         else:
             v = mo.md(f"**Error displaying structure(s):** {e}")
@@ -574,6 +593,7 @@ def _(mo, sampling_method):
         elif sampling_method.value == "every Nth":
             index = f"::{int(parameter_input.value)}"
         return {"index": index}
+
     return get_sampling_config, parameter_input
 
 
@@ -603,6 +623,7 @@ def _(FeffConfig):
             # Map cleanup setting
             cleanup_feff_files=settings.get("cleanup_feff_files"),
         )
+
     return (create_feff_config,)
 
 
@@ -638,7 +659,11 @@ def _(ProcessingMode, SimpleNamespace, mo, traceback):
         """Process single existing FEFF output"""
         exafs_group = wrapper.process_feff_output(output_dir, config)
         wrapper.plot_results(
-            exafs_group, output_dir, absorber=absorber, edge=config.edge, chi_weighting="chi"
+            exafs_group,
+            output_dir,
+            absorber=absorber,
+            edge=config.edge,
+            chi_weighting="chi",
         )
         return SimpleNamespace(
             exafs_group=exafs_group,
@@ -675,7 +700,9 @@ def _(ProcessingMode, SimpleNamespace, mo, traceback):
                     progress_callback=progress_callback,
                 )
             return success_message(result, is_traj, output_dir), result
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError, FileNotFoundError) as e:
+            # OSError: file operations, ValueError: invalid parameters,
+            # RuntimeError: processing failures, FileNotFoundError: missing files
             return mo.md(f"""
                 ### ❌ Processing Failed
                 **Error:** {str(e)}
@@ -696,6 +723,7 @@ def _(ProcessingMode, SimpleNamespace, mo, traceback):
             ### ✅ Single Structure Processed
             - **Output**: `{output_dir}`
         """)
+
     return process_existing_outputs, process_new_structures
 
 
@@ -800,7 +828,9 @@ def _(
     def run_exafs_processing():
         """Function to execute the whole EXAFS processing pipeline."""
         if not settings or not structure_list or not settings.get("absorber"):
-            return mo.md("### ❌ Processing Failed: Missing inputs or configuration."), None
+            return mo.md(
+                "### ❌ Processing Failed: Missing inputs or configuration."
+            ), None
 
         processing_absorber = settings["absorber"].strip()
         output_dir = Path(settings.get("output_dir", DEFAULT_OUTPUT_DIR))
@@ -831,17 +861,20 @@ def _(
                         processing_absorber,
                         is_traj,
                     )
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError, FileNotFoundError) as e:
+            # OSError: file operations, ValueError: invalid parameters,
+            # RuntimeError: processing failures, FileNotFoundError: missing files
             message = mo.md(f"""
                 ### ❌ Processing Failed
                 **Error:** {str(e)}
-                ``` 
-                {traceback.format_exc()} 
+                ```
+                {traceback.format_exc()}
                 ```
                 """)
             result = None
 
         return message, result
+
     return (run_exafs_processing,)
 
 
@@ -921,6 +954,7 @@ def _(go, message, mo, plot_type, result, settings):
 
     def add_chi_plot(fig, exafs_group, individual_frames, chi_weighting, show_legend):
         """Add chi(k) plot traces"""
+
         # Apply weighting to data
         def apply_weighting(k, chi):
             if chi_weighting == "k²χ(k)":
@@ -945,16 +979,18 @@ def _(go, message, mo, plot_type, result, settings):
                     )
                 )
 
-    
         weighted_chi = apply_weighting(exafs_group.k, exafs_group.chi)
         k = exafs_group.k
 
         if hasattr(exafs_group, "chi_std") and should_plot_frames:
-            weighted_std = apply_weighting(k, exafs_group.chi_std) # TODO: Check if this is correct
+            weighted_std = apply_weighting(
+                k, exafs_group.chi_std
+            )  # TODO: Check if this is correct
             fig.add_trace(
                 go.Scatter(
                     x=list(k) + list(k[::-1]),
-                    y=list(weighted_chi + weighted_std) + list((weighted_chi - weighted_std)[::-1]),
+                    y=list(weighted_chi + weighted_std)
+                    + list((weighted_chi - weighted_std)[::-1]),
                     fill="toself",
                     fillcolor="rgba(0,0,0,0.1)",
                     line={"color": "rgba(255,255,255,0)"},
@@ -966,7 +1002,9 @@ def _(go, message, mo, plot_type, result, settings):
             go.Scatter(
                 x=k,
                 y=weighted_chi,
-                name=f"{chi_weighting} Average ± σ" if should_plot_frames else chi_weighting,
+                name=f"{chi_weighting} Average ± σ"
+                if should_plot_frames
+                else chi_weighting,
                 line={"width": 2.5, "color": "black"},
             )
         )
@@ -974,7 +1012,7 @@ def _(go, message, mo, plot_type, result, settings):
     def add_ft_plot(fig, exafs_group, individual_frames, show_legend):
         """Add Fourier transform plot traces"""
         should_plot_frames = individual_frames and len(individual_frames) > 1
-    
+
         if should_plot_frames:
             for i, frame in enumerate(individual_frames):
                 fig.add_trace(
@@ -1031,7 +1069,9 @@ def _(CACHE_DIR, LarchWrapper, mo):
                 wrapper.clear_cache()
                 message = mo.md("### 🗑️ Cache Cleared Successfully")
 
-        except Exception as e:
+        except (OSError, PermissionError, FileNotFoundError) as e:
+            # OSError: file system errors, PermissionError: access denied,
+            # FileNotFoundError: cache directory missing
             message = mo.md(f"### ❌ Cache Error\n{str(e)}")
         mo.output.append(message)
         # return None
@@ -1051,10 +1091,13 @@ def _(CACHE_DIR, LarchWrapper, mo):
                         | **Size** | {info["size_mb"]} MB |
                     """)
 
-        except Exception as e:
+        except (OSError, PermissionError, FileNotFoundError) as e:
+            # OSError: file system errors, PermissionError: access denied,
+            # FileNotFoundError: cache directory missing
             message = mo.md(f"### ❌ Cache Error\n{str(e)}")
         mo.output.append(message)
         # return message
+
     return clear_cache, show_cache
 
 

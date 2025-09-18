@@ -39,7 +39,7 @@ Workflow ii (multiple config averaging):
 ----------------------------------------
 
 Description:
-Multiple configs are sampled from the equilibrated MD to generate (complex) spectra which are then averaged. 
+Multiple configs are sampled from the equilibrated MD to generate (complex) spectra which are then averaged.
 Uses longer LAMMPS job so we can test convergence of EXAFS spectrum w.r.t number configs.
 LAMMPS job also corrected for rotation (rotation of nanoparticle is prevented)
 This workflow uses some outputs from the first (.cif and potential file) so complete the first prior to this.
@@ -67,4 +67,3 @@ python dump_to_cif_multi.py dump_production.xyz lammpsIn_constP_longer --stride 
 salloc # access an interactive node
 python run_feff_multi.py    # currently in serial ( ~ 10 m for 101 snapshots; but ~ 2hrs for 1001 configs)
 mv EXAFS_reference.pdf EXAFS_reference_101configs.pdf
-

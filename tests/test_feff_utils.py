@@ -63,30 +63,29 @@ class TestRunFeffCalculation:
     """Test FEFF calculation execution."""
 
     @patch("sys.stdout")
-    @patch("sys.stderr") 
+    @patch("sys.stderr")
     def test_run_calculation_success(self, mock_stderr, mock_stdout):
         """Test successful FEFF calculation."""
         # Create a real temporary directory for this test
         import tempfile
-        
+
         with tempfile.TemporaryDirectory() as temp_dir:
             feff_dir = Path(temp_dir)
-            
+
             # Create the required input file
             input_file = feff_dir / "feff.inp"
             input_file.write_text("TITLE Test FEFF calculation")
-            
+
             # Create the chi.dat file that the function expects to check success
             chi_file = feff_dir / "chi.dat"
             chi_file.write_text("# Test chi.dat\n0.0 1.0 0.5\n1.0 2.0 1.0\n")
-            
+
             # Mock the imported feff8l function inside the function scope
             with patch.object(
-                __import__("larch.xafs.feffrunner", fromlist=["feff8l"]), 
-                "feff8l"
+                __import__("larch.xafs.feffrunner", fromlist=["feff8l"]), "feff8l"
             ) as mock_feff8l:
                 mock_feff8l.return_value = True
-                
+
                 result = run_feff_calculation(feff_dir, verbose=False)
                 assert result is True
                 mock_feff8l.assert_called_once()

@@ -345,6 +345,7 @@ class TestLarchWrapper:
                             output_dir,
                             filename_base="test_plot",
                             show_plot=False,
+                            chi_weighting="chi",
                         )
 
                         assert isinstance(plot_paths, dict)
@@ -383,6 +384,7 @@ class TestLarchWrapper:
                     # Method exists but may fail due to complex dependencies
                     print(f"Process test skipped due to: {e}")
                     pass
+
 
 class TestLarchWrapperIntegration:
     """Integration tests for LarchWrapper."""

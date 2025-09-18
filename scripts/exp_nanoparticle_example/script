@@ -22,5 +22,3 @@ export LD_LIBRARY_PATH=/home/vol01/scarf781/progs/mace_stuff/lammps-symmetrix-cp
 export OMP_NUM_THREADS=1
 lmp="/home/vol01/scarf781/progs/mace_stuff/lammps-symmetrix-cpu/bin/lmp"
 srun $lmp -in lammpsIn_constP -log output
-
-

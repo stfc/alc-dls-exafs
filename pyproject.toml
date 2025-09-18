@@ -1,7 +1,3 @@
-[build-system]
-requires = ["setuptools>=64", "setuptools-scm>=8"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "larch-cli-wrapper"
 version = "0.1.0"
@@ -35,6 +31,7 @@ dependencies = [
     "weas-widget>=0.1.26",
 ]
 
+
 [project.urls]
 Homepage = "https://github.com/stfc/alc-dls-exafs"
 Repository = "https://github.com/stfc/alc-dls-exafs"
@@ -48,24 +45,33 @@ larch-cli = "larch_cli_wrapper.cli:app"
 full = [
     "pymatgen>=2022.7",
 ]
+[dependency-groups]
 dev = [
     "pytest",
     "pytest-cov",
-    "ruff>=0.11.0",
     "mypy>=1.11.0",
     "types-setuptools",
     "types-PyYAML",
     "types-tqdm",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["larch_cli_wrapper*"]
+pre-commit = [
+    "pre-commit<5.0.0,>=4.2.0",
+    "ruff<1.0.0,>=0.11.13",
+]
+[tool.uv]
+default-groups = [
+    "dev",
+    "pre-commit",
+]
 
-[tool.setuptools.package-dir]
-"" = "src"
+[build-system]
+requires = ["uv_build>=0.8.4,<0.9.0"]
+build-backend = "uv_build"
 
-
+[tool.uv.build-backend]
+module-name = "larch_cli_wrapper"
+module-root = ""
 
 
 # =======================
@@ -112,7 +118,14 @@ convention = "google"
 'tests/**/*' = ['D', 'S101']
 '**/test_*.py' = ['D', 'S101']
 '__init__.py' = ['D', 'F401']
-'src/larch_cli_wrapper/cli.py' = ['B008']
+'larch_cli_wrapper/cli.py' = ['B008']
+'exafs_pipeline.py' = [
+    'D', # docstrings (pydocstyle)
+    'S101', # bandit security
+    'B018', # Useless expressions
+    'F841', # Unused variable
+    'E402'] # Module level import not at top of file
+'notebooks/**/*' = ['D', 'S101', 'B018', 'F841', 'F402']
 
 
 # =======================

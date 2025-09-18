@@ -84,4 +84,3 @@ if __name__ == "__main__":
         run_feff_no_pymatgen(cif_location, absorbing_atom, feff_directory)
         exafs = run_postprocessing(feff_directory)
         plot_fourier_transform(exafs)
-

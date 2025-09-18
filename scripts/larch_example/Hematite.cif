@@ -7,7 +7,7 @@ _publ_author_name
 'Zoltai T'
 'Finger L W'
 _journal_name_full 'American Mineralogist'
-_journal_volume 51 
+_journal_volume 51
 _journal_year 1966
 _journal_page_first 123
 _journal_page_last 129
@@ -81,4 +81,3 @@ _atom_site_aniso_U_13
 _atom_site_aniso_U_23
 Fe 0.00772 0.00772 0.00279 0.00386 0.00000 0.00000
 O 0.00656 0.00800 0.00442 0.00405 0.00177 0.00365
-

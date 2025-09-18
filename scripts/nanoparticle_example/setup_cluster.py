@@ -86,7 +86,7 @@ if __name__ == "__main__":
     if args.input_xyz:
         atoms = read(args.input_xyz)
     else:
-        surfaces = [tuple(int(x) for x in s.split(",")) 
+        surfaces = [tuple(int(x) for x in s.split(","))
                     for s in args.surfaces.split(";")]
         layers   = [int(x) for x in args.layers.split(",")]
         axis_vec = tuple(float(x) for x in args.axis.split(","))
@@ -100,7 +100,7 @@ if __name__ == "__main__":
 
     # write LAMMPS data (numeric types only)
     write('Ag_cluster.lmp', atoms, format='lammps-data', atom_style='atomic')
- 
+
     # write XYZ
     if args.input_xyz:
         # just dump original XYZ symbols
@@ -114,4 +114,3 @@ if __name__ == "__main__":
         write('Ag_cluster.xyz', atoms_xyz)
 
     print(f"Written Ag_cluster.lmp and Ag_cluster.xyz ({len(atoms)} atoms)")
-
