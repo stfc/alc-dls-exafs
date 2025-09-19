@@ -161,3 +161,6 @@ outputs/*
 !outputs/.gitkeep
 test_outputs/*
 !test_outputs/.gitkeep
+
+# Marimo files
+notebooks/__marimo__
