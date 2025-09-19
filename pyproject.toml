@@ -119,11 +119,8 @@ convention = "google"
 '__init__.py' = ['D', 'F401']
 'larch_cli_wrapper/cli.py' = ['B008']
 'notebooks/exafs_pipeline.py' = [
-    'D', # docstrings (pydocstyle)
-    'S101', # bandit security
-    'B018', # Useless expressions
-    'F841', # Unused variable
-    'E402'] # Module level import not at top of file
+    'F841',
+    'B018']
 'notebooks/nanoparticle_builder.py' = [
     'B018']
 
