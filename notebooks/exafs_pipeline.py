@@ -374,8 +374,7 @@ def _(ASEAdapter, AtomsViewer, BaseWidget, guiConfig):
         boundary=None,
         show_bonded_atoms=True,
     ):
-        """Function to visualise an ASE Atoms object
-        (or list of them) using weas_widget.
+        """Function to visualise an ASE Atoms object(or list of them) using weas_widget.
 
         using weas_widget.
         """
@@ -484,7 +483,7 @@ def _(mo):
 @app.cell
 def _(Path, read, tempfile):
     def process_uploaded_structure(structure_file, input_kwargs):
-        """Process new structure/trajectory file"""
+        """Process new structure/trajectory file."""
         suffix = f".{structure_file.name.split('.')[-1]}"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(structure_file.contents)
@@ -583,7 +582,7 @@ def _(mo, sampling_method):
         parameter_input = mo.md("")
 
     def get_sampling_config() -> dict:
-        """Construct an ASE-compatible index kwarg based on the options"""
+        """Construct an ASE-compatible index kwarg based on the options."""
         method = sampling_method.value
 
         if method == "all":
@@ -601,10 +600,10 @@ def _(mo, sampling_method):
 def _(FeffConfig):
     def create_feff_config(settings) -> FeffConfig:
         """Create a FeffConfig object from the current UI settings.
+
         Maps UI values to the appropriate FeffConfig fields.
 
         settings should be the result of form.value
-
         """
         return FeffConfig(
             # Map radius from UI
@@ -630,7 +629,7 @@ def _(FeffConfig):
 @app.cell
 def _(ProcessingMode, SimpleNamespace, mo, traceback):
     def process_existing_outputs(wrapper, config, output_dir, absorber, is_traj):
-        """Process existing FEFF outputs without running new calculations"""
+        """Process existing FEFF outputs without running new calculations."""
         if is_traj:
             frame_dirs = sorted(
                 [
@@ -656,7 +655,7 @@ def _(ProcessingMode, SimpleNamespace, mo, traceback):
             return mo.md(f"### ✅ Processed existing output in `{output_dir}`"), result
 
     def process_single_existing(wrapper, config, output_dir, absorber):
-        """Process single existing FEFF output"""
+        """Process single existing FEFF output."""
         exafs_group = wrapper.process_feff_output(output_dir, config)
         wrapper.plot_results(
             exafs_group,
@@ -674,7 +673,7 @@ def _(ProcessingMode, SimpleNamespace, mo, traceback):
     def process_new_structures(
         wrapper, structures, config, output_dir, absorber, is_traj
     ):
-        """Process new structure(s). Input is a list of ASE Atoms objects"""
+        """Process new structure(s). Input is a list of ASE Atoms objects."""
         try:
             with mo.status.progress_bar(
                 total=100,
@@ -712,7 +711,7 @@ def _(ProcessingMode, SimpleNamespace, mo, traceback):
                 """), None
 
     def success_message(result, is_traj, output_dir):
-        """Generate success message based on processing mode"""
+        """Generate success message based on processing mode."""
         if is_traj:
             return mo.md(f"""
                 ### ✅ Trajectory Processing Complete
@@ -883,7 +882,7 @@ def _(go, message, mo, plot_type, result, settings):
     def create_plot(
         exafs_group, individual_frames, plot_type, show_legend, absorber, edge
     ):
-        """Create plot based on selected options"""
+        """Create plot based on selected options."""
         fig = go.Figure()
         common_layout = {
             "font": {"family": "Times New Roman", "size": 18},
@@ -953,7 +952,7 @@ def _(go, message, mo, plot_type, result, settings):
         return fig
 
     def add_chi_plot(fig, exafs_group, individual_frames, chi_weighting, show_legend):
-        """Add chi(k) plot traces"""
+        """Add chi(k) plot traces."""
 
         # Apply weighting to data
         def apply_weighting(k, chi):
@@ -1010,7 +1009,7 @@ def _(go, message, mo, plot_type, result, settings):
         )
 
     def add_ft_plot(fig, exafs_group, individual_frames, show_legend):
-        """Add Fourier transform plot traces"""
+        """Add Fourier transform plot traces."""
         should_plot_frames = individual_frames and len(individual_frames) > 1
 
         if should_plot_frames:
@@ -1063,7 +1062,7 @@ def _(go, message, mo, plot_type, result, settings):
 @app.cell(hide_code=True)
 def _(CACHE_DIR, LarchWrapper, mo):
     def clear_cache(button_value=None):
-        """Clear the Larch cache directory"""
+        """Clear the Larch cache directory."""
         try:
             with LarchWrapper(cache_dir=CACHE_DIR) as wrapper:
                 wrapper.clear_cache()
@@ -1077,7 +1076,7 @@ def _(CACHE_DIR, LarchWrapper, mo):
         # return None
 
     def show_cache(button_value=None):
-        """Show the Larch cache information"""
+        """Show the Larch cache information."""
         try:
             with LarchWrapper(cache_dir=CACHE_DIR) as wrapper:
                 info = wrapper.get_cache_info()
