@@ -1,3 +1,4 @@
+"""Nanoparticle builder."""
 # /// script
 # [tool.marimo.runtime]
 # auto_instantiate = false
@@ -11,17 +12,17 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
-    import marimo as mo
-    import numpy as np
-    import io
     import ast
-    from ase.cluster.cubic import FaceCenteredCubic, BodyCenteredCubic, SimpleCubic
+    import io
+
+    import marimo as mo
     from ase.io import write
     from weas_widget.atoms_viewer import AtomsViewer
     from weas_widget.base_widget import BaseWidget
     from weas_widget.utils import ASEAdapter
 
-    # I disabled the controls in the GUi, because the style is not loaded properly inside Marimo notebook
+    # I disabled the controls in the GUi, because the style is not loaded
+    # properly inside Marimo notebook
     guiConfig = {"controls": {"enabled": False}}
     return ASEAdapter, AtomsViewer, BaseWidget, ast, guiConfig, io, mo, write
 
@@ -33,6 +34,7 @@ def _(ASEAdapter, AtomsViewer, BaseWidget, guiConfig):
         v.atoms = ASEAdapter.to_weas(atoms)
         v.model_style = model_style
         return v._widget
+
     return (view_atoms,)
 
 
@@ -78,24 +80,26 @@ def setup_cluster(
     vacuum : float
         Vacuum padding around the cluster (Angstroms)
     """
-    from ase.cluster import FaceCenteredCubic, BodyCenteredCubic, SimpleCubic
     import numpy as np
+    from ase.cluster import BodyCenteredCubic, FaceCenteredCubic, SimpleCubic
 
     # Normalize crystal structure input
     crystal_structure = crystal_structure.lower().strip()
 
     # Define crystal structure classes
     structure_map = {
-        'fcc': FaceCenteredCubic,
-        'bcc': BodyCenteredCubic,
-        'sc': SimpleCubic
+        "fcc": FaceCenteredCubic,
+        "bcc": BodyCenteredCubic,
+        "sc": SimpleCubic,
     }
 
     # Validate crystal structure
     if crystal_structure not in structure_map:
-        valid_structures = ', '.join(f"'{k}'" for k in structure_map.keys())
-        raise ValueError(f"Invalid crystal_structure '{crystal_structure}'. "
-                        f"Valid options are: {valid_structures}")
+        valid_structures = ", ".join(f"'{k}'" for k in structure_map.keys())
+        raise ValueError(
+            f"Invalid crystal_structure '{crystal_structure}'. "
+            f"Valid options are: {valid_structures}"
+        )
 
     # Get the appropriate cluster class
     ClusterClass = structure_map[crystal_structure]
@@ -121,9 +125,7 @@ def setup_cluster(
     axis_vec = (axis_x, axis_y, axis_z)
 
     # Create the cluster with the appropriate crystal structure
-    atoms = ClusterClass(
-        symbol1, surfaces, layers, latticeconstant=latticeconstant
-    )
+    atoms = ClusterClass(symbol1, surfaces, layers, latticeconstant=latticeconstant)
 
     atoms.center(vacuum=vacuum, axis=(0, 1, 2))
     atoms.set_pbc([True, True, True])
@@ -167,7 +169,9 @@ def setup_cluster(
 
     else:
         valid_methods = "'cutoff', 'hemisphere', 'mixed'"
-        raise ValueError(f"Invalid method '{method}'. Valid options are: {valid_methods}")
+        raise ValueError(
+            f"Invalid method '{method}'. Valid options are: {valid_methods}"
+        )
 
     return atoms
 
@@ -237,6 +241,7 @@ def _(mo):
 
     def remove_at(i):
         set_surfaces(lambda arr: arr[:i] + arr[i + 1 :])
+
     return (
         add_surface_btn,
         axis_x_ui,
@@ -289,6 +294,7 @@ def _(get_surfaces, mo, update_surface):
                 )
             )
         return mo.vstack(rows)
+
     return
 
 
@@ -386,14 +392,14 @@ def _(add_surface_btn, mo, remove_surface_btn, rows):
 
 @app.cell
 def _(get_surfaces, mo):
-    # Just display the current state - let individual UI elements handle their own updates
     current_surfaces = [((s["h"], s["k"], s["l"]), s["layers"]) for s in get_surfaces()]
     mo.md(f"""
     **Current Surface Configuration:**
     {
         chr(10).join(
             [
-                f"- Surface {i}: ({spec[0][0]},{spec[0][1]},{spec[0][2]}) with {spec[1]} layers"
+                f"- Surface {i}: ({spec[0][0]},{spec[0][1]},{spec[0][2]}) "
+                + f"with {spec[1]} layers"
                 for i, spec in enumerate(current_surfaces)
             ]
         )
@@ -456,8 +462,10 @@ def _(atoms, mo):
 
     - **Total atoms:** {len(atoms)}
     - **Composition:** {atoms.get_chemical_formula()}
-    - **Diameter (volume):** {atoms.get_diameter(method='volume'):.2f} Å (diameter of a sphere with the same volume as the atoms.
-    - **Diameter (shape):** {atoms.get_diameter(method='shape'):.2f} Å (averaged diameter calculated from the directions given by the defined surfaces.)
+    - **Diameter (volume):** {atoms.get_diameter(method="volume"):.2f}"  Å
+      (diameter of a sphere with the same volume as the atoms.
+    - **Diameter (shape):** {atoms.get_diameter(method="shape"):.2f} Å
+      (averaged diameter calculated from the directions given by the defined surfaces.)
     """
     )
     return
@@ -468,39 +476,38 @@ def _(write):
     def save_atoms_to_file(atoms, filename, write_kwargs):
         write(filename, atoms, **write_kwargs)
         print(f"Cluster saved to {filename}")
+
     return
 
 
 @app.cell
 def _(ast):
     def parse_kwargs_string(text: str):
-        """
-        Safely parse user input as a dict.
+        """Safely parse user input as a dict.
+
         Accepts Python-style dicts (single or double quotes, True/False)
         and JSON-style dicts.
+
         Returns {} if parsing fails.
         """
         text = text.strip()
         if not text:
             return {}
-        try:
-            # literal_eval is safe: no arbitrary code execution
-            result = ast.literal_eval(text)
-            if isinstance(result, dict):
-                return result
-            else:
-                return {}
-        except Exception:
-            # fallback to empty dict if parsing fails
+        # literal_eval is safe: no arbitrary code execution
+        result = ast.literal_eval(text)
+        if isinstance(result, dict):
+            return result
+        else:
             return {}
+
     return (parse_kwargs_string,)
 
 
 @app.cell
 def _(io, write):
     def atoms_to_contents(atoms, fmt: str, **write_kwargs):
-        """
-        Try to write Atoms in text mode; fall back to binary if needed.
+        """Try to write Atoms in text mode; fall back to binary if needed.
+
         Returns str (for text) or bytes (for binary).
         """
 
@@ -509,10 +516,14 @@ def _(io, write):
             if "can only store 1 Atoms object" in error_msg:
                 return ValueError(
                     f"Format '{format_name}' can only store 1 Atoms object. "
-                    f"Try adding 'index': 0 to the write kwargs to select the first structure, "
-                    f"or use a format that supports multiple structures (e.g., 'xyz', 'traj')."
+                    f"Try adding 'index': 0 to the write kwargs to select "
+                    f"the first structure, "
+                    f"or use a format that supports multiple structures"
+                    f" (e.g., 'xyz', 'traj')."
                 )
-            return ValueError(f"Unable to write atoms in format '{format_name}': {error_msg}")
+            return ValueError(
+                f"Unable to write atoms in format '{format_name}': {error_msg}"
+            )
 
         def _try_write(buffer_type, buffer_class):
             """Attempt to write to the given buffer type."""
@@ -521,14 +532,16 @@ def _(io, write):
                 write(buf, atoms, format=fmt, **write_kwargs)
                 return buf.getvalue()
             except (TypeError, UnicodeDecodeError):
-                # These are buffer-type specific errors, let caller try other buffer type
                 raise
             except ValueError as e:
                 # Format-specific errors should be handled immediately
                 raise _handle_single_atom_error(str(e), fmt) from e
             except Exception as e:
                 # Any other unexpected error
-                raise ValueError(f"Unexpected error writing {buffer_type} format '{fmt}': {str(e)}") from e
+                raise ValueError(
+                    f"Unexpected error writing {buffer_type}"
+                    + f"format '{fmt}': {str(e)}"
+                ) from e
 
         # Try text mode first
         try:
@@ -542,29 +555,30 @@ def _(io, write):
 
         # Try binary mode
         return _try_write("binary", io.BytesIO)
+
     return (atoms_to_contents,)
 
 
 @app.cell
 def _(atoms, atoms_to_contents, mo):
     write_formats = ["xyz", "cif", "vasp", "extxyz"]
-    fmt_dropdown = mo.ui.dropdown(options=write_formats, value="cif", label="Output format")
+    fmt_dropdown = mo.ui.dropdown(
+        options=write_formats, value="cif", label="Output format"
+    )
 
-    def make_download(fmt_choice, file_prefix="converted_structure", write_kwargs={}):
+    def make_download(fmt_choice, file_prefix="converted_structure", write_kwargs=None):
         contents = atoms_to_contents(atoms, fmt_choice, **write_kwargs)
         return mo.download(contents, filename=f"{file_prefix}")
 
-
-    output_kwargs_text = mo.ui.text_area(
-        label="Output kwargs",
-        value="{}"
-    )
+    output_kwargs_text = mo.ui.text_area(label="Output kwargs", value="{}")
     return fmt_dropdown, make_download, output_kwargs_text
 
 
 @app.cell
 def _(fmt_dropdown, mo):
-    output_file_name = mo.ui.text(label='Output File Name', value=f"converted_file.{fmt_dropdown.value}")
+    output_file_name = mo.ui.text(
+        label="Output File Name", value=f"converted_file.{fmt_dropdown.value}"
+    )
     return (output_file_name,)
 
 
@@ -579,12 +593,26 @@ def _(
     parse_kwargs_string,
 ):
     output_kwargs = parse_kwargs_string(output_kwargs_text.value)
-    download_link = make_download(fmt_dropdown.value, file_prefix=output_file_name.value, write_kwargs=output_kwargs) if atoms else mo.md("Create a cluster to enable download.")
+    download_link = (
+        make_download(
+            fmt_dropdown.value,
+            file_prefix=output_file_name.value,
+            write_kwargs=output_kwargs,
+        )
+        if atoms
+        else mo.md("Create a cluster to enable download.")
+    )
 
-    mo.vstack([
-        mo.md("### 💾 Save Cluster to File"),
-        fmt_dropdown, output_file_name, output_kwargs_text, download_link],
-             justify="center")
+    mo.vstack(
+        [
+            mo.md("### 💾 Save Cluster to File"),
+            fmt_dropdown,
+            output_file_name,
+            output_kwargs_text,
+            download_link,
+        ],
+        justify="center",
+    )
     return
 
 

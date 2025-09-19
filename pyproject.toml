@@ -124,6 +124,8 @@ convention = "google"
     'B018', # Useless expressions
     'F841', # Unused variable
     'E402'] # Module level import not at top of file
+'notebooks/nanoparticle_builder.py' = [
+    'B018']
 
 
 # =======================
