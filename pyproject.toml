@@ -27,7 +27,7 @@ dependencies = [
     "rich<14.0.0,>=13.9.1",
     "matplotlib>=3.5",
     "larixite>=0.1.0",
-    "marimo<0.15.0,>=0.15.5",
+    "marimo<0.16.0,>=0.15.5",
     "weas-widget>=0.1.26",
 ]
 
