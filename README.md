@@ -70,7 +70,7 @@ pip install https://github.com/stfc/alc-dls-exafs/archive/refs/heads/main.zip
 Launch the interactive Marimo application for a web-based EXAFS processing experience:
 
 ```bash
-marimo run exafs_pipeline.py
+marimo run notebooks/exafs_pipeline.py
 ```
 
 This will open a web interface in your browser where you can:
@@ -83,7 +83,7 @@ This will open a web interface in your browser where you can:
 If you want to edit the notebook, you can do so instead using:
 
 ```bash
-marimo edit exafs_pipeline.py
+marimo edit notebooks/exafs_pipeline.py
 ```
 
 ### Command Line Usage
@@ -153,18 +153,6 @@ You can create a `config.yaml` file in your working directory to customize the p
 
 ```bash
 larch-cli process structure.cif Fe --config config.yaml
-```
-
-## Project Structure
-
-```
-├── src/larch_cli_wrapper/      # Core package
-│   ├── cli.py                  # Command line interface
-│   ├── wrapper.py              # Main processing wrapper
-│   ├── feff_utils.py           # FEFF utilities
-│   └── cache_utils.py          # Caching system
-├── exafs_pipeline.py           # Interactive Marimo app
-└── tests/                      # Test suite
 ```
 
 ## Dependencies
@@ -275,7 +263,7 @@ TODO
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the BSD-3 License. See the [LICENSE](LICENSE) file for details.
 
 ## Support
 
