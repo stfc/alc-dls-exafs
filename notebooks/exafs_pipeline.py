@@ -22,7 +22,6 @@ def _():
     from weas_widget.base_widget import BaseWidget
     from weas_widget.utils import ASEAdapter
 
-
     # Package imports
     try:
         from larch_cli_wrapper.feff_utils import (
@@ -390,6 +389,7 @@ def _(ASEAdapter, AtomsViewer, BaseWidget, guiConfig):
         v.color_type = "VESTA"
         v.cell.settings["showAxes"] = True
         return v._widget
+
     return (view_atoms,)
 
 
@@ -426,6 +426,7 @@ def _(ast, mo):
             return kwargs, mo.md(
                 f"**Error parsing kwargs**: {e}. Using existing kwargs."
             )
+
     return (parse_kwargs_string,)
 
 
@@ -491,6 +492,7 @@ def _(Path, read, tempfile):
         atoms = read(temp_path, **input_kwargs)
         temp_path.unlink()  # Delete the temporary file
         return atoms
+
     return (process_uploaded_structure,)
 
 
@@ -591,6 +593,7 @@ def _(mo, sampling_method):
         elif sampling_method.value == "every Nth":
             index = f"::{int(parameter_input.value)}"
         return {"index": index}
+
     return get_sampling_config, parameter_input
 
 
@@ -620,6 +623,7 @@ def _(FeffConfig):
             # Map cleanup setting
             cleanup_feff_files=settings.get("cleanup_feff_files"),
         )
+
     return (create_feff_config,)
 
 
@@ -719,6 +723,7 @@ def _(ProcessingMode, SimpleNamespace, mo, traceback):
             ### ✅ Single Structure Processed
             - **Output**: `{output_dir}`
         """)
+
     return process_existing_outputs, process_new_structures
 
 
@@ -869,6 +874,7 @@ def _(
             result = None
 
         return message, result
+
     return (run_exafs_processing,)
 
 
@@ -1038,17 +1044,35 @@ def _(
             )
         )
 
-    def save_raw_data(exa,iframes):
+    def save_raw_data(exa, iframes):
         # this can be probably passed but better in case we want to change it.
         outdir = Path(settings.get("output_dir", DEFAULT_OUTPUT_DIR))
-        exafs_chir = outdir/"exafs.chir"
-        write_ascii(exafs_chir, exa.r,exa.chir_mag,label="r [Å]      |χ(r)| [a.u.]")
-        exafs_chik = outdir/"exafs.chik"
-        write_ascii(exafs_chik, exa.k,exa.chi,exa.k**2*exa.chi,exa.k**3*exa.chi,label="k [1/Å]      χ(k) [a.u.]   k²χ(k) [a.u.]   k³χ(k) [a.u.]")
+        exafs_chir = outdir / "exafs.chir"
+        write_ascii(exafs_chir, exa.r, exa.chir_mag, label="r [Å]      |χ(r)| [a.u.]")
+        exafs_chik = outdir / "exafs.chik"
+        write_ascii(
+            exafs_chik,
+            exa.k,
+            exa.chi,
+            exa.k**2 * exa.chi,
+            exa.k**3 * exa.chi,
+            label="k [1/Å]      χ(k) [a.u.]   k²χ(k) [a.u.]   k³χ(k) [a.u.]",
+        )
         for i, frame in enumerate(iframes):
-            write_ascii(outdir/f"exafs{i}.chir", frame.r,frame.chir_mag,label="r [Å]      |χ(r)| [a.u.]")
-            write_ascii(outdir/f"exafs{i}.chik", frame.k,frame.chi,frame.k**2*frame.chi,frame.k**3*frame.chi,label="k [1/Å]      χ(k) [a.u.]   k²χ(k) [a.u.]   k³χ(k) [a.u.]")
-
+            write_ascii(
+                outdir / f"exafs{i}.chir",
+                frame.r,
+                frame.chir_mag,
+                label="r [Å]      |χ(r)| [a.u.]",
+            )
+            write_ascii(
+                outdir / f"exafs{i}.chik",
+                frame.k,
+                frame.chi,
+                frame.k**2 * frame.chi,
+                frame.k**3 * frame.chi,
+                label="k [1/Å]      χ(k) [a.u.]   k²χ(k) [a.u.]   k³χ(k) [a.u.]",
+            )
 
     # Skip if no result
     if result is None:
@@ -1062,7 +1086,7 @@ def _(
 
         # Get individual frames if they exist
         individual_frames = getattr(result, "individual_frame_groups", None)
-        save_raw_data(exafs_group,individual_frames)
+        save_raw_data(exafs_group, individual_frames)
         fig = create_plot(
             exafs_group,
             individual_frames,
@@ -1113,6 +1137,7 @@ def _(CACHE_DIR, LarchWrapper, mo):
             message = mo.md(f"### ❌ Cache Error\n{str(e)}")
         mo.output.append(message)
         # return message
+
     return clear_cache, show_cache
 
 
