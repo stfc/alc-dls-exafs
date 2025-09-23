@@ -24,6 +24,8 @@ def _():
 
     # Package imports
     try:
+        from larch.io import write_ascii
+
         from larch_cli_wrapper.feff_utils import (
             PRESETS,
             EdgeType,
@@ -31,7 +33,6 @@ def _():
             WindowType,
         )
         from larch_cli_wrapper.wrapper import LarchWrapper, ProcessingMode
-        from larch.io import write_ascii
     except ImportError:
         mo.stop(
             mo.output.append(
