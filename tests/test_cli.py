@@ -1,5 +1,7 @@
 """Comprehensive tests for the CLI interface."""
 
+import os
+import re
 from unittest.mock import Mock, patch
 
 from typer.testing import CliRunner
@@ -7,23 +9,33 @@ from typer.testing import CliRunner
 from larch_cli_wrapper.cli import app
 from larch_cli_wrapper.wrapper import EXAFSProcessingError, ProcessingResult
 
+# Store original NO_COLOR state
+_original_no_color = os.environ.get("NO_COLOR")
+
+
+def setup_module():
+    """Set up module-level test environment."""
+    os.environ["NO_COLOR"] = "1"
+
+
+def teardown_module():
+    """Clean up module-level test environment."""
+    if _original_no_color is None:
+        os.environ.pop("NO_COLOR", None)
+    else:
+        os.environ["NO_COLOR"] = _original_no_color
+
 
 class TestCLI:
     """Test cases for CLI interface."""
 
     def setup_method(self):
         """Setup test runner."""
-        import os
-
-        # Set NO_COLOR in the actual environment before importing
-        os.environ["NO_COLOR"] = "1"
         self.runner = CliRunner()
 
     def teardown_method(self):
         """Clean up test environment."""
-        import os
-
-        os.environ.pop("NO_COLOR", None)
+        pass
 
     # ================== BASIC COMMAND TESTS ==================
 
@@ -301,7 +313,9 @@ kmax: 14.0
         )
 
         assert result.exit_code == 0
-        assert "Frames processed: 10" in result.stdout
+        # Handle ANSI color codes in output
+        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+        assert "Frames processed: 10" in plain_output
 
     @patch("larch_cli_wrapper.cli.LarchWrapper")
     def test_process_with_all_options(self, mock_wrapper_class, tmp_path):
@@ -420,8 +434,10 @@ kmax: 14.0
         result = self.runner.invoke(app, ["process-output", str(feff_dir)])
 
         assert result.exit_code == 0
-        assert "Trajectory processed" in result.stdout
-        assert "Frames processed: 3" in result.stdout
+        # Handle ANSI color codes in output
+        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+        assert "Trajectory processed" in plain_output
+        assert "Frames processed: 3" in plain_output
 
     @patch("larch_cli_wrapper.cli.LarchWrapper")
     def test_process_output_no_data(self, mock_wrapper_class, tmp_path):
@@ -465,7 +481,9 @@ kmax: 14.0
 
         assert result.exit_code == 0
         assert output_file.exists()
-        assert "Based on 'quick' preset" in result.stdout
+        # Handle ANSI color codes in output
+        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+        assert "Based on 'quick' preset" in plain_output
 
     def test_config_example_invalid_preset(self):
         """Test config-example with invalid preset."""
@@ -493,10 +511,12 @@ kmax: 14.0
         result = self.runner.invoke(app, ["cache", "info"])
 
         assert result.exit_code == 0
-        assert "Cache Status" in result.stdout
-        assert "Enabled: ✓" in result.stdout
-        assert "5" in result.stdout
-        assert "12.5 MB" in result.stdout
+        # Handle ANSI color codes in output
+        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+        assert "Cache Status" in plain_output
+        assert "Enabled: ✓" in plain_output
+        assert "5" in plain_output
+        assert "12.5 MB" in plain_output
 
     @patch("larch_cli_wrapper.cli.LarchWrapper")
     def test_cache_info_disabled(self, mock_wrapper_class):
