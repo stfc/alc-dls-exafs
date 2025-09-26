@@ -45,7 +45,7 @@ def _setup_config(
         console.print(f"[dim]Using '{preset}' preset[/dim]")
     else:
         config = FeffConfig()
-        console.print("[dim]Using default configuration (larixite defaults)[/dim]")
+        console.print("[dim]Using default configuration (pymatgen defaults)[/dim]")
 
     config.force_recalculate = force_recalculate
     return config
@@ -91,9 +91,6 @@ def generate_inputs(
     preset: str | None = typer.Option(
         None, "--preset", "-p", help=f"Configuration preset: {list(PRESETS.keys())}"
     ),
-    method: str = typer.Option(
-        "auto", "--method", "-m", help="Method: auto, larixite, pymatgen"
-    ),
     cleanup_feff_files: bool = typer.Option(
         True, "--cleanup/--no-cleanup", help="Clean up unnecessary FEFF output files"
     ),
@@ -106,7 +103,6 @@ def generate_inputs(
     try:
         config = _setup_config(config_file, preset)
         config.edge = edge
-        config.method = method
         config.cleanup_feff_files = cleanup_feff_files
 
         # Load structure file
@@ -114,8 +110,7 @@ def generate_inputs(
 
         with LarchWrapper(verbose=True, cache_dir=Path.home() / ".larch_cache"):
             console.print(
-                f"[cyan]Generating FEFF input for {absorber} using "
-                f"{config.method} method...[/cyan]"
+                f"[cyan]Generating FEFF input for {absorber} using pymatgen...[/cyan]"
             )
 
             # Generate FEFF input using the unified method
@@ -225,9 +220,6 @@ def process(
     preset: str = typer.Option(
         None, "--preset", "-p", help=f"Configuration preset: {list(PRESETS.keys())}"
     ),
-    method: str = typer.Option(
-        "auto", "--method", "-m", help="Method: auto, larixite, pymatgen"
-    ),
     show_plot: bool = typer.Option(False, "--show", help="Display plots interactively"),
     parallel: bool = typer.Option(
         True, "--parallel/--sequential", help="Enable parallel processing"
@@ -269,7 +261,6 @@ def process(
         config.n_workers = n_workers
         config.edge = edge
         config.radius = radius
-        config.method = method
         config.cleanup_feff_files = cleanup_feff_files
         # Set Fourier parameters
         config.kmin = kmin
@@ -285,10 +276,7 @@ def process(
         with LarchWrapper(
             verbose=True, cache_dir=Path.home() / ".larch_cache"
         ) as wrapper:
-            console.print(
-                f"[cyan]Processing {structure} for {absorber} using "
-                f"{config.method} method...[/cyan]"
-            )
+            console.print(f"[cyan]Processing {structure} for {absorber}...[/cyan]")
 
             with create_progress() as progress:
                 task_id: int | None = None
@@ -332,7 +320,6 @@ def process(
 
             # Show results
             console.print("\n[bold green]✓ Processing completed![/bold green]")
-            console.print(f"  Method: {config.method}")
             console.print(f"  Output: {output_dir}")
 
             # Display cache statistics if available
@@ -537,11 +524,10 @@ kmax: {config.kmax}
 kweight: {config.kweight}
 window: {config.window}
 dk: {config.dk}
-method: {config.method}
 force_recalculate: false  # Set to true to skip cache
 cleanup_feff_files: true  # Set to false to keep all FEFF output files
 
-# User tag settings (empty = use larixite defaults)
+# User tag settings (empty = use pymatgen defaults)
 user_tag_settings: {dict(config.user_tag_settings) or "{}"}
 
 # Optional settings:

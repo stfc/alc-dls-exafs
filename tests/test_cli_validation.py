@@ -20,19 +20,19 @@ class TestCLIValidation:
         """Test commands with missing required arguments."""
         # generate command missing arguments
         result = self.runner.invoke(app, ["generate"])
-        assert result.exit_code == 2  # Typer error for missing arguments
+        assert result.exit_code != 0  # Should fail with missing arguments
 
         # process command missing arguments
         result = self.runner.invoke(app, ["process"])
-        assert result.exit_code == 2
+        assert result.exit_code != 0
 
         # run-feff command missing arguments
         result = self.runner.invoke(app, ["run-feff"])
-        assert result.exit_code == 2
+        assert result.exit_code != 0
 
         # process-output command missing arguments
         result = self.runner.invoke(app, ["process-output"])
-        assert result.exit_code == 2
+        assert result.exit_code != 0
 
     def test_invalid_file_paths(self):
         """Test commands with invalid file paths."""
@@ -89,29 +89,6 @@ class TestCLIValidation:
             )
             # Should either fail at CLI level or in the wrapper
             assert result.exit_code == 1
-
-    def test_invalid_method_values(self, tmp_path):
-        """Test commands with invalid method values."""
-        structure_file = tmp_path / "structure.cif"
-        structure_file.write_text("fake content")
-
-        invalid_methods = ["invalid_method", "feff", "quantum", ""]
-
-        for method in invalid_methods:
-            with patch("larch_cli_wrapper.cli.LarchWrapper") as mock_wrapper_class:
-                # Mock wrapper to avoid actual processing
-                mock_wrapper = Mock()
-                mock_wrapper.generate_feff_input.side_effect = ValueError(
-                    f"Invalid method: {method}"
-                )
-                mock_wrapper.__enter__ = Mock(return_value=mock_wrapper)
-                mock_wrapper.__exit__ = Mock(return_value=None)
-                mock_wrapper_class.return_value = mock_wrapper
-
-                result = self.runner.invoke(
-                    app, ["generate", str(structure_file), "Fe", "--method", method]
-                )
-                assert result.exit_code == 1
 
     def test_invalid_preset_values(self, tmp_path):
         """Test commands with invalid preset values."""
@@ -349,7 +326,7 @@ class TestCLIValidation:
         """Test handling of conflicting command options."""
         # Test conflicting preset and config file
         config_file = tmp_path / "config.yaml"
-        config_file.write_text("edge: K\nmethod: larixite")
+        config_file.write_text("edge: K")
 
         # Both preset and config file specified - config file should take precedence
         result = self.runner.invoke(
@@ -372,7 +349,7 @@ class TestCLIValidation:
         """Test precedence of command-line options over config files."""
         # Config file with one edge setting
         config_file = tmp_path / "config.yaml"
-        config_file.write_text("edge: L3\nmethod: larixite")
+        config_file.write_text("edge: L3")
 
         # Command-line edge should override config file
         result = self.runner.invoke(

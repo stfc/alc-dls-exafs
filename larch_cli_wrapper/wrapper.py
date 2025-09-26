@@ -8,6 +8,7 @@ import logging
 import multiprocessing as mp
 import os
 import sys
+import threading
 import traceback
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -217,41 +218,173 @@ class ProcessingResult:
 
 # ================== PARALLEL PROCESSING ==================
 class ParallelProcessor:
-    """Manages parallel processing of EXAFS calculations using multiprocessing."""
+    """Enhanced parallel processing manager with robust error handling."""
 
-    def __init__(self, n_workers: int | None = None):
+    # Class-level constants for timeout configuration
+    DEFAULT_TASK_TIMEOUT = 180  # seconds - timeout for individual FEFF calculations
+    DEFAULT_SHUTDOWN_TIMEOUT = 15  # seconds - timeout for pool shutdown
+
+    def __init__(self, n_workers: int | None = None, timeout: float | None = None):
         """Initialize the parallel processor.
 
         Args:
-            n_workers: Number of worker processes. If None, uses half of available
-                CPU cores.
+            n_workers: Number of worker processes. If None, uses optimal count.
+            timeout: Timeout in seconds for individual tasks. None = uses default.
         """
-        # Manually set number of workers, or use half the available CPU cores
-        self.n_workers = n_workers or mp.cpu_count() // 2
+        self.n_workers = self._determine_optimal_workers(n_workers)
+        self.timeout = timeout or self.DEFAULT_TASK_TIMEOUT
+        self.logger = logging.getLogger(__name__)
+
+    def _determine_optimal_workers(self, n_workers: int | None) -> int:
+        """Determine optimal number of workers based on system and constraints."""
+        if n_workers is not None:
+            return max(1, n_workers)
+
+        # Get CPU count
+        cpu_count = mp.cpu_count()
+
+        # Platform-specific optimizations
+        if sys.platform.startswith("win"):
+            # Windows: more conservative due to process overhead
+            optimal = max(1, cpu_count // 2)
+        elif sys.platform.startswith("darwin"):
+            # macOS: moderate scaling
+            optimal = max(1, min(cpu_count - 1, 8))
+        else:
+            # Linux/Unix: more aggressive scaling
+            optimal = max(1, min(cpu_count, 12))
+
+        # Memory consideration: limit based on available memory
+        try:
+            import psutil
+
+            # Rough estimate: 500MB per worker for FEFF calculations
+            available_gb = psutil.virtual_memory().available / (1024**3)
+            memory_limit = max(1, int(available_gb // 0.5))
+            optimal = min(optimal, memory_limit)
+        except ImportError:
+            pass  # psutil not available, use CPU-based estimate
+
+        return optimal
 
     @contextmanager
-    def process_pool(self) -> Any:
-        """Context manager for multiprocessing pool."""
+    def process_pool(self):
+        """Enhanced context manager for multiprocessing pool with better cleanup."""
         pool = None
         try:
-            pool = mp.Pool(
+            # Use spawn method for better isolation (especially important on
+            # macOS/Windows)
+            ctx = mp.get_context("spawn") if hasattr(mp, "get_context") else mp
+
+            pool = ctx.Pool(
                 self.n_workers,
                 initializer=self._worker_init,
                 initargs=(logging.getLogger().level,),
+                # Restart workers after 10 tasks to prevent memory leaks
+                maxtasksperchild=10,
             )
+
+            self.logger.info(f"Started parallel pool with {self.n_workers} workers")
             yield pool
+
+        except Exception as e:
+            self.logger.error(f"Error in parallel processing: {e}")
+            raise
         finally:
             if pool:
-                pool.close()
-                pool.join()
+                try:
+                    # Graceful shutdown with timeout
+                    pool.close()
+
+                    # Implement timeout for pool.join() using threading
+                    join_thread = threading.Thread(target=pool.join)
+                    join_thread.start()
+                    join_thread.join(timeout=self.DEFAULT_SHUTDOWN_TIMEOUT)
+
+                    if join_thread.is_alive():
+                        self.logger.warning(
+                            f"Pool shutdown timed out after "
+                            f"{self.DEFAULT_SHUTDOWN_TIMEOUT}s, forcing termination"
+                        )
+                        pool.terminate()
+                        join_thread.join(timeout=5)  # Give terminate a few seconds
+                        if join_thread.is_alive():
+                            self.logger.error(
+                                "Pool termination also timed out, processes may "
+                                "still be running"
+                            )
+                    else:
+                        self.logger.info("Parallel pool closed successfully")
+
+                except (OSError, RuntimeError) as e:
+                    self.logger.warning(f"Error during pool shutdown: {e}")
+                    # Force termination if graceful shutdown fails
+                    try:
+                        pool.terminate()
+                        # Use threading for terminate join as well
+                        join_thread = threading.Thread(target=pool.join)
+                        join_thread.start()
+                        join_thread.join(timeout=5)
+                    except (OSError, RuntimeError):
+                        # Best effort cleanup - if we can't clean up properly, log
+                        # it but don't crash the application
+                        self.logger.warning("Best effort pool cleanup failed")
+
+    def process_with_timeout(self, pool, func, tasks, timeout=None):
+        """Process tasks with timeout and error handling."""
+        timeout = timeout or self.timeout
+
+        if timeout:
+            # Use imap_unordered for better timeout handling
+            try:
+                results = []
+                for result in pool.imap(func, tasks):
+                    results.append(result)
+                return results
+            except mp.TimeoutError:
+                self.logger.error(f"Task timed out after {timeout} seconds")
+                raise
+        else:
+            # No timeout - use regular imap
+            return list(pool.imap(func, tasks))
 
     @staticmethod
     def _worker_init(log_level: int) -> None:
+        """Enhanced worker initialization with better resource management."""
+        # Set up logging
         logging.basicConfig(
             level=log_level,
-            format="[Worker] [%(levelname)s] %(message)s",
+            format="[Worker-%(process)d] [%(levelname)s] %(message)s",
             handlers=[logging.StreamHandler(sys.stdout)],
+            force=True,  # Override any existing logging config
         )
+
+        # Platform-specific optimizations
+        if sys.platform.startswith("linux"):
+            try:
+                # Set process priority to be nice to other processes
+                os.nice(1)
+            except (OSError, AttributeError):
+                pass
+
+        # Memory management: force garbage collection
+        import gc
+
+        gc.collect()
+
+        # Set up signal handling for graceful shutdown
+        try:
+            import signal
+
+            def signal_handler(signum, frame):
+                logging.getLogger().info(
+                    f"Worker received signal {signum}, shutting down gracefully"
+                )
+                sys.exit(0)
+
+            signal.signal(signal.SIGTERM, signal_handler)
+        except (ImportError, AttributeError):
+            pass  # Signal handling not available on this platform
 
 
 # ================== MAIN WRAPPER ==================
@@ -827,15 +960,21 @@ class LarchWrapper:
         cache_hits = 0
         cache_misses = 0
 
-        # Process frames using unified parallel framework
-        # For sequential processing, use n_workers=1 instead of separate logic
+        # Process frames using enhanced parallel framework
         if config.parallel and total_frames > 1:
-            n_workers = config.n_workers or min(mp.cpu_count(), total_frames)
-            if sys.platform.startswith("win") and n_workers > 1:
-                self.logger.warning("Parallel processing may be less stable on Windows")
+            n_workers = config.n_workers or self.parallel_processor.n_workers
+            # Platform-specific warnings and adjustments
+            if sys.platform.startswith("win") and n_workers > 4:
+                self.logger.warning(
+                    f"Reducing workers from {n_workers} to 4 on Windows for stability"
+                )
+                n_workers = 4
         else:
-            # Sequential processing: treat as parallel with 1 worker
+            # Sequential processing
             n_workers = 1
+
+        # Update parallel processor configuration
+        processor = ParallelProcessor(n_workers=n_workers)  # Uses DEFAULT_TASK_TIMEOUT
 
         self.logger.info(
             f"Processing {total_frames} frames with {n_workers} worker"
@@ -844,20 +983,83 @@ class LarchWrapper:
         )
 
         try:
-            # Always use the parallel framework (even for n_workers=1)
-            # The multiprocessing framework handles encoding properly
-            with mp.Pool(n_workers) as pool:
+            with processor.process_pool() as pool:
                 # Create worker tasks - include cache information
                 tasks = [
                     (i, atoms, absorber, output_dir, config, False, self.cache_dir)
                     for i, atoms in enumerate(structures)
                 ]
 
-                # Use imap for incremental progress updates
-                results_iter = pool.imap(self._process_frame_worker, tasks)
+                # Process with enhanced error handling and timeout
+                if n_workers == 1:
+                    # Sequential processing - direct function calls for better debugging
+                    results_list = []
+                    for task in tasks:
+                        result = self._process_frame_worker(task)
+                        results_list.append(result)
 
-                # Process results as they complete
-                for _result_idx, frame_result in enumerate(results_iter):
+                        # Update progress after each frame
+                        if not result.error:
+                            reporter.update(
+                                len([r for r in results_list if not r.error]),
+                                total_frames,
+                                f"Processed frame {result.frame_idx}",
+                            )
+                else:
+                    # Parallel processing with timeout and error handling
+                    try:
+                        results_iter = pool.imap(self._process_frame_worker, tasks)
+                        results_list = []
+                        failed_frames = 0
+                        max_failures = max(
+                            1, total_frames // 2
+                        )  # Allow up to 50% failures
+
+                        for _result_idx, frame_result in enumerate(results_iter):
+                            results_list.append(frame_result)
+
+                            # Track failures and check for early termination
+                            if frame_result.error:
+                                failed_frames += 1
+                                self.logger.warning(
+                                    f"Frame {frame_result.frame_idx} failed: "
+                                    f"{frame_result.error}"
+                                )
+
+                                # Early termination if too many failures
+                                if failed_frames > max_failures:
+                                    self.logger.error(
+                                        f"Too many failures ({failed_frames}/"
+                                        f"{len(results_list)}), terminating processing"
+                                    )
+                                    raise RuntimeError(
+                                        f"Processing terminated: {failed_frames} "
+                                        f"frames failed out of {len(results_list)} "
+                                        f"processed"
+                                    )
+
+                            # Update progress after each completed frame
+                            if not frame_result.error:
+                                successful_frames = len(
+                                    [r for r in results_list if not r.error]
+                                )
+                                reporter.update(
+                                    successful_frames,
+                                    total_frames,
+                                    f"Processed frame {frame_result.frame_idx}",
+                                )
+
+                    except (RuntimeError, ValueError, OSError) as e:
+                        self.logger.error(f"Parallel processing failed: {e}")
+                        # Fall back to sequential processing
+                        self.logger.info("Falling back to sequential processing...")
+                        results_list = []
+                        for task in tasks:
+                            result = self._process_frame_worker(task)
+                            results_list.append(result)
+
+                # Process results
+                for frame_result in results_list:
                     if frame_result.error:
                         self.logger.error(
                             f"Frame {frame_result.frame_idx} failed: "
@@ -894,12 +1096,11 @@ class LarchWrapper:
                     xftf(frame_group, **config.fourier_params)
                     individual_groups.append(frame_group)
 
-                    # Update progress after each completed frame
-                    reporter.update(
-                        len(chi_list),
-                        total_frames,
-                        f"Processed {len(chi_list)}/{total_frames}",
-                    )
+                    # Track cache statistics
+                    if hasattr(frame_result, "from_cache") and frame_result.from_cache:
+                        cache_hits += 1
+                    else:
+                        cache_misses += 1
 
         except (OSError, RuntimeError, ValueError) as e:
             self.logger.error(f"Frame processing failed: {e}")
@@ -950,21 +1151,72 @@ class LarchWrapper:
         )
 
     @staticmethod
+    def _run_feff_with_timeout(frame_dir, config, timeout=300):
+        """Run FEFF calculation with timeout to prevent hanging processes."""
+        import threading
+
+        result = [None]
+        exception = [None]
+        completed = [False]
+
+        def run_feff():
+            try:
+                result[0] = run_feff_calculation(
+                    frame_dir, verbose=False, cleanup=config.cleanup_feff_files
+                )
+                completed[0] = True
+            except (RuntimeError, ValueError, OSError) as e:
+                exception[0] = e
+                completed[0] = True
+
+        thread = threading.Thread(target=run_feff)
+        thread.daemon = True  # Ensure thread doesn't keep process alive
+        thread.start()
+
+        # Wait for completion or timeout
+        thread.join(timeout=timeout)
+
+        if not completed[0]:
+            # Thread is still running - timeout occurred
+            logger = logging.getLogger(__name__)
+            logger.error(f"FEFF calculation in {frame_dir} timed out after {timeout}s")
+            return False
+
+        if exception[0]:
+            raise exception[0]
+
+        return result[0] if result[0] is not None else False
+
+    @staticmethod
     def _process_frame_worker(frame_data: tuple[Any, ...]) -> FrameProcessingResult:
-        """Worker function for parallel frame processing - uses utility functions."""
+        """Enhanced worker function with better resource management.
+
+        Processes a single frame with comprehensive error reporting and resource
+        cleanup.
+        """
+        import gc
+        import time
+
+        start_time = time.time()
+        frame_idx = None
+
         try:
             from .cache_utils import get_cache_key, load_from_cache, save_to_cache
             from .feff_utils import (
                 generate_feff_input,
                 read_feff_output,
-                run_feff_calculation,
             )
 
             frame_idx, atoms, absorber, output_base, config, is_single, cache_dir = (
                 frame_data
             )
 
+            # Worker process logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Processing frame {frame_idx} (PID: {os.getpid()})")
+
             # Check cache first if caching is enabled
+            from_cache = False
             if cache_dir and not config.force_recalculate:
                 cache_key = get_cache_key(atoms, absorber, config)
                 cached_result = load_from_cache(
@@ -972,7 +1224,11 @@ class LarchWrapper:
                 )
                 if cached_result is not None:
                     chi, k = cached_result
-                    return FrameProcessingResult(chi=chi, k=k, frame_idx=frame_idx)
+                    from_cache = True
+                    logger.debug(f"Frame {frame_idx} loaded from cache")
+                    result = FrameProcessingResult(chi=chi, k=k, frame_idx=frame_idx)
+                    result.from_cache = from_cache
+                    return result
 
             # Setup frame directory
             if is_single:
@@ -981,23 +1237,118 @@ class LarchWrapper:
                 frame_dir = Path(output_base) / f"frame_{frame_idx:04d}"
                 frame_dir.mkdir(parents=True, exist_ok=True)
 
-            # Use utility functions for all FEFF operations
-            generate_feff_input(atoms, absorber, frame_dir, config)
+            # Use utility functions for all FEFF operations with progress logging
+            logger.debug(f"Frame {frame_idx}: Generating FEFF input")
+            try:
+                generate_feff_input(atoms, absorber, frame_dir, config)
+            except Exception as e:
+                raise RuntimeError(
+                    f"FEFF input generation failed for frame {frame_idx}: {e}"
+                ) from e
 
-            if not run_feff_calculation(frame_dir, verbose=False):
-                raise RuntimeError("FEFF calculation failed")
+            logger.debug(f"Frame {frame_idx}: Running FEFF calculation")
+            try:
+                # Run FEFF calculation with timeout protection
+                feff_success = LarchWrapper._run_feff_with_timeout(
+                    frame_dir,
+                    config,
+                    timeout=300,  # 5 minute timeout per frame
+                )
+                if not feff_success:
+                    # Check for specific error indicators
+                    log_file = frame_dir / "feff.log"
+                    error_details = ""
+                    if log_file.exists():
+                        try:
+                            log_content = log_file.read_text(
+                                encoding="utf-8", errors="replace"
+                            )
+                            # Extract last few lines for error context
+                            log_lines = log_content.split("\n")[-10:]
+                            error_details = " FEFF log excerpt:\n" + "\n".join(
+                                log_lines
+                            )
+                        except (OSError, UnicodeDecodeError) as read_error:
+                            error_details = f" (could not read FEFF log: {read_error})"
 
-            chi, k = read_feff_output(frame_dir)
+                    raise RuntimeError(
+                        f"FEFF calculation failed for frame {frame_idx}.{error_details}"
+                    )
+            except RuntimeError:
+                raise  # Re-raise RuntimeError as-is
+            except (OSError, UnicodeDecodeError, ValueError) as e:
+                raise RuntimeError(
+                    f"FEFF calculation error for frame {frame_idx}: {e}"
+                ) from e
+
+            logger.debug(f"Frame {frame_idx}: Reading FEFF output")
+            try:
+                chi, k = read_feff_output(frame_dir)
+            except (OSError, UnicodeDecodeError, ValueError) as e:
+                # Check what output files exist for debugging
+                output_files = list(frame_dir.glob("*.dat"))
+                file_info = (
+                    f"Available .dat files: {[f.name for f in output_files]}"
+                    if output_files
+                    else "No .dat files found"
+                )
+                raise RuntimeError(
+                    f"FEFF output reading failed for frame {frame_idx}: {e}. "
+                    f"{file_info}"
+                ) from e
+
+            # Validate output data
+            if chi is None or k is None:
+                raise ValueError(
+                    f"Invalid FEFF output for frame {frame_idx}: chi or k is None"
+                )
+
+            if len(chi) == 0 or len(k) == 0:
+                raise ValueError(f"Empty FEFF output for frame {frame_idx}")
 
             # Save to cache if caching is enabled
             if cache_dir:
                 cache_key = get_cache_key(atoms, absorber, config)
                 save_to_cache(cache_key, chi, k, cache_dir)
+                logger.debug(f"Frame {frame_idx}: Saved to cache")
 
-            return FrameProcessingResult(chi=chi, k=k, frame_idx=frame_idx)
+            # Force garbage collection to prevent memory buildup
+            gc.collect()
 
-        except (OSError, RuntimeError, ValueError) as e:
-            error_msg = f"{str(e)}\n{traceback.format_exc()}"
+            elapsed = time.time() - start_time
+            logger.debug(f"Frame {frame_idx} completed in {elapsed:.2f}s")
+
+            result = FrameProcessingResult(chi=chi, k=k, frame_idx=frame_idx)
+            result.from_cache = from_cache
+            return result
+
+        except KeyboardInterrupt:
+            # Handle graceful shutdown
+            logger = logging.getLogger(__name__)
+            logger.info(f"Frame {frame_idx} interrupted by user")
+            return FrameProcessingResult(
+                error="Interrupted by user", frame_idx=frame_idx
+            )
+
+        except (RuntimeError, ValueError, OSError) as e:
+            # Enhanced error reporting
+            logger = logging.getLogger(__name__)
+            error_msg = f"Frame {frame_idx}: {type(e).__name__}: {str(e)}"
+
+            # Add timing information if available
+            if start_time:
+                elapsed = time.time() - start_time
+                error_msg += f" (failed after {elapsed:.2f}s)"
+
+            # Add traceback for debugging
+            if logger.isEnabledFor(logging.DEBUG):
+                error_msg += f"\nTraceback:\n{traceback.format_exc()}"
+
+            logger.error(error_msg)
+
+            # Force garbage collection even on error
+            gc.collect()
+
             return FrameProcessingResult(error=error_msg, frame_idx=frame_idx)
 
     def process(

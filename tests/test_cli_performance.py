@@ -436,8 +436,6 @@ class TestCLIPerformance:
                 "Fe",
                 "--output",
                 str(output_path),
-                "--method",
-                "larixite",
                 "--edge",
                 "K",
             ],

@@ -3,30 +3,14 @@
 import json
 import logging
 import re
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
 from ase import Atoms
-from ase.io import write as ase_write
-
-# Optional dependencies
-try:
-    from pymatgen.io.ase import AseAtomsAdaptor
-    from pymatgen.io.feff.sets import MPEXAFSSet
-
-    PYMATGEN_AVAILABLE = True
-except ImportError:
-    PYMATGEN_AVAILABLE = False
-
-try:
-    from larixite import cif2feffinp
-
-    LARIXITE_AVAILABLE = True
-except ImportError:
-    LARIXITE_AVAILABLE = False
+from pymatgen.io.ase import AseAtomsAdaptor
+from pymatgen.io.feff.sets import MPEXAFSSet
 
 try:
     import yaml
@@ -36,7 +20,7 @@ except ImportError:
     YAML_AVAILABLE = False
 
 
-# Configuration presets using larixite defaults
+# Configuration presets using pymatgen defaults
 PRESETS = {
     "quick": {
         "spectrum_type": "EXAFS",
@@ -47,7 +31,7 @@ PRESETS = {
         "kweight": 2,
         "window": "hanning",
         "dk": 1.0,
-        "user_tag_settings": {},  # Use larixite defaults
+        "user_tag_settings": {},  # Use pymatgen defaults
     },
     "publication": {
         "spectrum_type": "EXAFS",
@@ -58,7 +42,7 @@ PRESETS = {
         "kweight": 2,
         "window": "hanning",
         "dk": 4.0,
-        "user_tag_settings": {},  # Use larixite defaults
+        "user_tag_settings": {},  # Use pymatgen defaults
     },
 }
 
@@ -110,10 +94,9 @@ class FeffConfig:
     spectrum_type: str = "EXAFS"
     edge: str = "K"
     radius: float = 8.0  # cluster size
-    method: str = "auto"  # Updated default to auto
     user_tag_settings: dict[str, str] = field(
         default_factory=dict
-    )  # Empty by default - use method defaults
+    )  # Empty by default - use pymatgen defaults
     # FFT parameters for EXAFS transform:
     kmin: float = 2.0  # starting k for FT Window
     kmax: float = 14.0  # ending k for FT Window
@@ -165,10 +148,8 @@ class FeffConfig:
         self._validate_energy_range()
         self._validate_fourier_params()
         self._validate_radius()
-        self._validate_method()
         self._validate_n_workers()
         self._validate_sample_interval()
-        # No automatic defaults - let each method use its own defaults
 
     def _validate_spectrum_type(self) -> None:
         if self.spectrum_type not in SpectrumType.__members__:
@@ -189,13 +170,6 @@ class FeffConfig:
     def _validate_radius(self) -> None:
         if self.radius <= 0:
             raise ValueError(f"Radius must be positive, got {self.radius}")
-
-    def _validate_method(self) -> None:
-        valid_methods = ["auto", "larixite", "pymatgen"]
-        if self.method not in valid_methods:
-            raise ValueError(
-                f"Invalid method: {self.method}. Valid methods: {valid_methods}"
-            )
 
     def _validate_n_workers(self) -> None:
         if self.n_workers is not None and self.n_workers <= 0:
@@ -243,7 +217,6 @@ class FeffConfig:
             "spectrum_type": self.spectrum_type,
             "edge": self.edge,
             "radius": self.radius,
-            "method": self.method,
             "user_tag_settings": self.user_tag_settings,
             "kweight": self.kweight,
             "window": self.window,
@@ -278,34 +251,111 @@ def validate_absorber(atoms: Atoms, absorber: str | int) -> str:
         return absorber_element
 
 
-def extract_larixite_defaults() -> dict[str, str]:
-    """Extract default parameters from larixite template for consistency."""
-    return {
-        "S02": "1.0",
-        "EXCHANGE": "0",  # Hedin-Lundqvist
-        "CONTROL": "1 1 1 1 1 1",
-        "PRINT": "1 0 0 0 0 3",
-        "EXAFS": "20",
-        "NLEG": "6",
-        "SCF": "5.0",
-    }
+def normalize_absorbers(
+    atoms: Atoms, absorbers: str | int | list[int] | list[str]
+) -> list[int]:
+    """Normalize absorber specification to a list of atom indices.
+
+    Args:
+        atoms: The atomic structure
+        absorbers: Absorber specification:
+            - str: Element symbol (e.g., "Fe") - returns indices of all atoms of this
+              element
+            - int: Single atom index
+            - list[int]: List of atom indices
+            - list[str]: List of element symbols - returns indices of all matching atoms
+
+    Returns:
+        List of atom indices for the absorbing atoms
+
+    Raises:
+        ValueError: If absorber specification is invalid
+    """
+    symbols = atoms.get_chemical_symbols()
+    n_atoms = len(atoms)
+
+    if isinstance(absorbers, str):
+        # Single element symbol - find all atoms of this element
+        element = absorbers.capitalize()
+        if element not in symbols:
+            raise ValueError(f"Element {element} not found in structure")
+        indices = [i for i, sym in enumerate(symbols) if sym == element]
+        if not indices:
+            raise ValueError(f"No atoms of element {element} found in structure")
+        return indices
+
+    elif isinstance(absorbers, int):
+        # Single atom index
+        if not 0 <= absorbers < n_atoms:
+            raise ValueError(
+                f"Absorber index {absorbers} out of range (0-{n_atoms - 1})"
+            )
+        return [absorbers]
+
+    elif isinstance(absorbers, list):
+        if not absorbers:
+            raise ValueError("Absorber list cannot be empty")
+
+        if all(isinstance(x, int) for x in absorbers):
+            # List of indices
+            for idx in absorbers:
+                if not 0 <= idx < n_atoms:
+                    raise ValueError(
+                        f"Absorber index {idx} out of range (0-{n_atoms - 1})"
+                    )
+            return list(absorbers)
+
+        elif all(isinstance(x, str) for x in absorbers):
+            # List of element symbols
+            indices = []
+            for element in absorbers:
+                element = element.capitalize()
+                if element not in symbols:
+                    raise ValueError(f"Element {element} not found in structure")
+                element_indices = [i for i, sym in enumerate(symbols) if sym == element]
+                indices.extend(element_indices)
+
+            if not indices:
+                raise ValueError("No matching atoms found for specified elements")
+
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_indices = []
+            for idx in indices:
+                if idx not in seen:
+                    seen.add(idx)
+                    unique_indices.append(idx)
+            return unique_indices
+
+        else:
+            raise ValueError("Mixed types in absorber list not supported")
+    else:
+        raise ValueError(f"Invalid absorber type: {type(absorbers)}")
+
+
+def get_absorber_element_from_index(atoms: Atoms, absorber_index: int) -> str:
+    """Get element symbol for a given atom index."""
+    if not 0 <= absorber_index < len(atoms):
+        raise ValueError(f"Absorber index {absorber_index} out of range")
+    return str(atoms.get_chemical_symbols()[absorber_index])
 
 
 def generate_pymatgen_input(
     atoms: Atoms, absorber: str | int, output_dir: Path, config: FeffConfig
 ) -> Path:
-    """Generate FEFF input using pymatgen with larixite-compatible defaults."""
-    if not PYMATGEN_AVAILABLE:
-        raise ImportError("Pymatgen is required but not available")
+    """Generate FEFF input using pymatgen."""
+    # For backward compatibility, if there are multiple matching absorbers, use the
+    # first one
+    absorber_indices = normalize_absorbers(atoms, absorber)
+    absorber_index = absorber_indices[0]  # Always use the first matching absorber
+    absorber_element = get_absorber_element_from_index(atoms, absorber_index)
 
-    absorber_element = validate_absorber(atoms, absorber)
+    # Convert to pymatgen structure
     adaptor = AseAtomsAdaptor()
     structure = adaptor.get_structure(atoms)
 
-    # Start with larixite defaults, then apply user overrides
-    larixite_defaults = extract_larixite_defaults()
-    user_settings = larixite_defaults.copy()
-    user_settings.update(config.user_tag_settings)  # User settings override defaults
+    # Create FEFF set with user settings
+    user_settings = config.user_tag_settings.copy()
 
     # Apply radius setting
     user_settings["RPATH"] = str(config.radius)
@@ -313,7 +363,7 @@ def generate_pymatgen_input(
     # Remove problematic settings for FEFF8L compatibility
     user_settings.pop("COREHOLE", None)
 
-    # Ensure _del is a list
+    # Ensure _del is a list for removing incompatible keywords
     if "_del" not in user_settings:
         del_list: list[str] = []
     else:
@@ -326,10 +376,14 @@ def generate_pymatgen_input(
             raise ValueError("_del must be a string or list of strings")
 
     user_settings["_del"] = del_list  # type: ignore[assignment]
-    if "COREHOLE" not in del_list:
-        del_list.append("COREHOLE")
 
-    # Create FEFF set with consistent parameters
+    # Add FEFF8L incompatible keywords to the deletion list
+    incompatible_keywords = ["COREHOLE", "COREHOLE FSR"]
+    for keyword in incompatible_keywords:
+        if keyword not in del_list:
+            del_list.append(keyword)
+
+    # Create FEFF set
     if config.spectrum_type == "EXAFS":
         feff_set = MPEXAFSSet(
             absorbing_atom=absorber_element,
@@ -348,136 +402,56 @@ def generate_pymatgen_input(
     return output_dir / "feff.inp"
 
 
-def generate_larixite_input(
-    atoms: Atoms, absorber: str | int, output_dir: Path, config: FeffConfig
-) -> Path:
-    """Generate FEFF input using larixite with optional user overrides."""
-    if not LARIXITE_AVAILABLE:
-        raise ImportError("Larixite is required but not available")
+def generate_pymatgen_input_multi(
+    atoms: Atoms,
+    absorbers: str | int | list[int] | list[str],
+    output_dir: Path,
+    config: FeffConfig,
+) -> list[Path]:
+    """Generate FEFF input using pymatgen for multiple absorbers.
 
-    absorber_element = validate_absorber(atoms, absorber)
+    Returns a list of output files, one for each absorber.
+    Each file is in a directory named with the pattern: {base_name}_site_{index}
+    """
+    absorber_indices = normalize_absorbers(atoms, absorbers)
 
-    with tempfile.NamedTemporaryFile(
-        suffix=".cif", prefix="larch_temp_", delete=False
-    ) as tmp:
-        temp_cif = Path(tmp.name)
+    if len(absorber_indices) == 1:
+        # Single absorber - use existing function
+        return [generate_pymatgen_input(atoms, absorber_indices[0], output_dir, config)]
 
-        try:
-            ase_write(tmp.name, atoms, format="cif")
-            inp = cif2feffinp(temp_cif, absorber=absorber_element, edge=config.edge)
+    # Multiple absorbers - create separate directories for each
+    output_files = []
+    base_name = output_dir.name
 
-            # Only modify larixite output if user has custom settings
-            if config.user_tag_settings:
-                # Post-process larixite output to apply custom settings
-                inp_lines = inp.split("\n")
-                modified_lines = []
+    for absorber_index in absorber_indices:
+        site_dir = output_dir.parent / f"{base_name}_site_{absorber_index}"
+        result_file = generate_pymatgen_input(atoms, absorber_index, site_dir, config)
+        output_files.append(result_file)
 
-                for line in inp_lines:
-                    line_stripped = line.strip()
-
-                    # Replace lines based on user settings
-                    skip_line = False
-                    for tag, value in config.user_tag_settings.items():
-                        if line_stripped.startswith(tag):
-                            modified_lines.append(f"{tag}       {value}")
-                            skip_line = True
-                            break
-
-                    if not skip_line:
-                        # Apply radius setting to RPATH
-                        if line_stripped.startswith("RPATH"):
-                            modified_lines.append(f"RPATH     {config.radius}")
-                        else:
-                            modified_lines.append(line)
-
-                # Ensure all required user tags are present
-                present_tags = {
-                    line.split()[0]
-                    for line in modified_lines
-                    if line.strip() and not line.startswith("*")
-                }
-                for tag, value in config.user_tag_settings.items():
-                    if tag not in present_tags:
-                        # Insert after EDGE line
-                        for i, line in enumerate(modified_lines):
-                            if line.startswith("EDGE"):
-                                modified_lines.insert(i + 1, f"{tag}       {value}")
-                                break
-
-                inp = "\n".join(modified_lines)
-            else:
-                # Just update RPATH for radius if different from default
-                if config.radius != 10.0:  # larixite default
-                    inp_lines = inp.split("\n")
-                    for i, line in enumerate(inp_lines):
-                        if line.strip().startswith("RPATH"):
-                            inp_lines[i] = f"RPATH     {config.radius}"
-                            break
-                    inp = "\n".join(inp_lines)
-
-            output_dir = Path(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            input_file = output_dir / "feff.inp"
-            input_file.write_text(inp)
-
-            return input_file
-
-        finally:
-            if temp_cif.exists():
-                temp_cif.unlink()
+    return output_files
 
 
 def generate_feff_input(
     atoms: Atoms, absorber: str | int, output_dir: Path, config: FeffConfig
 ) -> Path:
-    """Generate FEFF input using the specified method with improved error handling."""
-    # Determine method
-    if config.method == "auto":
-        if LARIXITE_AVAILABLE:
-            method = "larixite"
-        elif PYMATGEN_AVAILABLE:
-            method = "pymatgen"
-        else:
-            raise ValueError(
-                "No FEFF input generation method available. "
-                "Please install pymatgen or larixite."
-            )
-    else:
-        method = config.method
+    """Generate FEFF input using pymatgen."""
+    return generate_pymatgen_input(atoms, absorber, output_dir, config)
 
-    # Validate method availability
-    if method == "pymatgen" and not PYMATGEN_AVAILABLE:
-        raise ValueError(
-            "Pymatgen method requested but pymatgen is not available. "
-            "Install with: pip install pymatgen"
-        )
-    elif method == "larixite" and not LARIXITE_AVAILABLE:
-        raise ValueError(
-            "Larixite method requested but larixite is not available. "
-            "Install with: pip install larixite"
-        )
 
-    # Generate input using appropriate method
-    try:
-        if method == "pymatgen":
-            return generate_pymatgen_input(atoms, absorber, output_dir, config)
-        elif method == "larixite":
-            return generate_larixite_input(atoms, absorber, output_dir, config)
-        else:
-            raise ValueError(
-                f"Unsupported method: {method}. Valid methods: auto, larixite, pymatgen"
-            )
-    except Exception as e:
-        # Log detailed error information
-        error_msg = f"FEFF input generation failed with method '{method}': {str(e)}"
-        logging.error(error_msg)
-        raise
+def generate_feff_input_multi(
+    atoms: Atoms,
+    absorbers: str | int | list[int] | list[str],
+    output_dir: Path,
+    config: FeffConfig,
+) -> list[Path]:
+    """Generate FEFF input for multiple absorbers using pymatgen."""
+    return generate_pymatgen_input_multi(atoms, absorbers, output_dir, config)
 
 
 def run_feff_calculation(
     feff_dir: Path, verbose: bool = False, cleanup: bool = True
 ) -> bool:
-    """Run FEFF calculation with proper error handling.
+    """Run FEFF calculation with simplified error handling.
 
     Args:
         feff_dir: Directory containing feff.inp
@@ -499,140 +473,60 @@ def run_feff_calculation(
     if not input_path.exists():
         raise FileNotFoundError(f"FEFF input file {input_path} not found")
 
-    # Initialize log file
-    try:
-        with open(log_path, "w", encoding="utf-8", errors="replace") as log_file:
-            log_file.write(f"FEFF calculation started at {datetime.now()}\n")
-            log_file.write(f"Input file: {input_path}\n")
-            log_file.write(f"Working directory: {feff_dir}\n")
-            log_file.write("-" * 50 + "\n\n")
-    except OSError as log_init_error:
-        print(f"Warning: Could not initialize log file: {log_init_error}")
+    # Set up encoding environment
+    os.environ["PYTHONIOENCODING"] = "utf-8"
 
     # Store original stdout/stderr
     original_stdout = sys.stdout
     original_stderr = sys.stderr
 
-    # Fix encoding issue for subprocess calls
-    if sys.stdout.encoding is None:
-        os.environ["PYTHONIOENCODING"] = "utf-8"
-
     try:
+        # Create basic log
+        with open(log_path, "w", encoding="utf-8", errors="replace") as log_file:
+            log_file.write(f"FEFF calculation started at {datetime.now()}\n")
+            log_file.write(f"Input file: {input_path}\n")
+            log_file.write(f"Working directory: {feff_dir}\n")
+            log_file.write("-" * 50 + "\n\n")
+
         # Run FEFF calculation
-        if verbose:
-            print(f"Running FEFF calculation in {feff_dir}")
-            result = feff8l(folder=str(feff_dir), feffinp="feff.inp", verbose=True)
-        else:
-            # Redirect output to log
-            try:
-                with open(
-                    log_path, "a", encoding="utf-8", errors="replace"
-                ) as log_file:
-                    # Simple file redirection approach
-                    sys.stdout = log_file
-                    sys.stderr = log_file
-
-                    log_file.write("FEFF8L Output:\n")
-                    log_file.write("-" * 20 + "\n")
-                    log_file.flush()
-
-                    result = feff8l(
-                        folder=str(feff_dir), feffinp="feff.inp", verbose=False
-                    )
-
-                    log_file.write(f"\n{'-' * 20}\n")
-                    log_file.write(f"FEFF calculation result: {result}\n")
-
-            except (OSError, RuntimeError) as feff_error:
-                # If redirection fails, try without it
+        if not verbose:
+            # Redirect output to log file
+            with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
+                sys.stdout = log_file
+                sys.stderr = log_file
                 result = feff8l(folder=str(feff_dir), feffinp="feff.inp", verbose=False)
+        else:
+            result = feff8l(folder=str(feff_dir), feffinp="feff.inp", verbose=True)
 
-                # Log the error
-                try:
-                    with open(
-                        log_path, "a", encoding="utf-8", errors="replace"
-                    ) as log_file:
-                        log_file.write(f"Error during calculation: {feff_error}\n")
-                        log_file.write(
-                            f"FEFF result (without output capture): {result}\n"
-                        )
-                except OSError:
-                    # If logging fails, we can still continue
-                    pass
-
-        # Check for output files
+        # Check success
         chi_file = feff_dir / "chi.dat"
         success = chi_file.exists() and bool(result)
 
-        # Clean up unnecessary files if requested and calculation succeeded
+        # Clean up if requested and successful
         if success and cleanup:
-            files_removed = cleanup_feff_output(feff_dir, keep_essential=True)
-            try:
-                with open(
-                    log_path, "a", encoding="utf-8", errors="replace"
-                ) as log_file:
-                    log_file.write(
-                        f"\nCleaned up {files_removed} unnecessary output files\n"
-                    )
-            except OSError:
-                pass
+            cleanup_feff_output(feff_dir, keep_essential=True)
 
-        # Final log entry with comprehensive information
-        try:
-            with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
-                log_file.write(f"\nCalculation completed at {datetime.now()}\n")
-                log_file.write(f"Success: {success}\n")
-
-                # List all files created by FEFF
-                feff_files = list(feff_dir.glob("*"))
-                output_files = [
-                    f for f in feff_files if f.name not in ["feff.inp", "feff.log"]
-                ]
-
-                if output_files:
-                    log_file.write(f"Output files created ({len(output_files)}):\n")
-                    for f in sorted(output_files):
-                        try:
-                            size = f.stat().st_size
-                            log_file.write(f"  {f.name} ({size} bytes)\n")
-                        except OSError:
-                            log_file.write(f"  {f.name}\n")
-                else:
-                    log_file.write("No output files found\n")
-
-                if chi_file.exists():
-                    # Also log some info about the chi.dat file
-                    try:
-                        with open(chi_file) as chi_f:
-                            lines = chi_f.readlines()
-                            log_file.write(f"chi.dat contains {len(lines)} lines\n")
-                            if lines:
-                                log_file.write(f"First line: {lines[0].strip()}\n")
-                    except OSError:
-                        # If we can't read chi.dat, continue
-                        pass
-                else:
-                    log_file.write("Warning: chi.dat file not found\n")
-        except OSError:
-            # If logging fails, we can still return the result
-            pass
+        # Log final result
+        with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
+            log_file.write(f"\nCalculation completed at {datetime.now()}\n")
+            log_file.write(f"Success: {success}\n")
+            if not chi_file.exists():
+                log_file.write("Warning: chi.dat file not found\n")
 
         return success
 
-    except (OSError, RuntimeError, ValueError) as e:
-        # Ensure log file exists and log the error
+    except (OSError, RuntimeError, ValueError, UnicodeDecodeError) as e:
+        # Log any errors
         try:
             with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
                 log_file.write(f"\nERROR: {str(e)}\n")
                 log_file.write(f"Exception type: {type(e).__name__}\n")
         except OSError:
-            # If we can't write to log, at least print the error
             print(f"FEFF calculation failed: {e}")
-
         return False
 
     finally:
-        # Always restore original stdout/stderr
+        # Always restore stdout/stderr
         sys.stdout = original_stdout
         sys.stderr = original_stderr
 

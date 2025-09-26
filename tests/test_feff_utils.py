@@ -26,17 +26,13 @@ class TestFeffConfig:
         assert config.edge == "K"
         assert config.radius == 8.0
         assert config.spectrum_type == "EXAFS"
-        assert config.method == "auto"
 
     def test_custom_values(self):
         """Test custom configuration values."""
-        config = FeffConfig(
-            edge="L3", radius=6.0, spectrum_type="EXAFS", method="larixite"
-        )
+        config = FeffConfig(edge="L3", radius=6.0, spectrum_type="EXAFS")
         assert config.edge == "L3"
         assert config.radius == 6.0
         assert config.spectrum_type == "EXAFS"
-        assert config.method == "larixite"
 
     def test_invalid_radius(self):
         """Test invalid radius values."""
@@ -127,25 +123,12 @@ class TestReadFeffOutput:
 class TestFeffInput:
     """Test FEFF input generation functions."""
 
-    @patch("larch_cli_wrapper.feff_utils.generate_larixite_input")
-    def test_generate_feff_input_larixite(self, mock_larixite):
-        """Test FEFF input generation with larixite."""
-        atoms = Atoms("Fe2O", positions=[[0, 0, 0], [1.8, 0, 0], [0, 1.8, 0]])
-        config = FeffConfig()
-        mock_larixite.return_value = Path("/test/output")
-
-        output_dir = Path("/test/output")
-        result = generate_feff_input(atoms, "Fe", output_dir, config)
-
-        mock_larixite.assert_called_once_with(atoms, "Fe", output_dir, config)
-        assert result == Path("/test/output")
-
     def test_generate_feff_input_invalid_absorber(self):
         """Test FEFF input generation with invalid absorber."""
         atoms = Atoms("Fe2O", positions=[[0, 0, 0], [1.8, 0, 0], [0, 1.8, 0]])
         config = FeffConfig()
 
-        with pytest.raises(ValueError, match="Absorber element"):
+        with pytest.raises(ValueError, match="Element Cu not found"):
             generate_feff_input(atoms, "Cu", Path("/test/output"), config)
 
 

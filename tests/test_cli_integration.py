@@ -41,8 +41,6 @@ class TestCLIIntegration:
                 "Fe",
                 "--output",
                 str(feff_dir),
-                "--method",
-                "larixite",
             ],
         )
         assert result1.exit_code == 0
@@ -129,7 +127,6 @@ O 0.0 1.0 0.0
             "spectrum_type": "EXAFS",
             "edge": "L3",
             "radius": 10.0,
-            "method": "pymatgen",
             "kmin": 3.0,
             "kmax": 15.0,
             "kweight": 3,
@@ -319,48 +316,41 @@ O 0.0 1.0 0.0
 
     # ================== EDGE TYPE AND METHOD COMBINATIONS ==================
 
-    def test_edge_type_method_combinations(
+    def test_edge_type_combinations(
         self, mock_generate_workflow, tmp_structure_file, tmp_path
     ):
-        """Test various edge type and method combinations."""
+        """Test various edge type combinations."""
 
         edge_types = ["K", "L1", "L2", "L3"]
-        methods = ["auto", "larixite", "pymatgen"]
 
         for edge in edge_types:
-            for method in methods:
-                _ = ProcessingResult(
-                    exafs_group=Mock(),
-                    plot_paths={"pdf": tmp_path / f"plot_{edge}_{method}.pdf"},
-                    processing_mode="single_frame",
-                )
-                mock_generate_workflow["generate_feff_input"].return_value = (
-                    tmp_path / "output"
-                )
+            _ = ProcessingResult(
+                exafs_group=Mock(),
+                plot_paths={"pdf": tmp_path / f"plot_{edge}.pdf"},
+                processing_mode="single_frame",
+            )
+            mock_generate_workflow["generate_feff_input"].return_value = (
+                tmp_path / "output"
+            )
 
-                result = self.runner.invoke(
-                    app,
-                    [
-                        "generate",
-                        str(tmp_structure_file),
-                        "Fe",
-                        "--edge",
-                        edge,
-                        "--method",
-                        method,
-                    ],
-                )
+            result = self.runner.invoke(
+                app,
+                [
+                    "generate",
+                    str(tmp_structure_file),
+                    "Fe",
+                    "--edge",
+                    edge,
+                ],
+            )
 
-                assert result.exit_code == 0, (
-                    f"Failed with edge={edge}, method={method}"
-                )
+            assert result.exit_code == 0, f"Failed with edge={edge}"
 
-                # Verify parameters were passed correctly
-                args, kwargs = mock_generate_workflow["generate_feff_input"].call_args
-                atoms_arg, absorber_arg, output_dir_arg, config_arg = args
-                assert absorber_arg == "Fe"
-                assert config_arg.edge == edge
-                assert config_arg.method == method
+            # Verify parameters were passed correctly
+            args, kwargs = mock_generate_workflow["generate_feff_input"].call_args
+            atoms_arg, absorber_arg, output_dir_arg, config_arg = args
+            assert absorber_arg == "Fe"
+            assert config_arg.edge == edge
 
     # ================== PARALLEL PROCESSING SCENARIOS ==================
 

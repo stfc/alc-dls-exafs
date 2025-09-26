@@ -95,8 +95,6 @@ class TestCLI:
                 str(output_dir),
                 "--edge",
                 "K",
-                "--method",
-                "larixite",
             ],
         )
 
@@ -335,8 +333,6 @@ kmax: 14.0
                 str(config_file),
                 "--edge",
                 "K",
-                "--method",
-                "pymatgen",
                 "--show",
                 "--plot-style",
                 "presentation",
