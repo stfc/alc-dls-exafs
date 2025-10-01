@@ -75,11 +75,11 @@ jobs:
           file: ./containers/Dockerfile.marimo
           push: true
           tags: |
-            ghcr.io/stfc/janus-core/marimo:amd64-${{ github.sha }}
-            ghcr.io/stfc/janus-core/marimo:amd64-latest
+            ghcr.io/stfc/alc-dls-exafs/marimo:amd64-${{ github.sha }}
+            ghcr.io/stfc/alc-dls-exafs/marimo:amd64-latest
   build-arm64:
     runs-on: ubuntu-24.04-arm
-    if: github.repository == 'stfc/janus-core'
+    if: github.repository == 'stfc/alc-dls-exafs'
     permissions:
       packages: write
       contents: read
@@ -106,5 +106,5 @@ jobs:
           file: ./containers/Dockerfile.marimo
           push: true
           tags: |
-            ghcr.io/stfc/janus-core/marimo:arm64-${{ github.sha }}
-            ghcr.io/stfc/janus-core/marimo:arm64-latest
+            ghcr.io/stfc/alc-dls-exafs/marimo:arm64-${{ github.sha }}
+            ghcr.io/stfc/alc-dls-exafs/marimo:arm64-latest
