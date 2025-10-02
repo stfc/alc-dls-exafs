@@ -27,7 +27,7 @@ RUN apt update --yes && \
     locale-gen
 
 
-ARG marimo_version=0.16.2
+ARG marimo_version=0.16.4
 ENV MARIMO_SKIP_UPDATE_CHECK=1
 ENV UV_SYSTEM_PYTHON=1
 RUN uv pip install --no-cache-dir marimo==${marimo_version} && \
@@ -64,4 +64,4 @@ RUN uv pip install  --no-cache-dir cuequivariance==0.6.1 \
 
 RUN uv pip install --no-cache-dir 'git+https://github.com/stfc/alc-dls-exafs.git@main'
 
-CMD marimo edit --no-token -p $PORT --host $HOST
+CMD ["/bin/sh", "-c", "exec marimo edit --no-token -p $PORT --host $HOST"]
