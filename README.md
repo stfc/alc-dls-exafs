@@ -261,6 +261,34 @@ TODO
 - Update this README if needed
 - Add docstrings to new functions/classes -->
 
+## Docker/Podman images
+
+You can use `alc-dls-exafs_` in a marimo environment using [docker](https://www.docker.com) or [podman](https://podman.io/).
+We provide regularly updated docker/podman images, which can be dowloaded by running:
+
+```shell
+docker pull ghcr.io/stfc/alc-dls-exafs/marimo:amd64-latest
+```
+or using podman
+
+```shell
+podman pull ghcr.io/stfc/alc-dls-exafs/marimo-amd64:latest
+```
+
+for amd64 architecture, if you require arm64 replace amd64 with arm64 above, and next instructions.
+
+To start, for marimo run:
+
+```shell
+
+podman run --rm --security-opt seccomp=unconfined -p 8842:8842 ghcr.io/stfc/alc-dls-exafs/marimo:amd64-latest
+
+```
+
+For more details on how to share your filesystem and so on you can refer to this documentation: https://summer.ccp5.ac.uk/introduction.html#run-locally.
+
+
+
 ## License
 
 This project is licensed under the BSD-3 License. See the [LICENSE](LICENSE) file for details.
