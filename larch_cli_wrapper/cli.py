@@ -1168,9 +1168,8 @@ def run_full_pipeline(
         console.print("\n[bold green]✓ Pipeline completed successfully![/bold green]")
         console.print(f"  Output directory: {output_dir}")
         console.print(
-            f"  Processing mode: {
-                'trajectory' if len(structures) > 1 else 'single structure'
-            }"
+            f"  Processing mode: "
+            f"{'trajectory' if len(structures) > 1 else 'single structure'}"
         )
         console.print(f"  Successful calculations: {len(individual_groups)}")
 
