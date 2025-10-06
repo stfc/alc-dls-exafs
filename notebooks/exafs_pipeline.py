@@ -2,7 +2,7 @@
 
 import marimo
 
-__generated_with = "0.15.2"
+__generated_with = "0.15.5"
 app = marimo.App(width="medium", app_title="EXAFS Pipeline")
 
 
@@ -12,25 +12,33 @@ def _():
     import tempfile
     import traceback
     from pathlib import Path
-    from types import SimpleNamespace
 
     import marimo as mo
-    import plotly.graph_objects as go
     from ase import Atoms
     from ase.io import read
-    from weas_widget.atoms_viewer import AtomsViewer
-    from weas_widget.base_widget import BaseWidget
-    from weas_widget.utils import ASEAdapter
+
+    from notebooks.marimo_utils import (
+        file_upload,
+        input_kwargs_text,
+        model_style,
+        read_button,
+        show_bonded_atoms,
+        view_atoms,
+    )
 
     # Package imports
     try:
+        from larch_cli_wrapper.exafs_data import (
+            PlotConfig,
+            plot_exafs_plotly,
+        )
         from larch_cli_wrapper.feff_utils import (
-            PRESETS,
             EdgeType,
             FeffConfig,
             WindowType,
         )
-        from larch_cli_wrapper.wrapper import LarchWrapper, ProcessingMode
+        from larch_cli_wrapper.pipeline import PipelineProcessor
+        # from larch_cli_wrapper.wrapper import LarchWrapper, ProcessingMode
     except ImportError:
         mo.stop(
             mo.output.append(
@@ -47,32 +55,28 @@ def _():
     # Constants
     CACHE_DIR = Path.home() / ".larch_cache"
     DEFAULT_OUTPUT_DIR = "outputs/exafs_pipeline"
-
-    # I disabled the controls in the GUi, because the style is not loaded
-    # properly inside Marimo notebook
-    guiConfig = {"controls": {"enabled": False}}
     return (
-        ASEAdapter,
         Atoms,
-        AtomsViewer,
-        BaseWidget,
         CACHE_DIR,
         DEFAULT_OUTPUT_DIR,
         EdgeType,
         FeffConfig,
-        LarchWrapper,
-        PRESETS,
         Path,
-        ProcessingMode,
-        SimpleNamespace,
+        PipelineProcessor,
+        PlotConfig,
         WindowType,
         ast,
-        go,
-        guiConfig,
+        file_upload,
+        input_kwargs_text,
         mo,
+        model_style,
+        plot_exafs_plotly,
         read,
+        read_button,
+        show_bonded_atoms,
         tempfile,
         traceback,
+        view_atoms,
     )
 
 
@@ -82,8 +86,12 @@ def _(mo):
         """
     # EXAFS Pipeline Processing
 
-    Interactive EXAFS processing using the larch wrapper.
-    Process single structures or trajectories with customizable parameters.
+    Interactive EXAFS processing using the new PipelineProcessor architecture.
+
+    **Three-Stage Workflow:**
+    - **Stage A: Input Generation** - Create FEFF input files
+    - **Stage B: FEFF Execution** - Run FEFF calculations
+    - **Stage C: Analysis** - Process results and create plots
     """
     )
     return
@@ -126,70 +134,74 @@ def _(
 
 
 @app.cell
-def _(in_form2, mo, reading_structure_message):
-    mo.vstack([in_form2, reading_structure_message])
+def _(file_upload_form, mo, reading_structure_message):
+    mo.vstack([file_upload_form, reading_structure_message])
     return
 
 
 @app.cell
-def _(vis):
-    vis
+def _(mo, model_style, show_bonded_atoms, structure_list, v):
+    mo.vstack(
+        [
+            mo.md(f"Loaded {len(structure_list)} structure(s)."),
+            v,
+            mo.hstack(
+                [model_style, show_bonded_atoms], justify="space-around", align="center"
+            ),
+        ]
+    )
     return
 
 
 @app.cell
-def _(
-    EdgeType,
-    PRESETS,
-    dk_input,
-    enable_parallel,
-    force_recalc_input,
-    k_weight,
-    kmax_input,
-    kmin_input,
-    mo,
-    num_workers,
-    output_dir_ui,
-    process_existing_input,
-    radius_input,
-    species_list,
-    window_type,
-):
-    form = (
+def _(input_form, mo):
+    mo.output.append(input_form)
+    return
+
+
+@app.cell
+def _(input_message, mo):
+    # Display Input Generation results
+    input_message if input_message is not None else mo.md(
+        "### 📝 Generate input files to proceed"
+    )
+    return
+
+
+@app.cell
+def _(feff_form, mo):
+    mo.output.append(feff_form)
+    return
+
+
+@app.cell
+def _(feff_message, mo):
+    # Display FEFF Execution results
+    feff_message if feff_message is not None else mo.md(
+        "### 🔬 Run FEFF calculations on inputs from Stage A"
+    )
+    return
+
+
+@app.cell
+def _(analysis_form, mo):
+    mo.output.append(analysis_form)
+    return
+
+
+@app.cell
+def _(mo, plot_output):
+    if plot_output is not None:
+        mo.output.append(plot_output)
+    return
+
+
+@app.cell
+def _(EdgeType, mo, output_dir_ui, radius_input, species_list):
+    # Stage A: Input Generation Form
+    input_form = (
         mo.md(r"""
         <style>
-          .mo-tabs input {{ display: none; }}
-          .mo-tabs .tab-labels {{
-            display: flex;
-            gap: 0.5rem;
-            border-bottom: 1px solid #e5e7eb;
-            margin-bottom: 1rem;
-          }}
-          .mo-tabs .tab-label {{
-            padding: 0.5rem 1rem;
-            cursor: pointer;
-            border: 1px solid #e5e7eb;
-            border-radius: 0.375rem 0.375rem 0 0;
-            background: var(--background);
-          }}
-          .mo-tabs .tab-label:hover {{ background: var(--background); }}
-          #tab-run:checked ~ .tab-labels label[for="tab-run"],
-          #tab-analysis:checked ~ .tab-labels label[for="tab-analysis"],
-          #tab-par:checked ~ .tab-labels label[for="tab-par"] {{
-            background: var(--background);
-            border-bottom-color: white;
-            font-weight: 600;
-          }}
-          .mo-tabs .tab-panels {{
-            border: 1px solid #e5e7eb;
-            border-radius: 0 0.375rem 0.375rem 0.375rem;
-            padding: 1rem;
-            background: var(--background);
-          }}
-          .mo-tabs .panel {{ display: none; }}
-          #tab-run:checked ~ .tab-panels .panel-run,
-          #tab-analysis:checked ~ .tab-panels .panel-analysis,
-          #tab-par:checked ~ .tab-panels .panel-par {{ display: block; }}
           .settings-grid {{
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -206,115 +218,177 @@ def _(
           }}
         </style>
 
-        **EXAFS Processing Pipeline**
+        **Input File Generation**
+
+        Generate FEFF input files for your structures. This creates all necessary
+        feff.inp files without running the calculations.
+
+        **Absorber Options:**
+        - **Species name**: e.g., `Fe`, `Cu`, `Ag` (processes all sites of that element)
+        - **Site indices**: e.g., `0,1,2,3` (processes specific sites by index)
+        - **Combined**: e.g., `Fe:0,1` (first two Fe sites only)
 
         <div class="main-config">
           {absorber}
           {edge}
-          {preset}
         </div>
 
-        <div class="mo-tabs">
-          <input type="radio" name="tabset" id="tab-run" checked>
-          <input type="radio" name="tabset" id="tab-analysis">
-          <input type="radio" name="tabset" id="tab-par">
-
-          <div class="tab-labels">
-            <label class="tab-label" for="tab-run">FEFF Run</label>
-            <label class="tab-label" for="tab-analysis">Analysis</label>
-            <label class="tab-label" for="tab-par">Parallelization</label>
-          </div>
-
-          <div class="tab-panels">
-            <div class="panel panel-run">
-              <div class="settings-grid">
-                {radius_input}
-                {process_existing_input}
-                {force_recalc_input}
-                {output_dir_ui}
-              </div>
-            </div>
-
-            <div class="panel panel-analysis">
-              <div class="settings-grid">
-                {k_weight}
-                {window_type}
-                {dk_input}
-                {kmin_input}
-                {kmax_input}
-              </div>
-            </div>
-
-            <div class="panel panel-par">
-              <div class="settings-grid">
-                {enable_parallel}
-                {num_workers}
-              </div>
-            </div>
-          </div>
+        <div class="settings-grid">
+          {radius_input}
+          {output_dir_ui}
+          {all_sites}
+          {all_frames}
         </div>
         """)
         .batch(
             # Main configuration
-            absorber=mo.ui.dropdown(
-                options=species_list,
-                value=species_list[0] if species_list else None,
-                label="Absorbing Species",
+            absorber=mo.ui.text(
+                label="Absorbing Species or Indices",
+                value=species_list[0] if species_list else "",
+                placeholder="e.g., 'Fe' or '0,1,2,3' for first 4 sites",
             ),
             edge=mo.ui.dropdown(
                 options=[e.name for e in EdgeType], value="K", label="Edge"
             ),
-            preset=mo.ui.dropdown(
-                options={name.title(): name for name in PRESETS.keys()},
-                value="Quick",
-                label="Configuration Preset",
-            ),
-            # FEFF Run parameters
+            # Input generation parameters
             radius_input=radius_input,
-            process_existing_input=process_existing_input,
-            force_recalc_input=force_recalc_input,
             output_dir_ui=output_dir_ui,
-            # Analysis parameters
+            all_sites=mo.ui.checkbox(
+                label="Process all sites of selected element", value=True
+            ),
+            all_frames=mo.ui.checkbox(
+                label="Process all frames (for trajectories)", value=True
+            ),
+        )
+        .form(submit_button_label="📝 Generate Input Files", bordered=True)
+    )
+    return (input_form,)
+
+
+@app.cell
+def _(enable_parallel, force_recalc_input, input_form, mo, num_workers):
+    # Stage B: FEFF Execution Form
+    feff_form = (
+        mo.md(r"""
+        **Run FEFF Calculations**
+
+        Execute FEFF calculations on the input files generated in Stage A.
+        This will run the actual FEFF computations to generate χ(k) spectra
+        for the specific structures and sites from the previous step.
+
+        <div class="settings-grid">
+          {enable_parallel}
+          {num_workers}
+          {force_recalc_input}
+          {cleanup_files}
+        </div>
+        """)
+        .batch(
+            enable_parallel=enable_parallel,
+            num_workers=num_workers,
+            force_recalc_input=force_recalc_input,
+            cleanup_files=mo.ui.checkbox(
+                label="Clean up intermediate files", value=True
+            ),
+        )
+        .form(
+            submit_button_label="🔬 Run FEFF Calculations",
+            bordered=True,
+            submit_button_disabled=input_form.value is None,
+        )
+    )
+    return (feff_form,)
+
+
+@app.cell
+def _(feff_form, mo, run_feff_execution):
+    # Stage B: FEFF Execution Processing
+    mo.stop(feff_form.value is None)
+
+    feff_message, feff_result = run_feff_execution()
+    return feff_message, feff_result
+
+
+@app.cell
+def _(dk_input, feff_form, k_weight, kmax_input, kmin_input, mo, window_type):
+    # Stage C: Analysis Form
+    analysis_form = (
+        mo.md(r"""
+        **Analyze Results**
+
+        Process FEFF outputs from Stage B to create averaged spectra and
+        publication-ready plots. This stage takes the FEFF calculation results
+        and applies Fourier transforms with your specified parameters to generate
+        side-by-side χ(k) and χ(R) plots.
+
+        The k-weight setting controls both the Fourier transform and the χ(k)
+        plot type display.
+
+        <div class="settings-grid">
+          {plot_mode}
+          {k_weight}
+          {window_type}
+          {dk_input}
+          {kmin_input}
+          {kmax_input}
+          {show_plots}
+          {plot_style}
+        </div>
+        """)
+        .batch(
+            # Plot configuration
+            plot_mode=mo.ui.dropdown(
+                options={
+                    "Overall Average": "overall",
+                    "Frame Averages": "frames",
+                    "Site Averages": "sites",
+                },
+                value="Overall Average",
+                label="Plot Mode",
+            ),
+            plot_style=mo.ui.dropdown(
+                options={"Publication": "publication", "Presentation": "presentation"},
+                value="Publication",
+                label="Plot Style",
+            ),
+            show_plots=mo.ui.checkbox(label="Show interactive plots", value=True),
+            # Fourier transform parameters
             k_weight=k_weight,
             window_type=window_type,
             dk_input=dk_input,
             kmin_input=kmin_input,
             kmax_input=kmax_input,
-            # Parallelization parameters
-            enable_parallel=enable_parallel,
-            num_workers=num_workers,
         )
-        .form(submit_button_label="Run EXAFS Processing", bordered=True)
+        .form(
+            submit_button_label="📊 Analyze Results",
+            bordered=True,
+            submit_button_disabled=feff_form.value is None,
+        )
     )
-    form
-    return (form,)
+    return (analysis_form,)
 
 
 @app.cell
-def _(form, mo, run_exafs_processing):
-    mo.stop(form.value is None)
+def _(input_form, mo, run_input_generation):
+    # Stage A: Input Generation Processing
+    mo.stop(input_form.value is None)
 
-    message, result = run_exafs_processing()
-    return message, result
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    plot_type = mo.ui.radio(["χ(k)", "k²χ(k)", "k³χ(k)", "|χ(R)|"], value="χ(k)")
-
-    return (plot_type,)
+    input_message, input_result = run_input_generation()
+    return input_message, input_result
 
 
 @app.cell
-def _(plot_output):
-    plot_output
+def _(analysis_form, mo, run_analysis):
+    # Analysis Processing
+    mo.stop(analysis_form.value is None)
+
+    analysis_message, analysis_result = run_analysis()
+    return analysis_message, analysis_result
+
+
+@app.cell
+def _():
     return
-
-
-@app.cell
-def _(form):
-    settings = form.value or {}
-    return (settings,)
 
 
 @app.cell(hide_code=True)
@@ -346,50 +420,30 @@ def _(mo):
         """
     ## 📚 Usage Instructions
 
-    1. **Upload** a structure (CIF, XYZ, etc.) or trajectory
-    2. **Specify absorber** (e.g., `Fe`, `Cu`)
-    3. **Choose processing mode**:
-       - Single structure: One-off EXAFS
-       - Trajectory: Average over frames
-    4. **Select configuration preset**:
-       - Quick: Fast results for testing
-       - Publication: High-quality for final analysis
-    5. **Run processing** or use existing outputs
-    6. **Explore results** using the plot options
+    **📝 Input Generation**
 
-    💡 **Tips**:
-    - Use "Process output only" to reanalyze existing FEFF results
-    - Enable "Force recalculate" to bypass cache
-    - Cache speeds up repeated calculations
+
+    1. **Upload** a structure (CIF, XYZ, etc.) or trajectory
+    3. **Specify absorber** (e.g., `Fe`, `Cu`)
+    4. **Configure** radius and generation settings
+    5. **Generate input files** - creates all feff.inp files needed
+
+    **🔬 FEFF Execution**
+
+    1. **Uses input files from Stage A automatically** - no directory scanning
+    2. **Configure** parallel execution and caching options
+    3. **Run FEFF calculations** to generate χ(k) spectra
+    4. **Monitor progress** of calculations
+
+    **📊 Analysis**
+
+    1. **Uses FEFF results from Stage B automatically** - no directory scanning
+    2. **Choose plot mode** (overall/frames/sites averages)
+    3. **Adjust** Fourier transform parameters (k-weight, window, etc.)
+    4. **Generate side-by-side χ(k) and χ(R) plots** - k-weight controls χ(k) plot type
     """
     )
     return
-
-
-@app.cell
-def _(ASEAdapter, AtomsViewer, BaseWidget, guiConfig):
-    def view_atoms(
-        atoms,
-        model_style=1,
-        boundary=None,
-        show_bonded_atoms=True,
-    ):
-        """Function to visualise an ASE Atoms object(or list of them) using weas_widget.
-
-        using weas_widget.
-        """
-        if boundary is None:
-            boundary = [[-0.1, 1.1], [-0.1, 1.1], [-0.1, 1.1]]
-        v = AtomsViewer(BaseWidget(guiConfig=guiConfig))
-        v.atoms = ASEAdapter.to_weas(atoms)
-        v.model_style = model_style
-        v.boundary = boundary
-        v.show_bonded_atoms = show_bonded_atoms
-        v.color_type = "VESTA"
-        v.cell.settings["showAxes"] = True
-        return v._widget
-
-    return (view_atoms,)
 
 
 @app.cell
@@ -430,22 +484,6 @@ def _(ast, mo):
 
 
 @app.cell
-def _(mo):
-    file_upload = mo.ui.file(label="Upload File", multiple=False)
-    input_kwargs_text = mo.ui.text_area(
-        label="Input Kwargs (as dict)",
-        value="",
-        placeholder="e.g., {'format': 'xyz', 'index': 0}",
-    )
-    read_button = mo.ui.run_button(
-        label="📁 Read Structure",
-        kind="success",
-        tooltip="Parse the uploaded file with current settings",
-    )
-    return file_upload, input_kwargs_text, read_button
-
-
-@app.cell
 def _(
     file_upload,
     input_kwargs_text,
@@ -454,7 +492,7 @@ def _(
     read_button,
     sampling_method,
 ):
-    in_form2 = mo.vstack(
+    file_upload_form = mo.vstack(
         [
             file_upload,
             mo.hstack([sampling_method, parameter_input]),
@@ -464,20 +502,7 @@ def _(
         justify="space-around",
         align="start",
     )
-    return (in_form2,)
-
-
-@app.cell
-def _(mo):
-    model_style = mo.ui.dropdown(
-        options={"Ball": 0, "Ball and Stick": 1, "Polyhedral": 2, "Stick": 3},
-        label="Model Style",
-        value="Ball and Stick",
-    )
-    show_bonded_atoms = mo.ui.checkbox(
-        label="Show atoms bonded beyond cell", value=True
-    )
-    return model_style, show_bonded_atoms
+    return (file_upload_form,)
 
 
 @app.cell
@@ -546,16 +571,7 @@ def _(mo, model_style, show_bonded_atoms, structure_list, view_atoms):
                 v = mo.md(f"**Error displaying structure(s):** {e2}")
         else:
             v = mo.md(f"**Error displaying structure(s):** {e}")
-
-    vis = mo.vstack(
-        [
-            v,
-            mo.hstack(
-                [model_style, show_bonded_atoms], justify="space-around", align="center"
-            ),
-        ]
-    )
-    return (vis,)
+    return (v,)
 
 
 @app.cell
@@ -598,141 +614,306 @@ def _(mo, sampling_method):
 
 @app.cell
 def _(FeffConfig):
-    def create_feff_config(settings) -> FeffConfig:
+    def create_feff_config(settings):
         """Create a FeffConfig object from the current UI settings.
 
         Maps UI values to the appropriate FeffConfig fields.
+        Provides sensible defaults for missing parameters.
 
         settings should be the result of form.value
         """
         return FeffConfig(
-            # Map radius from UI
-            radius=settings.get("radius_input"),
-            # Map FEFF analysis parameters
-            kmin=settings.get("kmin_input"),
-            kmax=settings.get("kmax_input"),
-            kweight=settings.get("k_weight"),
-            dk=settings.get("dk_input"),
-            window=settings.get("window_type"),
-            # Map parallel settings
-            parallel=settings.get("enable_parallel"),
-            n_workers=settings.get("num_workers"),
-            # Map force recalculate setting
-            force_recalculate=settings.get("force_recalc_input"),
-            # Map cleanup setting
-            cleanup_feff_files=settings.get("cleanup_feff_files"),
+            # Map radius from UI (FEFF calculation parameter)
+            radius=settings.get("radius_input", 4.0),
+            # Map FEFF analysis parameters (with defaults for missing values)
+            kmin=settings.get("kmin_input", 3.0),
+            kmax=settings.get("kmax_input", 12.0),
+            kweight=settings.get("k_weight", 2),
+            dk=settings.get("dk_input", 0.3),
+            window=settings.get("window_type", "hanning"),
+            # Map parallel settings (with defaults)
+            parallel=settings.get("enable_parallel", False),
+            n_workers=settings.get("num_workers", None),
+            # Map force recalculate setting (with default)
+            force_recalculate=settings.get("force_recalc_input", False),
+            # Map cleanup setting (with default)
+            cleanup_feff_files=settings.get("cleanup_feff_files", True),
         )
 
-    return (create_feff_config,)
+    def update_config_from_settings(config, settings, setting_type="both"):
+        """Update an existing FeffConfig with parameters from settings.
+
+        Args:
+            config: Existing FeffConfig to update
+            settings: Dictionary of settings from UI forms
+            setting_type: "feff", "analysis", or "both" to specify which
+                parameters to update
+        """
+        if setting_type in ("analysis", "both"):
+            # Analysis/Fourier transform parameters
+            config.kmin = settings.get("kmin_input", config.kmin)
+            config.kmax = settings.get("kmax_input", config.kmax)
+            config.kweight = settings.get("k_weight", config.kweight)
+            config.dk = settings.get("dk_input", config.dk)
+            config.window = settings.get("window_type", config.window)
+
+        if setting_type in ("feff", "both"):
+            # FEFF calculation parameters
+            config.radius = settings.get("radius_input", config.radius)
+            config.parallel = settings.get("enable_parallel", config.parallel)
+            config.n_workers = settings.get("num_workers", config.n_workers)
+            config.force_recalculate = settings.get(
+                "force_recalc_input", config.force_recalculate
+            )
+            config.edge = settings.get("edge", getattr(config, "edge", "K"))
+
+        return config
+
+    return create_feff_config, update_config_from_settings
 
 
 @app.cell
-def _(ProcessingMode, SimpleNamespace, mo, traceback):
-    def process_existing_outputs(wrapper, config, output_dir, absorber, is_traj):
-        """Process existing FEFF outputs without running new calculations."""
-        if is_traj:
-            frame_dirs = sorted(
-                [
-                    d
-                    for d in output_dir.iterdir()
-                    if d.is_dir() and d.name.startswith("frame_")
-                ]
-            )
-            if not frame_dirs:
-                return mo.md(f"**❌ No trajectory frames found in {output_dir}**"), None
-
-            # Use the new trajectory FEFF output processing method
-            result = wrapper.process_trajectory_feff_outputs(
-                frame_dirs=frame_dirs,
-                output_dir=output_dir,
-                config=config,
-                plot_individual_frames=True,
-                chi_weighting="chi",
-            )
-            return success_message(result, is_traj, output_dir), result
-        else:
-            result = process_single_existing(wrapper, config, output_dir, absorber)
-            return mo.md(f"### ✅ Processed existing output in `{output_dir}`"), result
-
-    def process_single_existing(wrapper, config, output_dir, absorber):
-        """Process single existing FEFF output."""
-        exafs_group = wrapper.process_feff_output(output_dir, config)
-        wrapper.plot_results(
-            exafs_group,
-            output_dir,
-            absorber=absorber,
-            edge=config.edge,
-            chi_weighting="chi",
-        )
-        return SimpleNamespace(
-            exafs_group=exafs_group,
-            processing_mode=ProcessingMode.SINGLE_FRAME,
-            nframes=1,
-        )
-
-    def process_new_structures(
-        wrapper, structures, config, output_dir, absorber, is_traj
+def _(PipelineProcessor, mo, traceback):
+    def run_input_generation_only(
+        structures, config, output_dir, absorber, all_sites, all_frames, cache_dir=None
     ):
-        """Process new structure(s). Input is a list of ASE Atoms objects."""
+        """Stage A: Generate FEFF input files using PipelineProcessor."""
         try:
             with mo.status.progress_bar(
                 total=100,
-                title="Processing EXAFS...",
-                subtitle="Starting...",
-                completion_title="✅ Processing Complete",
+                title="Generating FEFF Input Files...",
+                subtitle="Initializing...",
+                completion_title="✅ Input Generation Complete",
                 remove_on_exit=True,
             ) as bar:
+                # Initialize PipelineProcessor with cache
+                processor = PipelineProcessor(config=config, cache_dir=cache_dir)
+                bar.update(increment=20, subtitle="Initialized processor...")
 
-                def progress_callback(completed, total, desc):
-                    bar.total = total
-                    if completed == 0:
-                        bar.total = total
-                    bar.update(increment=1, subtitle=desc)
+                # Parse absorber specification using first structure as reference
+                # Import the CLI parsing function for consistency
+                from larch_cli_wrapper.cli import parse_absorber_specification
 
-                result = wrapper.process(
-                    structure=structures,
-                    absorber=absorber,
-                    output_dir=output_dir,
-                    config=config,
-                    trajectory=is_traj,
-                    plot_individual_frames=True,
-                    progress_callback=progress_callback,
+                reference_atoms = structures[0]
+                absorber_spec = parse_absorber_specification(
+                    absorber, reference_atoms, all_sites
                 )
-            return success_message(result, is_traj, output_dir), result
-        except (OSError, ValueError, RuntimeError, FileNotFoundError) as e:
-            # OSError: file operations, ValueError: invalid parameters,
-            # RuntimeError: processing failures, FileNotFoundError: missing files
+
+                bar.update(
+                    increment=10,
+                    subtitle=f"Parsed absorber: {absorber_spec['description']}",
+                )
+
+                # Determine structure type and generate inputs
+                if len(structures) == 1 and not all_frames:
+                    # Single structure
+                    batch = processor.input_generator.generate_single_site_inputs(
+                        structure=structures[0],
+                        absorber=absorber_spec["absorber"],
+                        output_dir=output_dir,
+                    )
+                    bar.update(
+                        increment=50, subtitle="Generated single structure inputs..."
+                    )
+                else:
+                    # Trajectory or multiple frames
+                    batch = processor.input_generator.generate_trajectory_inputs(
+                        structures=structures,
+                        absorber=absorber_spec["absorber"],
+                        output_dir=output_dir,
+                    )
+                    bar.update(increment=50, subtitle="Generated trajectory inputs...")
+
+                bar.update(increment=20, subtitle="Complete!")
+
+                return mo.md(f"""
+                    ### ✅ Input Generation Complete
+                    - **Generated:** {len(batch.tasks)} FEFF input files
+                    - **Frames:** {len(structures)}
+                    - **Sites:** {len({task.site_index for task in batch.tasks})}
+                    - **Output:** {output_dir}
+                    - **Absorber:** {absorber_spec["description"]}
+
+                    Ready for FEFF calculations!
+                    """), batch
+
+        except (OSError, ValueError, RuntimeError) as e:
             return mo.md(f"""
-                ### ❌ Processing Failed
+                ### ❌ Input Generation Failed
                 **Error:** {str(e)}
                 ```
                 {traceback.format_exc()}
                 ```
                 """), None
 
-    def success_message(result, is_traj, output_dir):
-        """Generate success message based on processing mode."""
-        if is_traj:
-            return mo.md(f"""
-                ### ✅ Trajectory Processing Complete
-                - **Frames processed**: {result.nframes}
-                - **Output**: `{output_dir}`
-            """)
-        return mo.md(f"""
-            ### ✅ Single Structure Processed
-            - **Output**: `{output_dir}`
-        """)
+    def run_feff_execution_only(batch, config, parallel=True, cache_dir=None):
+        """Stage B: Execute FEFF calculations using PipelineProcessor."""
+        if batch is None or not batch.tasks:
+            return mo.md("### ❌ FEFF Execution Failed: No input tasks provided."), None
 
-    return process_existing_outputs, process_new_structures
+        try:
+            with mo.status.progress_bar(
+                total=len(batch.tasks),
+                title="Running FEFF Calculations...",
+                subtitle="Initializing...",
+                completion_title="✅ FEFF Execution Complete",
+                remove_on_exit=True,
+            ) as bar:
+                # Initialize executor with cache
+                processor = PipelineProcessor(config=config, cache_dir=cache_dir)
+                bar.update(increment=0, subtitle="Initialized executor...")
+
+                # Create progress callback for marimo progress bar
+                def progress_callback(completed: int, total: int):
+                    """Update marimo progress bar with FEFF calculation progress."""
+                    # Calculate how much to advance (marimo uses incremental updates)
+                    current_progress = getattr(progress_callback, "_current", 0)
+                    increment = completed - current_progress
+                    progress_callback._current = completed
+
+                    bar.update(
+                        increment=increment,
+                        subtitle=f"FEFF calculations: {completed}/{total} complete",
+                    )
+
+                # Initialize progress tracking
+                progress_callback._current = 0
+
+                # Execute all FEFF calculations with real-time progress
+                task_results = processor.feff_executor.execute_batch(
+                    batch=batch,
+                    parallel=parallel,
+                    progress_callback=progress_callback,
+                )
+
+                # Final update
+                bar.update(increment=0, subtitle="Complete!")
+
+                # Count successful calculations
+                successful_tasks = sum(
+                    1 for success in task_results.values() if success
+                )
+
+                # Get batch information for display
+                frames = len({task.frame_index for task in batch.tasks})
+                sites = len({task.site_index for task in batch.tasks})
+
+                return mo.md(f"""
+                    ### ✅ FEFF Execution Complete
+                    - **Processed:** {successful_tasks}/{len(batch.tasks)} calculations
+                    - **Frames:** {frames}
+                    - **Sites:** {sites}
+                    - **Parallel:** {"Yes" if parallel else "No"}
+                    - **Cache:** {
+                    "Enabled" if processor.feff_executor.cache_dir else "Disabled"
+                }
+                    - **Source:** Generated from Stage A inputs
+
+                    Ready for analysis!
+                    """), (batch, task_results)
+
+        except (OSError, ValueError, RuntimeError) as e:
+            return mo.md(f"""
+                ### ❌ FEFF Execution Failed
+                **Error:** {str(e)}
+                ```
+                {traceback.format_exc()}
+                ```
+                """), None
+
+    def run_analysis_only(
+        batch,
+        task_results,
+        config,
+        plot_mode="overall",
+        show_plot=False,
+        plot_style="publication",
+        cache_dir=None,
+    ):
+        """Stage C: Analyze results using PipelineProcessor."""
+        try:
+            with mo.status.progress_bar(
+                total=100,
+                title="Analyzing FEFF Results...",
+                subtitle="Loading results...",
+                completion_title="✅ Analysis Complete",
+                remove_on_exit=True,
+            ) as bar:
+                # Initialize processor with cache
+                processor = PipelineProcessor(config=config, cache_dir=cache_dir)
+                bar.update(increment=20, subtitle="Loading results...")
+
+                # Load successful results
+                groups = processor.result_processor.load_successful_results(
+                    batch=batch,
+                    task_results=task_results,
+                )
+                bar.update(increment=30, subtitle="Creating averages...")
+
+                # Create averages based on data structure
+                frame_averages = processor.result_processor.create_frame_averages(
+                    groups=groups, batch=batch
+                )
+                site_averages = processor.result_processor.create_site_averages(
+                    groups=groups, batch=batch
+                )
+                overall_average = processor.result_processor.create_overall_average(
+                    all_groups=list(groups.values())
+                )
+                bar.update(increment=30, subtitle="Generating plots...")
+
+                # Create data collection for plotting
+                from larch_cli_wrapper.exafs_data import EXAFSDataCollection
+
+                data_collection = EXAFSDataCollection(
+                    individual_spectra=list(groups.values()),
+                    overall_average=overall_average,
+                    frame_averages=frame_averages,
+                    site_averages=site_averages,
+                    kweight_used=config.kweight,
+                    fourier_params=config.fourier_params,
+                )
+                bar.update(increment=20, subtitle="Complete!")
+
+                # Prepare result summary
+                n_frames = len(frame_averages)
+                n_sites = len(site_averages)
+                n_successful = len(groups)
+
+                return mo.md(f"""
+                    ### ✅ Analysis Complete
+                    - **Processed:** {n_successful} calculations from Stage B
+                    - **Frames:** {n_frames}
+                    - **Sites:** {n_sites}
+                    - **Plot mode:** {plot_mode}
+                    - **k-weighting:** {config.kweight}
+                    - **Source:** FEFF results from Stage B
+
+                    Data collection created successfully!
+                    """), data_collection
+
+        except (OSError, ValueError, RuntimeError) as e:
+            return mo.md(f"""
+                ### ❌ Analysis Failed
+                **Error:** {str(e)}
+                ```
+                {traceback.format_exc()}
+                ```
+                """), None
+
+    return (
+        run_analysis_only,
+        run_feff_execution_only,
+        run_input_generation_only,
+    )
 
 
 @app.cell
 def _(WindowType, mo):
     # Create individual UI elements first (these will be accessible)
-    radius_input = mo.ui.number(label="Radius (Å)", value=6.0, start=1.0)
-    process_existing_input = mo.ui.checkbox(
-        label="Process existing FEFF outputs (skip FEFF run)", value=False
-    )
+    radius_input = mo.ui.number(
+        label="Radius (Å)", value=4.0, start=1.0
+    )  # temporary default 2.0
     force_recalc_input = mo.ui.checkbox(
         label="Force recalculate (ignore cache)", value=False
     )
@@ -752,42 +933,15 @@ def _(WindowType, mo):
     kmin_input = mo.ui.number(label="kmin (Å⁻¹)", value=3.0, start=0.0, step=0.1)
     kmax_input = mo.ui.number(label="kmax (Å⁻¹)", value=12.0, start=0.1, step=0.1)
 
-    cleanup_feff_files = mo.ui.checkbox(
-        label="Clean up unnecessary FEFF output files", value=True
-    )
+    # Plot control checkboxes
+    show_individual_ui = mo.ui.checkbox(label="Show individual spectra", value=False)
+    show_overall_average_ui = mo.ui.checkbox(label="Show overall average", value=True)
+    show_frame_averages_ui = mo.ui.checkbox(label="Show frame averages", value=False)
+    show_site_averages_ui = mo.ui.checkbox(label="Show site averages", value=False)
+    show_legend_ui = mo.ui.checkbox(label="Show legend", value=True)
+
     enable_parallel = mo.ui.checkbox(label="Enable parallel processing", value=True)
     num_workers = mo.ui.number(label="Number of workers (auto if blank)", value=None)
-
-    # Now create the layout using the individual elements
-    feff_run_settings = mo.vstack(
-        [
-            radius_input,
-            process_existing_input,
-            force_recalc_input,
-            output_dir_ui,
-        ]
-    )
-
-    feff_analysis_settings = mo.vstack(
-        [
-            k_weight,
-            window_type,
-            dk_input,
-            kmin_input,
-            kmax_input,
-        ]
-    )
-
-    parallel_settings = mo.vstack([enable_parallel, num_workers])
-
-    # # Accordion for the different sections
-    # settings_tabs = mo.tabs(
-    #     {
-    #         "FEFF Run": feff_run_settings,
-    #         "FEFF Analysis": feff_analysis_settings,
-    #         "Parallelisation": parallel_settings,
-    #     }
-    # )
     return (
         dk_input,
         enable_parallel,
@@ -797,74 +951,60 @@ def _(WindowType, mo):
         kmin_input,
         num_workers,
         output_dir_ui,
-        process_existing_input,
         radius_input,
+        show_frame_averages_ui,
+        show_individual_ui,
+        show_legend_ui,
+        show_overall_average_ui,
+        show_site_averages_ui,
         window_type,
     )
-
-
-@app.cell
-def _(form):
-    form.value
-    return
 
 
 @app.cell
 def _(
     CACHE_DIR,
     DEFAULT_OUTPUT_DIR,
-    LarchWrapper,
     Path,
     create_feff_config,
+    input_form,
     mo,
-    process_existing_input,
-    process_existing_outputs,
-    process_new_structures,
-    settings,
+    run_input_generation_only,
     structure_list,
     traceback,
 ):
-    def run_exafs_processing():
-        """Function to execute the whole EXAFS processing pipeline."""
-        if not settings or not structure_list or not settings.get("absorber"):
-            return mo.md(
-                "### ❌ Processing Failed: Missing inputs or configuration."
-            ), None
+    def run_input_generation():
+        """Stage A: Generate FEFF input files from uploaded structures."""
+        if not input_form or not structure_list:
+            return mo.md("### ❌ Input Generation Failed: Missing inputs."), None
 
-        processing_absorber = settings["absorber"].strip()
-        output_dir = Path(settings.get("output_dir", DEFAULT_OUTPUT_DIR))
+        input_settings = input_form.value or {}
+        processing_absorber = input_settings.get("absorber", "").strip()
+        if not processing_absorber:
+            return mo.md("### ❌ Input Generation Failed: No absorber specified."), None
+
+        output_dir = Path(input_settings.get("output_dir_ui", DEFAULT_OUTPUT_DIR))
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create configuration
-        config = create_feff_config(settings)
-        config.edge = settings.get("edge", "K")
+        # Create configuration from settings
+        config = create_feff_config(input_settings)
 
-        is_traj = len(structure_list) > 1
+        all_sites = input_settings.get("all_sites", True)
+        all_frames = input_settings.get("all_frames", True)
 
         try:
-            with LarchWrapper(verbose=False, cache_dir=CACHE_DIR) as processing_wrapper:
-                if process_existing_input.value:
-                    message, result = process_existing_outputs(
-                        processing_wrapper,
-                        config,
-                        output_dir,
-                        processing_absorber,
-                        is_traj,
-                    )
-                else:
-                    message, result = process_new_structures(
-                        processing_wrapper,
-                        structure_list,
-                        config,
-                        output_dir,
-                        processing_absorber,
-                        is_traj,
-                    )
-        except (OSError, ValueError, RuntimeError, FileNotFoundError) as e:
-            # OSError: file operations, ValueError: invalid parameters,
-            # RuntimeError: processing failures, FileNotFoundError: missing files
+            message, result = run_input_generation_only(
+                structures=structure_list,
+                config=config,
+                output_dir=output_dir,
+                absorber=processing_absorber,
+                all_sites=all_sites,
+                all_frames=all_frames,
+                cache_dir=CACHE_DIR,
+            )
+        except (OSError, ValueError, RuntimeError) as e:
             message = mo.md(f"""
-                ### ❌ Processing Failed
+                ### ❌ Input Generation Failed
                 **Error:** {str(e)}
                 ```
                 {traceback.format_exc()}
@@ -874,228 +1014,286 @@ def _(
 
         return message, result
 
-    return (run_exafs_processing,)
+    return (run_input_generation,)
 
 
 @app.cell
-def _(go, message, mo, plot_type, result, settings):
-    def create_plot(
-        exafs_group, individual_frames, plot_type, show_legend, absorber, edge
-    ):
-        """Create plot based on selected options."""
-        fig = go.Figure()
-        common_layout = {
-            "font": {"family": "Times New Roman", "size": 18},
-            "plot_bgcolor": "white",
-            "paper_bgcolor": "white",
-            "margin": {"l": 80, "r": 30, "t": 50, "b": 70},
-            "xaxis": {
-                "showline": True,
-                "linewidth": 2,
-                "linecolor": "black",
-                "mirror": True,
-                "gridcolor": "lightgray",
-                "tickwidth": 2,
-            },
-            "yaxis": {
-                "showline": True,
-                "linewidth": 2,
-                "linecolor": "black",
-                "mirror": True,
-                "gridcolor": "lightgray",
-                "tickwidth": 2,
-            },
-            "legend": {"x": 0.02, "y": 0.95, "bgcolor": "rgba(0,0,0,0)"},
-        }
+def _(
+    CACHE_DIR,
+    create_feff_config,
+    feff_form,
+    input_result,
+    mo,
+    run_feff_execution_only,
+    traceback,
+    update_config_from_settings,
+):
+    def run_feff_execution():
+        """Stage B: Execute FEFF calculations on generated input files."""
+        if not feff_form or not input_result:
+            return mo.md(
+                "### ❌ FEFF Execution Failed: Missing inputs. Please run "
+                "Stage A (Input Generation) first."
+            ), None
 
-        if plot_type != "|χ(R)|":
-            # k-space plot
-            add_chi_plot(fig, exafs_group, individual_frames, plot_type, show_legend)
-            # Set title and axis labels based on chi weighting
-            if plot_type == "χ(k)":
-                title = "EXAFS χ(k)"
-                yaxis_title = "χ(k)"
-            elif plot_type == "k²χ(k)":
-                title = "EXAFS k²χ(k)"
-                yaxis_title = "k²χ(k)"
-            elif plot_type == "k³χ(k)":
-                title = "EXAFS k³χ(k)"
-                yaxis_title = "k³χ(k)"
+        feff_settings = feff_form.value or {}
 
-            fig.update_layout(
-                title=title,
-                xaxis_title="k [Å⁻¹]",
-                yaxis_title=yaxis_title,
-                **common_layout,
+        # Display information about what will be processed
+        len({task.frame_index for task in input_result.tasks})
+        len({task.site_index for task in input_result.tasks})
+
+        # Create configuration from settings
+        config = create_feff_config(feff_settings)
+        config = update_config_from_settings(config, feff_settings, "feff")
+
+        parallel = feff_settings.get("enable_parallel", True)
+
+        try:
+            message, result = run_feff_execution_only(
+                batch=input_result,  # FeffBatch from input generation
+                config=config,
+                parallel=parallel,
+                cache_dir=CACHE_DIR,
             )
-        else:
-            add_ft_plot(fig, exafs_group, individual_frames, show_legend)
-            fig.update_layout(
-                title="Fourier Transform |χ(R)|",
-                xaxis_title="R [Å]",
-                yaxis_title="|χ(R)|",
-                **common_layout,
+        except (OSError, ValueError, RuntimeError) as e:
+            message = mo.md(f"""
+                ### ❌ FEFF Execution Failed
+                **Error:** {str(e)}
+                ```
+                {traceback.format_exc()}
+                ```
+                """)
+            result = None
+
+        return message, result
+
+    return (run_feff_execution,)
+
+
+@app.cell
+def _(
+    CACHE_DIR,
+    analysis_form,
+    create_feff_config,
+    feff_result,
+    mo,
+    run_analysis_only,
+    traceback,
+    update_config_from_settings,
+):
+    def run_analysis():
+        """Stage C: Analyze FEFF results and create plots."""
+        if not analysis_form or not feff_result:
+            return mo.md(
+                "### ❌ Analysis Failed: Missing FEFF results. Please run "
+                "Stage B (FEFF Execution) first."
+            ), None
+
+        analysis_settings = analysis_form.value or {}
+
+        # Create configuration from settings
+        config = create_feff_config(analysis_settings)
+        config = update_config_from_settings(config, analysis_settings, "analysis")
+
+        plot_mode = analysis_settings.get("plot_mode", "overall")
+        show_plot = analysis_settings.get("show_plots", True)
+        plot_style = analysis_settings.get("plot_style", "publication")
+
+        # Extract batch and task_results from feff_result
+        batch, task_results = feff_result
+
+        try:
+            message, result = run_analysis_only(
+                batch=batch,
+                task_results=task_results,
+                config=config,
+                plot_mode=plot_mode,
+                show_plot=show_plot,
+                plot_style=plot_style,
+                cache_dir=CACHE_DIR,
             )
+        except (OSError, ValueError, RuntimeError) as e:
+            message = mo.md(f"""
+                ### ❌ Analysis Failed
+                **Error:** {str(e)}
+                ```
+                {traceback.format_exc()}
+                ```
+                """)
+            result = None
 
-        fig.add_annotation(
-            text=f"{absorber} {edge} edge",
-            x=0.9,
-            y=0.98,
-            xref="paper",
-            yref="paper",
-            showarrow=False,
-            font={"size": 16},
-            bgcolor="white",
-            bordercolor="black",
-            borderwidth=1,
-        )
-        return fig
+        return message, result
 
-    def add_chi_plot(fig, exafs_group, individual_frames, chi_weighting, show_legend):
-        """Add chi(k) plot traces."""
+    return (run_analysis,)
 
-        # Apply weighting to data
-        def apply_weighting(k, chi):
-            if chi_weighting == "k²χ(k)":
-                return k**2 * chi
-            elif chi_weighting == "k³χ(k)":
-                return k**3 * chi
-            else:  # "χ(k)"
-                return chi
 
-        should_plot_frames = individual_frames and len(individual_frames) > 1
+@app.cell
+def _(analysis_form, feff_form, input_form):
+    # Extract settings from forms
+    input_settings = input_form.value or {}
+    feff_settings = feff_form.value or {}
+    analysis_settings = analysis_form.value or {}
+    return analysis_settings, feff_settings, input_settings
 
-        if should_plot_frames:
-            for i, frame in enumerate(individual_frames):
-                weighted_chi = apply_weighting(frame.k, frame.chi)
-                fig.add_trace(
-                    go.Scatter(
-                        x=frame.k,
-                        y=weighted_chi,
-                        name=f"Frame {i + 1}",
-                        line={"width": 1, "color": "rgba(128,128,128,0.3)"},
-                        showlegend=show_legend and i == 0,
-                    )
-                )
 
-        weighted_chi = apply_weighting(exafs_group.k, exafs_group.chi)
-        k = exafs_group.k
+@app.cell
+def _(
+    PlotConfig,
+    analysis_message,
+    analysis_result,
+    analysis_settings,
+    create_feff_config,
+    feff_message,
+    feff_result,
+    feff_settings,
+    input_settings,
+    mo,
+    plot_exafs_plotly,
+    show_frame_averages_ui,
+    show_individual_ui,
+    show_legend_ui,
+    show_overall_average_ui,
+    show_site_averages_ui,
+    update_config_from_settings,
+):
+    # Extract plot control settings
+    show_individual = show_individual_ui.value
+    show_overall_average = show_overall_average_ui.value
+    show_frame_averages = show_frame_averages_ui.value
+    show_site_averages = show_site_averages_ui.value
+    show_legend = show_legend_ui.value
 
-        if hasattr(exafs_group, "chi_std") and should_plot_frames:
-            weighted_std = apply_weighting(
-                k, exafs_group.chi_std
-            )  # TODO: Check if this is correct
-            fig.add_trace(
-                go.Scatter(
-                    x=list(k) + list(k[::-1]),
-                    y=list(weighted_chi + weighted_std)
-                    + list((weighted_chi - weighted_std)[::-1]),
-                    fill="toself",
-                    fillcolor="rgba(0,0,0,0.1)",
-                    line={"color": "rgba(255,255,255,0)"},
-                    showlegend=False,
-                )
-            )
-
-        fig.add_trace(
-            go.Scatter(
-                x=k,
-                y=weighted_chi,
-                name=f"{chi_weighting} Average ± σ"
-                if should_plot_frames
-                else chi_weighting,
-                line={"width": 2.5, "color": "black"},
-            )
-        )
-
-    def add_ft_plot(fig, exafs_group, individual_frames, show_legend):
-        """Add Fourier transform plot traces."""
-        should_plot_frames = individual_frames and len(individual_frames) > 1
-
-        if should_plot_frames:
-            for i, frame in enumerate(individual_frames):
-                fig.add_trace(
-                    go.Scatter(
-                        x=frame.r,
-                        y=frame.chir_mag,
-                        name=f"Frame {i + 1}",
-                        line={"width": 1, "color": "rgba(128,128,128,0.3)"},
-                        showlegend=show_legend and i == 0,
-                    )
-                )
-
-        fig.add_trace(
-            go.Scatter(
-                x=exafs_group.r,
-                y=exafs_group.chir_mag,
-                name="|χ(R)| Average" if should_plot_frames else "|χ(R)|",
-                line={"width": 2.5, "color": "black"},
-            )
-        )
+    # Determine which result to use for plotting
+    if analysis_result is not None:
+        result = analysis_result
+        settings = analysis_settings
+        message = analysis_message
+        # Create config with defaults and update with analysis parameters
+        config = create_feff_config({})
+        config = update_config_from_settings(config, settings, "analysis")
+    elif feff_result is not None:
+        result = feff_result
+        settings = feff_settings
+        message = feff_message
+        # Create config with defaults and update with FEFF parameters
+        config = create_feff_config({})
+        config = update_config_from_settings(config, settings, "feff")
+    else:
+        result = None
+        settings = {}
+        message = mo.md("### ℹ️ Run FEFF calculations or analysis to see plots")
+        config = None
 
     # Skip if no result
     if result is None:
         plot_output = message
     else:
-        # Main plot rendering
-        exafs_group = result.exafs_group
-        edge = settings.get("edge", "K")
+        # Main plot rendering using plot_exafs_plotly and interactive plots
+        edge = input_settings.get("edge", "")
         plot_absorber = settings.get("absorber", "")
-        show_legend = False
 
-        # Get individual frames if they exist
-        individual_frames = getattr(result, "individual_frame_groups", None)
+        # Use existing plot data collection if available, otherwise create it
+        if (
+            hasattr(result, "plot_data_collection")
+            and result.plot_data_collection is not None
+        ):
+            plot_data_collection = result.plot_data_collection
+        else:
+            # Fallback: assume result is already EXAFSDataCollection
+            plot_data_collection = result
 
-        fig = create_plot(
-            exafs_group,
-            individual_frames,
-            plot_type.value,
-            show_legend,
-            plot_absorber,
-            edge,
-        )
+        try:
+            plot_kweight = (
+                config.kweight if config and hasattr(config, "kweight") else 2
+            )
 
-        plot_output = mo.vstack([mo.hstack([plot_type, fig], justify="start"), message])
+            # Create PlotConfig for the interactive plotly subplots
+            plot_config = PlotConfig(
+                plot_individual=show_individual,
+                plot_overall_avg=show_overall_average,
+                plot_frame_avg=show_frame_averages,
+                plot_site_avg=show_site_averages,
+                absorber=plot_absorber,
+                edge=edge,
+                kweight=plot_kweight,
+                style=None,
+                show_legend=show_legend,
+            )
+
+            # Create interactive plot using the centralized function
+            interactive_fig = plot_exafs_plotly(
+                plot_data_collection,
+                plot_config,
+            )
+
+            plot_output = mo.vstack(
+                [
+                    mo.hstack(
+                        [
+                            show_overall_average_ui,
+                            show_individual_ui,
+                            show_frame_averages_ui,
+                            show_site_averages_ui,
+                        ],
+                        justify="start",
+                    ),
+                    show_legend_ui,
+                    interactive_fig,
+                    message,
+                ]
+            )
+
+        except (ValueError, TypeError, RuntimeError) as e:
+            # If plotting fails, show error but keep the message
+            plot_output = mo.vstack(
+                [
+                    mo.md(f"""
+                ### ❌ Plotting Error
+                **Error:** {str(e)}
+
+                Data is available but plotting failed. Check the plotting functions.
+                """),
+                    message,
+                ]
+            )
     return (plot_output,)
 
 
 @app.cell(hide_code=True)
-def _(CACHE_DIR, LarchWrapper, mo):
+def _(CACHE_DIR, FeffConfig, PipelineProcessor, mo):
     def clear_cache(button_value=None):
-        """Clear the Larch cache directory."""
+        """Clear the cache directory using PipelineProcessor."""
         try:
-            with LarchWrapper(cache_dir=CACHE_DIR) as wrapper:
-                wrapper.clear_cache()
-                message = mo.md("### 🗑️ Cache Cleared Successfully")
+            processor = PipelineProcessor(config=FeffConfig(), cache_dir=CACHE_DIR)
+            files_cleared = processor.clear_cache()
+            message = mo.md(
+                f"### 🗑️ Cache Cleared Successfully\n{files_cleared} files removed"
+            )
 
         except (OSError, PermissionError, FileNotFoundError) as e:
             # OSError: file system errors, PermissionError: access denied,
             # FileNotFoundError: cache directory missing
             message = mo.md(f"### ❌ Cache Error\n{str(e)}")
         mo.output.append(message)
-        # return None
 
     def show_cache(button_value=None):
-        """Show the Larch cache information."""
+        """Show cache information using PipelineProcessor."""
         try:
-            with LarchWrapper(cache_dir=CACHE_DIR) as wrapper:
-                info = wrapper.get_cache_info()
-                message = mo.md(f"""
+            processor = PipelineProcessor(config=FeffConfig(), cache_dir=CACHE_DIR)
+            info = processor.get_cache_info()
+            message = mo.md(f"""
                         ### 📊 Cache Status
-                        | Property | Value |
-                        |----------|-------|
-                        | **Status** | ✅ Enabled |
-                        | **Directory** | `{info["cache_dir"]}` |
-                        | **Files** | {info["files"]} |
-                        | **Size** | {info["size_mb"]} MB |
-                    """)
+                        - **Enabled:** {"✓" if info["enabled"] else "✗"}
+                        - **Directory:** {info.get("cache_dir", "N/A")}
+                        - **Files:** {info.get("files", 0)}
+                        - **Size:** {info.get("size_mb", 0):.2f} MB
+                        """)
 
         except (OSError, PermissionError, FileNotFoundError) as e:
             # OSError: file system errors, PermissionError: access denied,
             # FileNotFoundError: cache directory missing
             message = mo.md(f"### ❌ Cache Error\n{str(e)}")
         mo.output.append(message)
-        # return message
 
     return clear_cache, show_cache
 
