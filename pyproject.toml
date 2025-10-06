@@ -29,6 +29,7 @@ dependencies = [
     "larixite>=0.1.0",
     "marimo<0.16.0,>=0.15.5",
     "weas-widget>=0.1.26",
+    "pymatgen<2026.0,>=2025.1.24",
 ]
 
 
@@ -41,10 +42,6 @@ Documentation = "https://github.com/stfc/alc-dls-exafs/tree/main/docs"
 [project.scripts]
 larch-cli = "larch_cli_wrapper.cli:app"
 
-[project.optional-dependencies]
-full = [
-     "pymatgen<2026.0,>=2025.1.24",
-]
 [dependency-groups]
 dev = [
     "pytest<9.0,>=8.0",

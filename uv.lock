@@ -1278,15 +1278,11 @@ dependencies = [
     { name = "marimo" },
     { name = "matplotlib" },
     { name = "numpy" },
+    { name = "pymatgen" },
     { name = "rich" },
     { name = "typer" },
     { name = "weas-widget" },
     { name = "xraylarch" },
-]
-
-[package.optional-dependencies]
-full = [
-    { name = "pymatgen" },
 ]
 
 [package.dev-dependencies]
@@ -1310,13 +1306,12 @@ requires-dist = [
     { name = "marimo", specifier = ">=0.15.5,<0.16.0" },
     { name = "matplotlib", specifier = ">=3.5" },
     { name = "numpy", specifier = ">=1.26.4,<3.0.0" },
-    { name = "pymatgen", marker = "extra == 'full'", specifier = ">=2025.1.24,<2026.0" },
+    { name = "pymatgen", specifier = ">=2025.1.24,<2026.0" },
     { name = "rich", specifier = ">=13.9.1,<14.0.0" },
     { name = "typer", specifier = ">=0.17.3,<1.0.0" },
     { name = "weas-widget", specifier = ">=0.1.26" },
     { name = "xraylarch", specifier = ">=0.9.47" },
 ]
-provides-extras = ["full"]
 
 [package.metadata.requires-dev]
 dev = [

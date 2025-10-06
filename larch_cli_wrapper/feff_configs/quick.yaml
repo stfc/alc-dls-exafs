@@ -1,0 +1,26 @@
+# EXAFS Configuration (based on 'quick' preset)
+spectrum_type: EXAFS
+edge: K
+radius: 4.0
+
+# User FEFF tag settings
+user_tag_settings:
+  CONTROL: "1 1 1 1 1 1"
+  PRINT: "1 0 0 0 0 3"
+  S02: "0.0"              # Amplitude reduction factor
+  SCF: "4.5 0 30 .2 1"    # Self-consistent field
+  EXCHANGE: "0"           # Exchange correlation
+  EXAFS: 20
+
+# Fourier Transform parameters
+kmin: 2
+kmax: 12
+kweight: 2
+dk: 1.0
+window: hanning
+
+# Processing options
+force_recalculate: false
+cleanup_feff_files: true
+parallel: true
+n_workers: null  # null = auto-detect

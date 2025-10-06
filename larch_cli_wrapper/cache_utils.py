@@ -44,8 +44,8 @@ def load_from_cache(
         Tuple of (chi, k) arrays if cache hit, None if cache miss or error
 
     Note:
-        The returned arrays are typically numpy arrays or lists of floats
-        representing the EXAFS chi(k) data and k-space values.
+        The returned chi array is complex (EXAFS chi(k) data) and k array
+        is real-valued k-space values.
     """
     if not cache_dir:
         return None
@@ -75,13 +75,13 @@ def save_to_cache(
 
     Args:
         cache_key: Unique identifier for the cached data
-        chi: EXAFS chi(k) data (typically numpy array or list of floats)
-        k: k-space values (typically numpy array or list of floats)
+        chi: EXAFS chi(k) data (complex numpy array)
+        k: k-space values (real numpy array)
         cache_dir: Directory where cache files are stored
 
     Note:
-        Silently continues on cache write failures with a warning.
-        The chi and k parameters should be serializable numeric data.
+        Always stores complex chi data directly. Silently continues on cache
+        write failures with a warning.
     """
     if not cache_dir:
         return

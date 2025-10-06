@@ -8,6 +8,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
+import numpy as np
 from ase import Atoms
 from pymatgen.io.ase import AseAtomsAdaptor
 from pymatgen.io.feff.sets import MPEXAFSSet
@@ -19,24 +20,40 @@ try:
 except ImportError:
     YAML_AVAILABLE = False
 
+from larch.io import read_ascii
+
+try:
+    LARCH_IO_AVAILABLE = True
+except ImportError:
+    LARCH_IO_AVAILABLE = False
+
+
+# Maximum number of absorber sites to process to avoid excessive computation
+LARGE_NUMBER_OF_SITES = 100
 
 # Configuration presets using pymatgen defaults
 PRESETS = {
     "quick": {
         "spectrum_type": "EXAFS",
         "edge": "K",
-        "radius": 8.0,
+        "radius": 4.0,
         "kmin": 2,
         "kmax": 12,
         "kweight": 2,
         "window": "hanning",
         "dk": 1.0,
-        "user_tag_settings": {},  # Use pymatgen defaults
+        "user_tag_settings": {
+            "EXCHANGE": 0,
+            "S02": 1.0,
+            "PRINT": "1 0 0 0 0 3",
+            "NLEG": 6,
+            "_del": ["COREHOLE", "COREHOLE FSR", "SCF"],
+        },
     },
     "publication": {
         "spectrum_type": "EXAFS",
         "edge": "K",
-        "radius": 12.0,
+        "radius": 8.0,
         "kmin": 3,
         "kmax": 18,
         "kweight": 2,
@@ -86,6 +103,24 @@ class WindowType(str, Enum):
     KAISER = "kaiser"  # Kaiser-Bessel function-derived window
 
 
+__all__ = [
+    "LARGE_NUMBER_OF_SITES",
+    "PRESETS",
+    "FeffConfig",
+    "SpectrumType",
+    "EdgeType",
+    "WindowType",
+    "normalize_absorbers",
+    "validate_absorber_indices",
+    "generate_multi_site_feff_inputs",
+    "run_multi_site_feff_calculations",
+    "run_feff_calculation",
+    "read_feff_output",
+    "average_chi_spectra",
+    "cleanup_feff_output",
+]
+
+
 # ================== CONFIGURATION ==================
 @dataclass
 class FeffConfig:
@@ -93,13 +128,19 @@ class FeffConfig:
 
     spectrum_type: str = "EXAFS"
     edge: str = "K"
-    radius: float = 8.0  # cluster size
+    radius: float = 4.0  # cluster size (quick preset default)
     user_tag_settings: dict[str, str] = field(
-        default_factory=dict
-    )  # Empty by default - use pymatgen defaults
+        default_factory=lambda: {
+            "EXCHANGE": "0",
+            "S02": "1.0",
+            "PRINT": "1 0 0 0 0 3",
+            "NLEG": "6",
+            "_del": ["COREHOLE", "COREHOLE FSR", "SCF"],
+        }
+    )  # Quick preset defaults
     # FFT parameters for EXAFS transform:
     kmin: float = 2.0  # starting k for FT Window
-    kmax: float = 14.0  # ending k for FT Window
+    kmax: float = 12.0  # ending k for FT Window (quick preset default)
     kweight: int = 2  # exponent for weighting spectra by k**kweight
     dk: float = 1.0  # tapering parameter for FT Window
     dk2: float | None = None  # second tapering parameter for FT Window (larch default)
@@ -141,6 +182,21 @@ class FeffConfig:
             "kstep": self.kstep,
         }
         return {k: v for k, v in params.items() if v is not None}
+
+    @property
+    def feff_params(self) -> dict[str, str | float | dict[str, str]]:
+        """Return FEFF calculation parameters as a dictionary.
+
+        These are the parameters that affect the FEFF calculation itself,
+        not the analysis/Fourier transform parameters. Used for caching
+        to determine when FEFF calculations need to be re-run.
+        """
+        return {
+            "spectrum_type": self.spectrum_type,
+            "edge": self.edge,
+            "radius": self.radius,
+            "user_tag_settings": self.user_tag_settings,
+        }
 
     def __post_init__(self) -> None:
         """Post-initialization validation of configuration parameters."""
@@ -218,11 +274,16 @@ class FeffConfig:
             "edge": self.edge,
             "radius": self.radius,
             "user_tag_settings": self.user_tag_settings,
-            "kweight": self.kweight,
-            "window": self.window,
-            "dk": self.dk,
             "kmin": self.kmin,
             "kmax": self.kmax,
+            "kweight": self.kweight,
+            "dk": self.dk,
+            "dk2": self.dk2,
+            "with_phase": self.with_phase,
+            "rmax_out": self.rmax_out,
+            "window": self.window,
+            "nfft": self.nfft,
+            "kstep": self.kstep,
             "parallel": self.parallel,
             "n_workers": self.n_workers,
             "sample_interval": self.sample_interval,
@@ -297,18 +358,20 @@ def normalize_absorbers(
             raise ValueError("Absorber list cannot be empty")
 
         if all(isinstance(x, int) for x in absorbers):
-            # List of indices
-            for idx in absorbers:
+            # List of indices - type narrowing
+            int_absorbers = absorbers  # Now type checker knows these are all ints
+            for idx in int_absorbers:
                 if not 0 <= idx < n_atoms:
                     raise ValueError(
                         f"Absorber index {idx} out of range (0-{n_atoms - 1})"
                     )
-            return list(absorbers)
+            return int_absorbers
 
         elif all(isinstance(x, str) for x in absorbers):
-            # List of element symbols
+            # List of element symbols - type narrowing
+            str_absorbers = absorbers  # Now type checker knows these are all strs
             indices = []
-            for element in absorbers:
+            for element in str_absorbers:
                 element = element.capitalize()
                 if element not in symbols:
                     raise ValueError(f"Element {element} not found in structure")
@@ -340,15 +403,155 @@ def get_absorber_element_from_index(atoms: Atoms, absorber_index: int) -> str:
     return str(atoms.get_chemical_symbols()[absorber_index])
 
 
+def validate_absorber_indices(atoms: Atoms, absorber_indices: list[int]) -> str:
+    """Validate that all absorber indices correspond to the same chemical element.
+
+    Args:
+        atoms: ASE Atoms object
+        absorber_indices: List of absorber atom indices
+
+    Returns:
+        Chemical symbol of the absorbing element
+
+    Raises:
+        ValueError: If indices correspond to different elements or are invalid
+    """
+    if not absorber_indices:
+        raise ValueError("At least one absorber index must be provided")
+
+    # Check that all indices are valid
+    n_atoms = len(atoms)
+    for idx in absorber_indices:
+        if not 0 <= idx < n_atoms:
+            raise ValueError(f"Absorber index {idx} out of range (0-{n_atoms - 1})")
+
+    # Check that all indices correspond to the same element
+    symbols = atoms.get_chemical_symbols()
+    absorber_element = symbols[absorber_indices[0]]
+
+    for _i, idx in enumerate(absorber_indices):
+        if symbols[idx] != absorber_element:
+            raise ValueError(
+                f"Absorber indices must all correspond to the same element. "
+                f"Index {absorber_indices[0]} is {absorber_element} but "
+                f"index {idx} is {symbols[idx]}"
+            )
+
+    # Log warning if too many sites
+    if len(absorber_indices) > LARGE_NUMBER_OF_SITES:
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"Number of absorber sites ({len(absorber_indices)}) "
+            f"is very large - are you sure this is correct? "
+        )
+
+    return absorber_element
+
+
+def average_chi_spectra(
+    k_arrays: list[np.ndarray],
+    chi_arrays: list[np.ndarray],
+    weights: list[float] | None = None,
+    *,
+    restrict_to_common_range: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Average χ(k) spectra with optional common-range alignment.
+
+    Args:
+        k_arrays: List of k-grids (one per spectrum)
+        chi_arrays: List of χ(k) arrays (one per spectrum)
+        weights: Optional weights for averaging (``None`` for equal weights)
+        restrict_to_common_range: When True, restrict interpolation to the
+            overlapping k-range across all spectra using the shortest grid.
+            When False, use the first spectrum's grid and zero-pad gaps.
+
+    Returns:
+        Tuple of (averaged χ, k_grid)
+
+    Raises:
+        ValueError: If inputs are empty, mismatched, or have no overlap when
+            ``restrict_to_common_range`` is requested.
+    """
+    if not k_arrays or not chi_arrays:
+        raise ValueError("Empty input arrays provided")
+
+    if len(k_arrays) != len(chi_arrays):
+        raise ValueError("Number of k and chi arrays must match")
+
+    if len(k_arrays) == 1:
+        # Single spectrum - no averaging needed
+        return chi_arrays[0], k_arrays[0]
+
+    if restrict_to_common_range:
+        k_min = max(float(k.min()) for k in k_arrays)
+        k_max = min(float(k.max()) for k in k_arrays)
+
+        if not np.isfinite(k_min) or not np.isfinite(k_max) or k_min >= k_max:
+            raise ValueError("No overlapping k-range found for averaging")
+
+        n_points = min(len(k) for k in k_arrays)
+        k_ref = np.linspace(k_min, k_max, n_points)
+    else:
+        # Set reference k-grid from first spectrum
+        k_ref = k_arrays[0].copy()
+    chi_list = []
+
+    for _i, (k, chi) in enumerate(zip(k_arrays, chi_arrays, strict=False)):
+        # Interpolate to common k-grid if needed
+        if not np.array_equal(k, k_ref):
+            # Handle complex chi data by interpolating real and imaginary parts
+            # separately
+            if np.iscomplexobj(chi):
+                chi_real = np.interp(k_ref, k, chi.real, left=0, right=0)
+                chi_imag = np.interp(k_ref, k, chi.imag, left=0, right=0)
+                chi_interp = chi_real + 1j * chi_imag
+            else:
+                chi_interp = np.interp(k_ref, k, chi, left=0, right=0)
+        else:
+            chi_interp = chi
+
+        chi_list.append(chi_interp)
+
+    # Apply weights if provided
+    if weights is not None:
+        if len(weights) != len(chi_list):
+            raise ValueError(
+                f"Number of weights ({len(weights)}) must match number of "
+                f"spectra ({len(chi_list)})"
+            )
+
+        # Normalize weights
+        weights_array = np.array(weights)
+        weights_array = weights_array / np.sum(weights_array)
+
+        # Weighted average
+        chi_avg = np.average(chi_list, axis=0, weights=weights_array)
+    else:
+        # Simple average
+        chi_avg = np.mean(chi_list, axis=0)
+
+    return chi_avg, k_ref
+
+
 def generate_pymatgen_input(
-    atoms: Atoms, absorber: str | int, output_dir: Path, config: FeffConfig
+    atoms: Atoms, absorber_index: int, output_dir: Path, config: FeffConfig
 ) -> Path:
-    """Generate FEFF input using pymatgen."""
-    # For backward compatibility, if there are multiple matching absorbers, use the
-    # first one
-    absorber_indices = normalize_absorbers(atoms, absorber)
-    absorber_index = absorber_indices[0]  # Always use the first matching absorber
-    absorber_element = get_absorber_element_from_index(atoms, absorber_index)
+    """Generate FEFF input using pymatgen for a single absorber site index.
+
+    Args:
+        atoms: ASE Atoms object containing the structure
+        absorber_index: Index of the absorbing atom (0-based)
+        output_dir: Directory where FEFF input files will be written
+        config: FEFF configuration object
+
+    Returns:
+        Path to the generated feff.inp file
+    """
+    # Validate absorber index
+    if not 0 <= absorber_index < len(atoms):
+        raise ValueError(
+            f"Absorber index {absorber_index} out of range (0-{len(atoms) - 1})"
+        )
 
     # Convert to pymatgen structure
     adaptor = AseAtomsAdaptor()
@@ -386,7 +589,7 @@ def generate_pymatgen_input(
     # Create FEFF set
     if config.spectrum_type == "EXAFS":
         feff_set = MPEXAFSSet(
-            absorbing_atom=absorber_element,
+            absorbing_atom=absorber_index,
             structure=structure,
             edge=config.edge,
             radius=config.radius,
@@ -402,40 +605,153 @@ def generate_pymatgen_input(
     return output_dir / "feff.inp"
 
 
-def generate_pymatgen_input_multi(
+def run_multi_site_feff_calculations(
+    input_files: list[Path],
+    cleanup: bool = True,
+    parallel: bool = True,
+    max_workers: int | None = None,
+    progress_callback: callable = None,
+    timeout: int = 600,
+    max_retries: int = 2,
+    force_recalculate: bool = False,
+) -> list[tuple[Path, bool]]:
+    """Run FEFF calculations for multiple sites efficiently.
+
+    Args:
+        input_files: List of paths to feff.inp files
+        cleanup: Whether to clean up unnecessary FEFF output files
+        parallel: Whether to use parallel processing
+        max_workers: Maximum number of parallel workers (None for auto)
+        progress_callback: Optional callback called with (completed, total)
+            after each calculation
+        timeout: Timeout per calculation in seconds (default: 600 = 10 minutes)
+        max_retries: Maximum number of retry attempts for failed calculations
+            (default: 2)
+        force_recalculate: Whether to force recalculation even if chi.dat exists
+
+    Returns:
+        List of (feff_dir, success) tuples
+    """
+    import concurrent.futures
+    import time
+
+    def run_single_calculation(input_file: Path) -> tuple[Path, bool]:
+        """Run FEFF calculation for a single site with retry logic."""
+        feff_dir = input_file.parent
+
+        for attempt in range(max_retries + 1):
+            try:
+                success = run_feff_calculation(
+                    feff_dir,
+                    verbose=False,
+                    cleanup=cleanup,
+                    timeout=timeout,
+                    force_recalculate=force_recalculate,
+                )
+
+                if success:
+                    return feff_dir, True
+
+                # If not successful and not the last attempt, wait before retry
+                if attempt < max_retries:
+                    time.sleep(1 + attempt)  # Progressive backoff: 1s, 2s, 3s...
+
+            except (OSError, RuntimeError):
+                # Log the error but continue with retry logic
+                if attempt < max_retries:
+                    time.sleep(1 + attempt)
+                else:
+                    # Final attempt failed
+                    return feff_dir, False
+
+        return feff_dir, False
+
+    total_tasks = len(input_files)
+    completed_count = 0
+
+    if parallel and len(input_files) > 1:
+        if max_workers is None:
+            # More conservative default: use fewer workers to reduce resource contention
+            import os
+
+            cpu_count = os.cpu_count() or 4
+            max_workers = min(len(input_files), max(1, cpu_count // 2), 3)
+
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_input = {
+                executor.submit(run_single_calculation, input_file): input_file
+                for input_file in input_files
+            }
+
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_input):
+                result = future.result()
+                results.append(result)
+                completed_count += 1
+
+                # Report progress
+                if progress_callback:
+                    progress_callback(completed_count, total_tasks)
+
+        # Reorder results to match original input order
+        input_to_result = {
+            future_to_input[future]: future.result() for future in future_to_input
+        }
+        results = [input_to_result[input_file] for input_file in input_files]
+    else:
+        results = []
+        for input_file in input_files:
+            result = run_single_calculation(input_file)
+            results.append(result)
+            completed_count += 1
+
+            # Report progress for sequential execution
+            if progress_callback:
+                progress_callback(completed_count, total_tasks)
+
+    return results
+
+
+def generate_multi_site_feff_inputs(
     atoms: Atoms,
-    absorbers: str | int | list[int] | list[str],
-    output_dir: Path,
+    absorber_indices: list[int],
+    base_output_dir: Path,
     config: FeffConfig,
 ) -> list[Path]:
-    """Generate FEFF input using pymatgen for multiple absorbers.
+    """Generate FEFF inputs for multiple absorber sites.
 
-    Returns a list of output files, one for each absorber.
-    Each file is in a directory named with the pattern: {base_name}_site_{index}
+    Creates separate subdirectories for each absorber site using
+    the naming pattern: site_XXXX (where XXXX is the zero-padded index).
+
+    Args:
+        atoms: ASE Atoms object containing the structure
+        absorber_indices: List of absorber atom indices
+        base_output_dir: Base directory for outputs (sites will be in subdirs)
+        config: FEFF configuration object
+
+    Returns:
+        List of paths to generated feff.inp files
     """
-    absorber_indices = normalize_absorbers(atoms, absorbers)
+    if not absorber_indices:
+        raise ValueError("At least one absorber index must be provided")
 
-    if len(absorber_indices) == 1:
-        # Single absorber - use existing function
-        return [generate_pymatgen_input(atoms, absorber_indices[0], output_dir, config)]
+    # Validate all indices
+    for idx in absorber_indices:
+        if not 0 <= idx < len(atoms):
+            raise ValueError(f"Absorber index {idx} out of range (0-{len(atoms) - 1})")
 
-    # Multiple absorbers - create separate directories for each
-    output_files = []
-    base_name = output_dir.name
+    base_output_dir = Path(base_output_dir)
+    base_output_dir.mkdir(parents=True, exist_ok=True)
 
-    for absorber_index in absorber_indices:
-        site_dir = output_dir.parent / f"{base_name}_site_{absorber_index}"
-        result_file = generate_pymatgen_input(atoms, absorber_index, site_dir, config)
-        output_files.append(result_file)
+    input_files = []
+    for absorber_idx in absorber_indices:
+        site_dir = base_output_dir / f"site_{absorber_idx:04d}"
+        feff_input_path = generate_pymatgen_input(atoms, absorber_idx, site_dir, config)
+        input_files.append(feff_input_path)
 
-    return output_files
-
-
-def generate_feff_input(
-    atoms: Atoms, absorber: str | int, output_dir: Path, config: FeffConfig
-) -> Path:
-    """Generate FEFF input using pymatgen."""
-    return generate_pymatgen_input(atoms, absorber, output_dir, config)
+    return input_files
 
 
 def generate_feff_input_multi(
@@ -444,41 +760,74 @@ def generate_feff_input_multi(
     output_dir: Path,
     config: FeffConfig,
 ) -> list[Path]:
-    """Generate FEFF input for multiple absorbers using pymatgen."""
-    return generate_pymatgen_input_multi(atoms, absorbers, output_dir, config)
+    """Generate FEFF input for multiple absorbers.
+
+    Args:
+        atoms: ASE Atoms object
+        absorbers: Absorber specification (element, index, or list)
+        output_dir: Base output directory
+        config: FEFF configuration
+
+    Returns:
+        List of paths to generated feff.inp files
+    """
+    absorber_indices = normalize_absorbers(atoms, absorbers)
+    return generate_multi_site_feff_inputs(atoms, absorber_indices, output_dir, config)
 
 
 def run_feff_calculation(
-    feff_dir: Path, verbose: bool = False, cleanup: bool = True
+    feff_dir: Path,
+    verbose: bool = False,
+    cleanup: bool = True,
+    timeout: int = 600,
+    force_recalculate: bool = False,
 ) -> bool:
-    """Run FEFF calculation with simplified error handling.
+    """Run FEFF calculation with robust encoding handling.
 
     Args:
         feff_dir: Directory containing feff.inp
         verbose: Whether to enable verbose output
         cleanup: Whether to clean up unnecessary output files
+        timeout: Timeout in seconds (default: 600 = 10 minutes)
+        force_recalculate: Whether to force recalculation even if chi.dat exists
 
     Returns:
         True if calculation succeeded, False otherwise
     """
     import os
+    import shutil
+    import subprocess
     import sys
-
-    from larch.xafs.feffrunner import feff8l
 
     feff_dir = Path(feff_dir)
     input_path = feff_dir / "feff.inp"
     log_path = feff_dir / "feff.log"
+    chi_file = feff_dir / "chi.dat"
 
     if not input_path.exists():
         raise FileNotFoundError(f"FEFF input file {input_path} not found")
 
-    # Set up encoding environment
-    os.environ["PYTHONIOENCODING"] = "utf-8"
+    # Check if chi.dat already exists and force_recalculate is False
+    if not force_recalculate and chi_file.exists():
+        # Verify the existing chi.dat file is valid
+        try:
+            # Use read_feff_output function from this module
+            read_feff_output(feff_dir)  # This will raise an exception if invalid
 
-    # Store original stdout/stderr
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
+            # Log that we're using existing results
+            with open(log_path, "w", encoding="utf-8", errors="replace") as log_file:
+                log_file.write(f"FEFF calculation skipped at {datetime.now()}\n")
+                log_file.write(f"Using existing chi.dat file: {chi_file}\n")
+                log_file.write("Use force_recalculate=True to override\n")
+
+            return True
+
+        except (OSError, ValueError, IndexError):
+            # Existing chi.dat is invalid, remove it and proceed with calculation
+            try:
+                chi_file.unlink()
+            except OSError:
+                pass  # Ignore errors removing invalid file
 
     try:
         # Create basic log
@@ -488,15 +837,84 @@ def run_feff_calculation(
             log_file.write(f"Working directory: {feff_dir}\n")
             log_file.write("-" * 50 + "\n\n")
 
-        # Run FEFF calculation
-        if not verbose:
-            # Redirect output to log file
-            with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
-                sys.stdout = log_file
-                sys.stderr = log_file
+        # Try to use larch feff8l if available, but with encoding fix
+        try:
+            # Import and use larch's feff8l, but ensure proper encoding
+            from larch.xafs.feffrunner import feff8l
+
+            # Backup original stdout encoding
+
+            if not verbose:
+                # Don't redirect stdout/stderr for non-verbose mode
+                # Instead, let feff8l handle its own output and capture it differently
+                os.environ["PYTHONIOENCODING"] = "utf-8"
+
+                # Run with verbose=False but don't redirect streams
                 result = feff8l(folder=str(feff_dir), feffinp="feff.inp", verbose=False)
-        else:
-            result = feff8l(folder=str(feff_dir), feffinp="feff.inp", verbose=True)
+            else:
+                # For verbose mode, ensure stdout has encoding
+                if not hasattr(sys.stdout, "encoding") or sys.stdout.encoding is None:
+                    sys.stdout.encoding = "utf-8"
+                result = feff8l(
+                    folder=str(feff_dir), feffinp="feff.inp", verbose=verbose
+                )
+
+        except Exception as larch_error:
+            # If larch fails, try using subprocess as fallback
+            with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
+                log_file.write(f"Larch feff8l failed: {larch_error}\n")
+                log_file.write("Attempting subprocess fallback...\n")
+
+            # Look for feff executable
+            feff_exe = shutil.which("feff8l") or shutil.which("feff")
+            if feff_exe is None:
+                raise RuntimeError("No FEFF executable found in PATH") from larch_error
+
+            # Validate executable path for security
+            feff_exe = Path(feff_exe).resolve()
+            if not feff_exe.exists() or not feff_exe.is_file():
+                raise RuntimeError(
+                    f"FEFF executable not found or not a file: {feff_exe}"
+                ) from larch_error
+
+            # Run FEFF via subprocess
+            try:
+                env = os.environ.copy()
+                env["PYTHONIOENCODING"] = "utf-8"
+
+                # Run FEFF via subprocess
+                # S603: subprocess call is safe here - executable path is validated
+                proc = subprocess.run(  # noqa: S603
+                    [str(feff_exe)],  # Convert Path to string for subprocess
+                    cwd=str(feff_dir),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=env,
+                    timeout=timeout,  # Configurable timeout (default 10 minutes)
+                    check=False,  # Don't raise on non-zero exit codes
+                )
+
+                # Log subprocess output
+                with open(
+                    log_path, "a", encoding="utf-8", errors="replace"
+                ) as log_file:
+                    log_file.write(f"FEFF stdout:\n{proc.stdout}\n")
+                    if proc.stderr:
+                        log_file.write(f"FEFF stderr:\n{proc.stderr}\n")
+
+                result = proc.returncode == 0
+
+            except (
+                subprocess.TimeoutExpired,
+                subprocess.SubprocessError,
+            ) as proc_error:
+                with open(
+                    log_path, "a", encoding="utf-8", errors="replace"
+                ) as log_file:
+                    log_file.write(f"Subprocess failed: {proc_error}\n")
+                result = False
 
         # Check success
         chi_file = feff_dir / "chi.dat"
@@ -515,20 +933,22 @@ def run_feff_calculation(
 
         return success
 
-    except (OSError, RuntimeError, ValueError, UnicodeDecodeError) as e:
-        # Log any errors
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        PermissionError,
+        TimeoutError,
+    ) as e:
+        # Log any errors from FEFF execution or file operations
+        error_msg = str(e)
         try:
             with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
-                log_file.write(f"\nERROR: {str(e)}\n")
+                log_file.write(f"\nERROR: {error_msg}\n")
                 log_file.write(f"Exception type: {type(e).__name__}\n")
         except OSError:
-            print(f"FEFF calculation failed: {e}")
+            print(f"FEFF calculation failed: {error_msg}")
         return False
-
-    finally:
-        # Always restore stdout/stderr
-        sys.stdout = original_stdout
-        sys.stderr = original_stderr
 
 
 def get_feff_numbered_files(feff_dir: Path) -> list[Path]:
@@ -596,36 +1016,45 @@ def cleanup_feff_output(feff_dir: Path, keep_essential: bool = True) -> int:
     return files_removed
 
 
-def read_feff_output(feff_dir: Path) -> tuple[object, object]:
-    """Read FEFF chi.dat output with fallback methods and improved error handling."""
-    try:
-        import numpy as np
-    except ImportError:
-        raise ImportError("NumPy is required for reading FEFF output") from None
+def read_feff_output(feff_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Read FEFF chi.dat output using larch.
 
-    from larch.io import read_ascii
+    Args:
+        feff_dir: Directory containing FEFF output files
 
+    Returns:
+        Tuple of (chi, k) arrays where chi is complex and k is real
+
+    Raises:
+        FileNotFoundError: If chi.dat file is not found
+        ValueError: If data cannot be parsed or has wrong format
+    """
     chi_file = feff_dir / "chi.dat"
     if not chi_file.exists():
         raise FileNotFoundError(f"FEFF output {chi_file} not found")
 
     try:
         feff_data = read_ascii(str(chi_file))
-        return feff_data.chi, feff_data.k
-    except (OSError, ValueError, AttributeError) as read_error:
-        try:
-            data = np.loadtxt(str(chi_file), comments="#", usecols=(0, 1, 2))
-            k = data[:, 0]
-            mag = data[:, 2]
-            phase = data[:, 3]
 
-            # reconstruct complex chi
-            chi = mag * np.exp(1j * phase)
-            return chi, k
-        except (OSError, ValueError, IndexError) as fallback_error:
-            error_msg = (
-                f"Failed to read {chi_file}:\n"
-                f"Primary error: {read_error}\n"
-                f"Fallback error: {fallback_error}"
+        if not hasattr(feff_data, "k"):
+            raise AttributeError("FEFF data missing required 'k' attribute")
+
+        # FEFF format: reconstruct complex chi from mag and phase if available
+        if hasattr(feff_data, "mag") and hasattr(feff_data, "phase"):
+            import numpy as np
+
+            chi = feff_data.mag * np.exp(1j * feff_data.phase)
+            return chi, feff_data.k
+
+        # Fallback: use chi directly (may be real or complex)
+        elif hasattr(feff_data, "chi"):
+            return feff_data.chi, feff_data.k
+
+        else:
+            raise AttributeError(
+                "FEFF data missing chi information. "
+                "Expected either (mag, phase) or (chi) columns"
             )
-            raise Exception(error_msg) from None
+
+    except (OSError, ValueError, AttributeError) as err:
+        raise ValueError(f"Error reading FEFF output {chi_file}: {err}") from err

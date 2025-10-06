@@ -262,8 +262,6 @@ class MockHelpers:
         import tempfile
         from unittest.mock import Mock
 
-        from larch_cli_wrapper.wrapper import ProcessingResult
-
         temp_dir = tempfile.mkdtemp()
         temp_output = Path(temp_dir) / "output"
         temp_plot = Path(temp_dir) / "plot.pdf"
@@ -274,11 +272,6 @@ class MockHelpers:
         mock_wrapper.run_feff.return_value = True
         mock_wrapper.process_feff_output.return_value = Mock()
         mock_wrapper.plot_results.return_value = {"pdf": temp_plot}
-        mock_wrapper.process.return_value = ProcessingResult(
-            exafs_group=Mock(),
-            plot_paths={"pdf": temp_plot},
-            processing_mode="single_frame",
-        )
         mock_wrapper.print_diagnostics.return_value = None
         mock_wrapper.get_cache_info.return_value = {
             "enabled": True,

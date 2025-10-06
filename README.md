@@ -42,9 +42,6 @@ You can also get it by going to GitHub: https://github.com/stfc/alc-dls-exafs, c
 ```bash
 # Install with pip (recommended). Run this from within the project directory
 pip install .
-
-# Or with all optional dependencies
-pip install ".[full]"
 ```
 
 #### Windows
@@ -52,9 +49,6 @@ pip install ".[full]"
 ```powershell
 # Install with pip (recommended). Run this from within the project directory
 pip install .
-
-# Or with all optional dependencies
-pip install ".[full]"
 ```
 
 Note that if you don't have `git` available, you can download the package directly from GitHub (https://github.com/stfc/alc-dls-exafs) and then follow the above steps. Alternatively, you can install the package directly from GitHub like this:
@@ -90,41 +84,79 @@ marimo edit notebooks/exafs_pipeline.py
 
 The CLI provides a streamlined interface for batch processing:
 
-#### Process a Single Structure
+#### Available Commands
 
 ```bash
-# Basic EXAFS processing (defaults to K-edge)
-larch-cli process structure.cif Fe
+# Show system information and check dependencies
+larch-cli info
 
+# Create example configuration file
+larch-cli config-example --output my_config.yaml --preset publication
+
+# Generate FEFF input files only
+larch-cli generate structure.cif Fe --output feff_inputs/
+
+# Run FEFF calculations in directories
+larch-cli run-feff feff_inputs/ --parallel --workers 4
+
+# Analyze existing FEFF outputs and create plots
+larch-cli analyze outputs/ --plot-mode frames --show
+
+# Run complete pipeline (generate + run + analyze)
+larch-cli pipeline structure.cif Fe --output results/
+
+# Manage cache
+larch-cli cache info
+larch-cli cache clear
 ```
 
-This will generate the FEFF input file for your structure, assuming e.g. K-edge and taking the first Fe site in the structure. It will then run FEFF8L and process the output (generate a plot).
+#### Detailed Examples
 
-#### Process a Trajectory
+##### Complete Pipeline Processing
 
 ```bash
-# Process MD trajectory
-larch-cli process trajectory.xyz Fe \
-  --trajectory \
-  --output results/trajectory/ \
-  --parallel \
-  --workers 4
+# Basic EXAFS processing (defaults to K-edge, first site)
+larch-cli pipeline structure.cif Fe
+
+# Process all Fe sites in structure with custom settings
+larch-cli pipeline structure.cif Fe --all-sites --kmax 15 --radius 8.0
+
+# Process trajectory with parallel execution
+larch-cli pipeline trajectory.xyz Fe --all-frames --parallel --workers 4
+
+# Publication-quality processing with custom output
+larch-cli pipeline structure.cif Fe --preset publication --output results/ --style publication
 ```
 
-This will generate FEFF input files for each structure in a trajectory, and run FEFF8L on each one. It will run up to 4 workers in parallel (each one dealing with a separate structure). It will then average the XAFS for all structures and plot the results.
-
-#### Generate FEFF Input Only
+##### Step-by-Step Processing
 
 ```bash
-# Generate FEFF input files without running calculation
-larch-cli generate structure.cif Fe --output feff_input/
+# Step 1: Generate FEFF input files
+larch-cli generate structure.cif Fe --output feff_inputs/ --radius 6.0 --edge K
+
+# Step 2: Run FEFF calculations
+larch-cli run-feff feff_inputs/ --parallel --workers 2
+
+# Step 3: Analyze results and create plots
+larch-cli analyze feff_inputs/ --output plots/ --plot-mode sites --show
 ```
 
-#### Run FEFF Calculation
+##### Advanced Options
 
 ```bash
-# Run FEFF in existing directory
-larch-cli run-feff feff_input/
+# Process specific sites by index
+larch-cli pipeline structure.cif "0,1,2" --output multi_site/
+
+# Use custom configuration file
+larch-cli pipeline structure.cif Fe --config my_config.yaml
+
+# Force recalculation and keep intermediate files
+larch-cli pipeline structure.cif Fe --force --no-cleanup
+
+# Different plot modes and styles
+larch-cli analyze outputs/ --plot-mode overall --style presentation
+larch-cli analyze outputs/ --plot-mode frames --with-phase
+larch-cli analyze outputs/ --plot-mode sites --kweight 3
 ```
 
 ### Configuration Files
@@ -152,7 +184,7 @@ user_tag_settings:
 You can create a `config.yaml` file in your working directory to customize the pipeline settings. You can then use this by setting the `--config` option when running the CLI commands. For example:
 
 ```bash
-larch-cli process structure.cif Fe --config config.yaml
+larch-cli pipeline structure.cif Fe --config config.yaml
 ```
 
 ## Dependencies
@@ -165,9 +197,7 @@ larch-cli process structure.cif Fe --config config.yaml
 - **matplotlib** ≥ 3.5 - Plotting
 - **marimo** ≥ 0.14.16 - Interactive notebooks
 - **ase** ≥ 3.22.1 - Atomic structure handling
-
-### Optional Dependencies
-- **pymatgen** ≥ 2022.7 - Alternative FEFF input generator
+- **pymatgen** ≥ 2025.1.24 -  FEFF input generator
 
 ## Contributing
 
