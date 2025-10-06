@@ -21,12 +21,7 @@ except ImportError:
     YAML_AVAILABLE = False
 
 from larch.io import read_ascii
-
-try:
-    LARCH_IO_AVAILABLE = True
-except ImportError:
-    LARCH_IO_AVAILABLE = False
-
+from larch.xafs.feffrunner import feff8l
 
 # Maximum number of absorber sites to process to avoid excessive computation
 LARGE_NUMBER_OF_SITES = 100
@@ -839,10 +834,7 @@ def run_feff_calculation(
 
         # Try to use larch feff8l if available, but with encoding fix
         try:
-            # Import and use larch's feff8l, but ensure proper encoding
-            from larch.xafs.feffrunner import feff8l
-
-            # Backup original stdout encoding
+            # Use larch's feff8l, but ensure proper encoding
 
             if not verbose:
                 # Don't redirect stdout/stderr for non-verbose mode

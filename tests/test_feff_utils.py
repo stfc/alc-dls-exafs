@@ -561,7 +561,7 @@ class TestFeffCalculation:
             with pytest.raises(FileNotFoundError, match="FEFF input file .* not found"):
                 run_feff_calculation(feff_dir, verbose=False)
 
-    @patch("larch.xafs.feffrunner.feff8l")
+    @patch("larch_cli_wrapper.feff_utils.feff8l")
     def test_run_feff_calculation_success(self, mock_feff8l):
         """Test successful FEFF calculation when no chi.dat exists."""
         mock_feff8l.return_value = True
@@ -638,7 +638,6 @@ class TestFeffOutput:
             with pytest.raises(FileNotFoundError, match="FEFF output .* not found"):
                 read_feff_output(feff_dir)
 
-    @patch("larch_cli_wrapper.feff_utils.LARCH_IO_AVAILABLE", True)
     @patch("larch_cli_wrapper.feff_utils.read_ascii")
     def test_read_feff_output_larch_success(self, mock_read_ascii):
         """Test successful read_feff_output with larch."""
@@ -662,7 +661,6 @@ class TestFeffOutput:
             np.testing.assert_array_equal(chi, mock_data.chi)
             np.testing.assert_array_equal(k, mock_data.k)
 
-    @patch("larch_cli_wrapper.feff_utils.LARCH_IO_AVAILABLE", True)
     @patch("larch_cli_wrapper.feff_utils.read_ascii")
     def test_read_feff_output_mag_phase_format(self, mock_read_ascii):
         """Test read_feff_output with FEFF mag/phase format."""
