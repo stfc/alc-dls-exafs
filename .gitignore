@@ -54,6 +54,9 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 
+# mypy
+.mypy_cache/
+
 # # FEFF Output Files
 # # General FEFF directories and files
 # feff/
