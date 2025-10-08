@@ -17,7 +17,7 @@ def _():
     from ase import Atoms
     from ase.io import read
 
-    from notebooks.marimo_utils import (
+    from larch_cli_wrapper.marimo_utils import (
         file_upload,
         input_kwargs_text,
         model_style,
