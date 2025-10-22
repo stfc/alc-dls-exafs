@@ -32,7 +32,16 @@ logger = logging.getLogger("larch_wrapper")
 LARGE_NUMBER_OF_SITES = 100
 
 # FEFF card fields that can be set to null in YAML to disable them
-FEFF_CARD_FIELDS = {"control", "print", "s02", "scf", "exchange", "nleg", "exafs"}
+FEFF_CARD_FIELDS = {
+    "control",
+    "print",
+    "s02",
+    "scf",
+    "exchange",
+    "nleg",
+    "exafs",
+    "criteria",
+}
 
 
 def _load_presets() -> dict[str, dict[str, Any]]:
@@ -236,6 +245,7 @@ class FeffConfig:
     exchange: Any | None = 0
     nleg: Any | None = 6
     exafs: Any | None = None
+    criteria: Any | None = None
 
     delete_tags: list[str] | str | None = (
         None  # Additional tags to delete (COREHOLE tags always deleted automatically)
@@ -455,6 +465,7 @@ class FeffConfig:
             "EXCHANGE": self.exchange,
             "NLEG": self.nleg,
             "EXAFS": self.exafs,
+            "CRITERIA": self.criteria,
         }
 
         # Add normalized explicit fields (skip None values)
