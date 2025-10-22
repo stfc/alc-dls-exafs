@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 from ase import Atoms
+from ase.geometry import wrap_positions
 from larch import Group
 
 from .feff_utils import FeffConfig
@@ -684,3 +685,77 @@ class PipelineProcessor:
             "cache_files": cache_info["files"],
             "cache_size_mb": cache_info["size_mb"],
         }
+
+
+def average_structure(structures: list[Atoms]) -> Atoms:
+    """Compute the average atomic positions across an ASE trajectory.
+
+    This function averages the atomic positions of multiple ASE Atoms objects,
+    correctly handling periodic boundary conditions.
+
+    It checks that all structures have the same atom types, number of atoms,
+    cell, and PBC settings.
+
+    It assumes that there are no large diffusive motions that
+    would cause atoms to jump > half the cell length from the initial frame.
+
+    Args:
+        structures : list[ase.Atoms]
+            List of ASE Atoms objects (e.g. frames from a trajectory).
+            All structures must have the same atom types, number of atoms,
+            cell, and PBC.
+
+    Returns:
+        avg_structure : ase.Atoms
+            A new ASE Atoms object containing the averaged structure.
+    """
+    if not structures:
+        raise ValueError("No structures provided")
+
+    ref_structure = structures[0]
+    n_atoms = len(ref_structure)
+    ref_symbols = ref_structure.get_chemical_symbols()
+    pbc = ref_structure.get_pbc()
+    cell = ref_structure.get_cell()
+
+    # Consistency checks
+    for i, s in enumerate(structures):
+        if len(s) != n_atoms:
+            raise ValueError(f"Structure {i} has {len(s)} atoms, expected {n_atoms}")
+        if s.get_chemical_symbols() != ref_symbols:
+            raise ValueError(f"Structure {i} has different atom types")
+        if not np.allclose(s.get_cell(), cell, atol=1e-10):
+            raise ValueError(f"Structure {i} has a different cell")
+        if not np.array_equal(s.get_pbc(), pbc):
+            raise ValueError(f"Structure {i} has different PBC")
+
+    # Copy reference as output container
+    avg_structure = ref_structure.copy()
+
+    # Convert all positions to fractional coordinates
+    frac_coords = np.array([s.get_scaled_positions() for s in structures])
+
+    # Unwrap fractional coordinates along trajectory to remove jumps
+    unwrapped_frac = np.zeros_like(frac_coords)
+    for atom_idx in range(n_atoms):
+        for coord_idx in range(3):
+            if pbc[coord_idx]:  # Only unwrap in periodic directions
+                unwrapped_frac[:, atom_idx, coord_idx] = np.unwrap(
+                    frac_coords[:, atom_idx, coord_idx], period=1.0
+                )
+            else:
+                unwrapped_frac[:, atom_idx, coord_idx] = frac_coords[
+                    :, atom_idx, coord_idx
+                ]
+
+    # Average in fractional coordinates
+    avg_frac = np.mean(unwrapped_frac, axis=0)
+
+    # Convert back to Cartesian coordinates using modern ASE Cell API
+    avg_positions = cell.cartesian_positions(avg_frac)
+
+    # Wrap positions back into unit cell
+    avg_positions = wrap_positions(avg_positions, cell, pbc=pbc)
+
+    avg_structure.set_positions(avg_positions)
+    return avg_structure
