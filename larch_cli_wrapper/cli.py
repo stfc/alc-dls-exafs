@@ -5,6 +5,7 @@ from enum import Enum
 from pathlib import Path
 
 import typer
+from ase import Atoms
 from ase.io import read as ase_read
 from rich.console import Console
 from rich.progress import (
@@ -1034,6 +1035,21 @@ def run_full_pipeline(
     cache_dir: Path | None = typer.Option(
         None, "--cache-dir", help="Cache directory for FEFF results"
     ),
+    precompute_potentials: bool = typer.Option(
+        False,
+        "--reuse-potentials/--no-reuse-potentials",
+        help="Reuse precomputed potentials for faster calculations "
+        "i.e. compute potentials once for each specified site and "
+        "reuse for these for all frames. This is much faster for trajectories. "
+        "You may want to also specify --potentials-structure to provide a "
+        "specific structure file for the potentials generation.",
+    ),
+    precompute_potentials_structure_path: Path | None = typer.Option(
+        None,
+        "--potentials-structure",
+        help="Structure file to use for precomputing potentials "
+        "(defaults to average of input structures if not provided).",
+    ),
     # FEFF Input Parameters
     radius: float | None = typer.Option(
         None, "--radius", help="Cluster radius in Angstroms"
@@ -1078,6 +1094,9 @@ def run_full_pipeline(
 
     Use --all-sites with element symbol to process all matching sites.
     Use --all-frames to process all frames in trajectory.
+    Use --reuse-potentials to speed up trajectory calculations by precomputing
+    potentials once and reusing them (recommended for trajectories with many frames).
+    Use --potentials-structure to specify a structure file for precomputing potentials.
     Use --ase-kwargs to pass additional arguments to ase.io.read():
     - '{"index": ":"}' to read all frames
     - '{"index": "0:10"}' to read first 10 frames
@@ -1144,6 +1163,29 @@ def run_full_pipeline(
         structures = atoms
         console.print(f"[dim]Loaded {len(structures)} frames from file[/dim]")
 
+        # Optionally load structure to precompute potentials for
+        precompute_potentials_structure: Atoms | None = None
+        if precompute_potentials_structure_path:
+            if not precompute_potentials_structure_path.exists():
+                console.print(
+                    f"[red]Error: Precompute structure file "
+                    f"{precompute_potentials_structure_path} not found[/red]"
+                )
+                raise typer.Exit(1)
+
+            precompute_atoms = ase_read(str(precompute_potentials_structure_path))
+            if not isinstance(precompute_atoms, Atoms):
+                console.print(
+                    "[red]Error: Precompute structure file must contain "
+                    "a single structure in a common format (i.e. ASE-readable)[/red]"
+                )
+                raise typer.Exit(1)
+
+            precompute_potentials_structure = precompute_atoms
+            console.print(
+                "[dim]Using provided structure for precomputing potentials[/dim]"
+            )
+
         # Resolve output_dir to absolute path
         # immediately to avoid issues with CWD changes
         output_dir = output_dir.resolve()
@@ -1197,6 +1239,8 @@ def run_full_pipeline(
                     output_dir=output_dir,
                     parallel=parallel,
                     progress_callback=progress_callback,
+                    precompute_potentials=precompute_potentials,
+                    precompute_potentials_structure=precompute_potentials_structure,
                 )
             )
 

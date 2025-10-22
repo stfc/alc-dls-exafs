@@ -266,8 +266,8 @@ class TestInputGenerator:
         assert generator.config == test_config
         assert generator.logger is not None
 
-    @patch("larch_cli_wrapper.feff_utils.normalize_absorbers")
-    @patch("larch_cli_wrapper.feff_utils.generate_multi_site_feff_inputs")
+    @patch("larch_cli_wrapper.pipeline.normalize_absorbers")
+    @patch("larch_cli_wrapper.pipeline.generate_multi_site_feff_inputs")
     def test_generate_single_site_inputs(
         self,
         mock_generate,
@@ -492,54 +492,102 @@ class TestFeffExecutor:
         # Should not raise any exceptions
         executor._save_to_cache("test_key", np.array([1, 2, 3]), np.array([4, 5, 6]))
 
-    @patch("larch_cli_wrapper.feff_utils.run_multi_site_feff_calculations")
+    @patch("larch_cli_wrapper.feff_utils.read_feff_output")
+    @patch("larch_cli_wrapper.pipeline.run_multi_site_feff_calculations")
     def test_execute_batch_no_cache(
         self,
         mock_run_feff,
+        mock_read_output,
         sample_batch,
         temp_output_dir,
     ):
         """Test executing batch without caching."""
-        # Setup mocks
-        mock_run_feff.return_value = [(temp_output_dir, True)]
+        # Get the actual input file and directory from the sample batch
+        task = sample_batch.tasks[0]
+        input_file = task.input_file
+        feff_dir = task.feff_dir
 
+        # Setup mocks - return the actual directory from the sample batch
+        mock_run_feff.return_value = [(feff_dir, True)]
+        mock_read_output.return_value = (
+            np.array([1.0 + 2.0j, 3.0 + 4.0j, 5.0 + 6.0j]),
+            np.array([1.0, 2.0, 3.0]),
+        )
+
+        # Create executor with no cache (forces all tasks to run)
         executor = FeffExecutor(cache_dir=None)
+
+        # Execute batch - with cache_dir=None, _load_cached_result always returns None
         results = executor.execute_batch(sample_batch, parallel=False)
 
-        # Verify FEFF execution called
+        # Verify FEFF execution was called
         mock_run_feff.assert_called_once()
-        call_args = mock_run_feff.call_args
-        assert len(call_args[1]["input_files"]) == 1
-        assert call_args[1]["parallel"] is False
 
-        # Verify results
+        # Check call arguments
+        call_kwargs = mock_run_feff.call_args.kwargs
+        assert "input_files" in call_kwargs
+        assert len(call_kwargs["input_files"]) == 1
+        assert call_kwargs["input_files"][0] == input_file
+        assert call_kwargs["parallel"] is False
+        assert call_kwargs["cleanup"] == sample_batch.config.cleanup_feff_files
+        assert call_kwargs["max_workers"] == executor.max_workers
+
+        # Verify read_feff_output was called with the correct directory
+        mock_read_output.assert_called_once_with(feff_dir)
+
+        # Verify results structure
         assert len(results) == 1
-        task_id = list(results.keys())[0]
-        assert results[task_id] is True
+        assert task.task_id in results
+        assert results[task.task_id] is True
 
-    @patch("larch_cli_wrapper.feff_utils.run_multi_site_feff_calculations")
     @patch("larch_cli_wrapper.feff_utils.read_feff_output")
+    @patch("larch_cli_wrapper.pipeline.run_multi_site_feff_calculations")
     def test_execute_batch_with_caching(
         self,
-        mock_read_output,
         mock_run_feff,
+        mock_read_output,
         sample_batch,
         temp_output_dir,
     ):
         """Test executing batch with caching enabled."""
-        # Setup mocks
-        mock_run_feff.return_value = [(temp_output_dir, True)]
-        mock_read_output.return_value = (np.array([1, 2, 3]), np.array([4, 5, 6]))
+        # Get the actual task from the sample batch
+        task = sample_batch.tasks[0]
+        input_file = task.input_file
+        feff_dir = task.feff_dir
 
+        # Setup mocks
+        mock_run_feff.return_value = [(feff_dir, True)]
+        mock_read_output.return_value = (
+            np.array([1.0 + 2.0j, 3.0 + 4.0j, 5.0 + 6.0j]),
+            np.array([1.0, 2.0, 3.0]),
+        )
+
+        # Create executor with caching enabled
         executor = FeffExecutor(cache_dir=temp_output_dir / "cache")
 
-        with patch.object(executor, "_save_to_cache") as mock_save:
-            results = executor.execute_batch(sample_batch, parallel=True)
+        # Execute batch - first run should call FEFF and cache the result
+        results = executor.execute_batch(sample_batch, parallel=True)
 
-            # Verify caching called
-            mock_save.assert_called_once()
+        # Verify FEFF execution was called (cache miss on first run)
+        mock_run_feff.assert_called_once()
 
+        # Check call arguments
+        call_kwargs = mock_run_feff.call_args.kwargs
+        assert call_kwargs["parallel"] is True
+        assert len(call_kwargs["input_files"]) == 1
+        assert call_kwargs["input_files"][0] == input_file
+
+        # Verify read_feff_output was called to read results for caching
+        mock_read_output.assert_called_once_with(feff_dir)
+
+        # Verify results
         assert len(results) == 1
+        assert task.task_id in results
+        assert results[task.task_id] is True
+
+        # Verify cache file was created
+        cache_files = list((temp_output_dir / "cache").glob("*.pkl"))
+        assert len(cache_files) > 0, "Cache file should have been created"
 
     def test_execute_batch_with_cached_hit(self, sample_batch, temp_output_dir):
         """Test executing batch with cache hit."""
@@ -981,9 +1029,9 @@ class TestPipelineProcessor:
 class TestPipelineIntegration:
     """Integration tests for the complete pipeline."""
 
-    @patch("larch_cli_wrapper.feff_utils.generate_multi_site_feff_inputs")
-    @patch("larch_cli_wrapper.feff_utils.normalize_absorbers")
-    @patch("larch_cli_wrapper.feff_utils.run_multi_site_feff_calculations")
+    @patch("larch_cli_wrapper.pipeline.generate_multi_site_feff_inputs")
+    @patch("larch_cli_wrapper.pipeline.normalize_absorbers")
+    @patch("larch_cli_wrapper.pipeline.run_multi_site_feff_calculations")
     @patch("larch_cli_wrapper.feff_utils.read_feff_output")
     @patch("larch.xafs.xftf")
     def test_full_pipeline_single_structure(
@@ -1039,9 +1087,9 @@ class TestPipelineIntegration:
         assert hasattr(final_group, "k")
         assert hasattr(final_group, "chi")
 
-    @patch("larch_cli_wrapper.feff_utils.generate_multi_site_feff_inputs")
-    @patch("larch_cli_wrapper.feff_utils.normalize_absorbers")
-    @patch("larch_cli_wrapper.feff_utils.run_multi_site_feff_calculations")
+    @patch("larch_cli_wrapper.pipeline.generate_multi_site_feff_inputs")
+    @patch("larch_cli_wrapper.pipeline.normalize_absorbers")
+    @patch("larch_cli_wrapper.pipeline.run_multi_site_feff_calculations")
     @patch("larch_cli_wrapper.feff_utils.read_feff_output")
     @patch("larch.xafs.xftf")
     @patch("larch_cli_wrapper.exafs_data.create_averaged_group")

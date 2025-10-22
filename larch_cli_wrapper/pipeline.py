@@ -9,13 +9,19 @@ This module implements a clean separation of concerns:
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from shutil import copy2
 
 import numpy as np
 from ase import Atoms
 from ase.geometry import wrap_positions
 from larch import Group
 
-from .feff_utils import FeffConfig
+from .feff_utils import (
+    FeffConfig,
+    generate_multi_site_feff_inputs,
+    normalize_absorbers,
+    run_multi_site_feff_calculations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +57,20 @@ class FeffTask:
 
 @dataclass
 class FeffBatch:
-    """Collection of FEFF tasks to be executed."""
+    """Collection of FEFF tasks to be executed.
+
+    This may contain a pre-compute task list that will generate potentials
+    to be re-used by subsequent tasks.
+    """
 
     tasks: list[FeffTask]
     output_dir: Path
     config: FeffConfig
+    precompute_tasks: list[FeffTask] = None
+
+    def get_precompute_tasks(self) -> list[FeffTask]:
+        """Get pre-compute tasks, if any."""
+        return self.precompute_tasks if self.precompute_tasks else []
 
     def get_tasks_by_frame(self) -> dict[int, list[FeffTask]]:
         """Group tasks by frame index."""
@@ -106,8 +121,6 @@ class InputGenerator:
         Returns:
             FeffBatch containing all tasks for this structure
         """
-        from .feff_utils import generate_multi_site_feff_inputs, normalize_absorbers
-
         # Normalize absorber specification
         absorber_indices = normalize_absorbers(structure, absorber)
 
@@ -138,6 +151,8 @@ class InputGenerator:
         structures: list[Atoms],
         absorber: str | int | list[int],
         output_dir: Path,
+        precompute_potentials: bool = False,
+        precompute_potentials_structure: Atoms = None,
     ) -> FeffBatch:
         """Generate inputs for trajectory with multiple frames.
 
@@ -145,23 +160,121 @@ class InputGenerator:
             structures: List of ASE Atoms objects (trajectory frames)
             absorber: Absorber specification
             output_dir: Base output directory
+            precompute_potentials: Whether to precompute potentials
+            precompute_potentials_structure: Structure to use for
+                                            precomputing potentials.
+                                            If None, uses the average
+                                            structure for all frames.
 
         Returns:
-            FeffBatch containing all tasks for all frames
+            FeffBatch containing all tasks for all frames,
+              with optional precompute tasks
         """
+        precompute_tasks = []
+        precompute_output_dir = None
+
+        if precompute_potentials:
+            # Determine structure for pre-computing potentials
+            if precompute_potentials_structure is None:
+                # Compute average structure
+                self.logger.info(
+                    "Computing average structure for pre-computing potentials"
+                )
+                precompute_potentials_structure = average_structure(structures)
+
+            self.logger.info("Pre-computing potentials for trajectory")
+            # Create pre-compute tasks
+            precompute_output_dir = output_dir / "precomputed_potentials"
+            precompute_output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Write structure used for pre-computing potentials
+            structure_file = precompute_output_dir / "precompute_structure.extxyz"
+            precompute_potentials_structure.write(structure_file)
+
+            # Create config for precomputing (only potentials, no paths)
+            # CONTROL: ipot=1, ixsph=1, ifms=1, ipaths=0, igenfmt=0, iff2x=0
+            precompute_config = FeffConfig(**vars(self.config))
+            precompute_config.control = "1 1 1 0 0 0"
+
+            # Temporarily swap config to generate precompute inputs
+            original_config = self.config
+            self.config = precompute_config
+
+            try:
+                # Normalize absorber for the precompute structure
+                absorber_indices = normalize_absorbers(
+                    precompute_potentials_structure, absorber
+                )
+
+                # Generate FEFF inputs for precompute
+                input_files = generate_multi_site_feff_inputs(
+                    atoms=precompute_potentials_structure,
+                    absorber_indices=absorber_indices,
+                    base_output_dir=precompute_output_dir,
+                    config=precompute_config,
+                )
+
+                # Create precompute tasks
+                absorber_element = precompute_potentials_structure[
+                    absorber_indices[0]
+                ].symbol
+                for i, input_file in enumerate(input_files):
+                    task = FeffTask(
+                        input_file=input_file.resolve(),
+                        site_index=absorber_indices[i],
+                        frame_index=-1,  # Special marker for precompute tasks
+                        absorber_element=absorber_element,
+                    )
+                    precompute_tasks.append(task)
+
+                self.logger.info(
+                    f"Created {len(precompute_tasks)} precompute tasks for potentials"
+                )
+            finally:
+                # Restore original config
+                self.config = original_config
+
+            # Now prepare config for main tasks (paths only, reuse potentials)
+            # CONTROL: ipot=0, ixsph=0, ifms=0, ipaths=1, igenfmt=1, iff2x=1
+            main_config = FeffConfig(**vars(self.config))
+            main_config.control = "0 0 0 1 1 1"
+
+            self.logger.info(
+                "Generating main FEFF tasks to re-use pre-computed potentials"
+            )
+        else:
+            # No precompute - use original config
+            main_config = self.config
+
+        # Generate tasks for all frames
         all_tasks = []
 
-        for frame_idx, structure in enumerate(structures):
-            frame_dir = output_dir / f"frame_{frame_idx:04d}"
-            frame_batch = self.generate_single_site_inputs(
-                structure=structure,
-                absorber=absorber,
-                output_dir=frame_dir,
-                frame_index=frame_idx,
-            )
-            all_tasks.extend(frame_batch.tasks)
+        # Temporarily swap to main config if we're precomputing
+        if precompute_potentials:
+            original_config = self.config
+            self.config = main_config
 
-        return FeffBatch(tasks=all_tasks, output_dir=output_dir, config=self.config)
+        try:
+            for frame_idx, structure in enumerate(structures):
+                frame_dir = output_dir / f"frame_{frame_idx:04d}"
+                frame_batch = self.generate_single_site_inputs(
+                    structure=structure,
+                    absorber=absorber,
+                    output_dir=frame_dir,
+                    frame_index=frame_idx,
+                )
+                all_tasks.extend(frame_batch.tasks)
+        finally:
+            if precompute_potentials:
+                # Restore original config
+                self.config = original_config
+
+        return FeffBatch(
+            tasks=all_tasks,
+            output_dir=output_dir,
+            config=self.config,
+            precompute_tasks=precompute_tasks if precompute_potentials else None,
+        )
 
 
 class FeffExecutor:
@@ -253,6 +366,103 @@ class FeffExecutor:
             f"{' with caching' if self.cache_dir else ''}"
         )
 
+        # Execute precompute tasks first if they exist
+        if batch.precompute_tasks:
+            self.logger.info(
+                f"Executing {len(batch.precompute_tasks)} pre-compute "
+                f"FEFF calculations for potentials"
+            )
+
+            # Execute precompute without caching
+            precompute_input_files = [
+                task.input_file for task in batch.precompute_tasks
+            ]
+            precompute_results = run_multi_site_feff_calculations(
+                input_files=precompute_input_files,
+                cleanup=batch.config.cleanup_feff_files,
+                parallel=parallel,
+                max_workers=self.max_workers,
+                progress_callback=None,  # Don't report precompute progress separately
+            )
+
+            # Check all precompute tasks succeeded
+            all_succeeded = all(success for _, success in precompute_results)
+            if not all_succeeded:
+                failed_count = sum(
+                    1 for _, success in precompute_results if not success
+                )
+                self.logger.error(
+                    f"{failed_count} precompute tasks failed - "
+                    "main calculations may fail"
+                )
+            else:
+                self.logger.info("All precompute tasks completed successfully")
+
+                # NOW copy the precomputed potential files to all main task directories
+                self.logger.info(
+                    "Copying precomputed potential files to main task directories"
+                )
+                precompute_dir = batch.output_dir / "precomputed_potentials"
+                files_copied = 0
+
+                for task in batch.tasks:
+                    # Find the corresponding precompute site directory
+                    precompute_site_dir = precompute_dir / f"site_{task.site_index:04d}"
+
+                    if not precompute_site_dir.exists():
+                        self.logger.warning(
+                            "Precompute directory not found for "
+                            f"site {task.site_index}: {precompute_site_dir}"
+                        )
+                        continue
+
+                    # Create main task directory if needed
+                    task.feff_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Copy essential potential files that FEFF needs to reuse potentials
+                    # These files are created by CONTROL 1 1 1 0 0 0
+                    # and needed by CONTROL 0 0 0 1 1 1
+                    potential_files = [
+                        # Core potential files
+                        "phase.pad",
+                        "pot.pad",
+                        # JSON files needed for path calculation
+                        "xsect.json",
+                        "xsph.json",
+                        "genfmt.json",
+                        "ff2x.json",
+                        "geom.json",
+                        "atoms.json",
+                        "pot.json",
+                        "global.json",
+                        "path.json",
+                        "libpotph.json",
+                        # Optional but useful
+                        "POTENTIALS",
+                    ]
+
+                    for filename in potential_files:
+                        src = precompute_site_dir / filename
+                        dst = task.feff_dir / filename
+
+                        if src.exists():
+                            try:
+                                copy2(src, dst)
+                                files_copied += 1
+                                self.logger.debug(
+                                    f"Copied {filename} to {task.feff_dir}"
+                                )
+                            except OSError as e:
+                                self.logger.error(f"Failed to copy {filename}: {e}")
+                        else:
+                            self.logger.warning(f"Required file not found: {src}")
+
+                expected_file_count = len(potential_files) * len(batch.tasks)
+                self.logger.info(
+                    f"Copied {files_copied} of {expected_file_count} "
+                    f"potential files across {len(batch.tasks)} main tasks"
+                )
+
         total_tasks = len(batch.tasks)
         completed_tasks = 0
 
@@ -323,8 +533,6 @@ class FeffExecutor:
 
         # Execute uncached calculations
         if tasks_to_run:
-            from .feff_utils import run_multi_site_feff_calculations
-
             input_files = [task.input_file for task, _ in tasks_to_run]
 
             # Create wrapper callback for FEFF calculations
@@ -594,10 +802,22 @@ class PipelineProcessor:
         output_dir: Path,
         parallel: bool = True,
         progress_callback: callable = None,
+        precompute_potentials: bool = False,
+        precompute_potentials_structure: Atoms = None,
         # site_weights: list[float] | None = None, # Not implemented yet
         # frame_weights: list[float] | None = None, # Not implemented yet
     ) -> tuple[Group, dict[int, Group], dict[int, Group], list[Group]]:
         """Process a trajectory with the three-stage approach.
+
+        Args:
+            structures: List of ASE Atoms objects (trajectory frames)
+            absorber: Absorber specification
+            output_dir: Base output directory
+            parallel: Whether to use parallel execution
+            progress_callback: Optional callback function
+            precompute_potentials: Whether to precompute potentials once and reuse
+            precompute_potentials_structure: Structure to use for
+                                             precompute (defaults to average)
 
         Returns:
             Tuple of (overall_average, frame_averages, actual_site_averages,
@@ -608,6 +828,8 @@ class PipelineProcessor:
             structures=structures,
             absorber=absorber,
             output_dir=output_dir,
+            precompute_potentials=precompute_potentials,
+            precompute_potentials_structure=precompute_potentials_structure,
         )
 
         # Stage B: Execute all FEFF calculations

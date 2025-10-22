@@ -1,6 +1,7 @@
 """Comprehensive tests for the feff_utils module."""
 
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -565,10 +566,9 @@ class TestFeffCalculation:
             with pytest.raises(FileNotFoundError, match="FEFF input file .* not found"):
                 run_feff_calculation(feff_dir, verbose=False)
 
-    @patch("larch_cli_wrapper.feff_utils.feff8l")
-    def test_run_feff_calculation_success(self, mock_feff8l):
-        """Test successful FEFF calculation when no chi.dat exists."""
-        mock_feff8l.return_value = True
+    @patch("subprocess.run")
+    def test_run_feff_calculation_success(self, mock_run):
+        """Test successful FEFF calculation via subprocess."""
 
         with tempfile.TemporaryDirectory() as tmpdir:
             feff_dir = Path(tmpdir)
@@ -577,33 +577,20 @@ class TestFeffCalculation:
             input_file = feff_dir / "feff.inp"
             input_file.write_text("TITLE Test FEFF calculation\n")
 
-            # Do NOT create chi.dat - let the function call feff8l to create it
-
-            # Mock the file creation that feff8l would do
-            def mock_feff8l_side_effect(*args, **kwargs):
-                # Simulate feff8l creating a chi.dat file
+            def mock_run_side_effect(*args, **kwargs):
+                # Simulate feff8l creating expected output
                 chi_file = feff_dir / "chi.dat"
-                import numpy as np
-                from larch.io import write_ascii
+                chi_file.write_text("# Mock chi data\n3.0 0.1\n4.0 0.2\n")
+                return subprocess.CompletedProcess(args=args[0], returncode=0)
 
-                k_data = np.array([3.0, 4.0, 5.0])
-                chi_data = np.array([0.1, 0.2, 0.15])
-
-                write_ascii(
-                    str(chi_file),
-                    k_data,
-                    chi_data,
-                    header=["# FEFF output", "# k chi"],
-                    label="k chi",
-                )
-                return True
-
-            mock_feff8l.side_effect = mock_feff8l_side_effect
+            mock_run.side_effect = mock_run_side_effect
 
             result = run_feff_calculation(feff_dir, verbose=False)
 
             assert result is True
-            assert mock_feff8l.called
+            mock_run.assert_called_once()
+            # chi.dat should persist when cleanup keeps essential outputs
+            assert (feff_dir / "chi.dat").exists()
 
     @patch("larch_cli_wrapper.feff_utils.run_feff_calculation")
     def test_run_multi_site_feff_calculations(self, mock_run_feff):

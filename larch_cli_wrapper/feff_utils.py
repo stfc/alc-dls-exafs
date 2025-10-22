@@ -1,9 +1,12 @@
 """FEFF input generation utilities - Fixed for consistent output between methods."""
 
+import concurrent
 import json
 import logging
 import os
 import re
+import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,7 +27,6 @@ except ImportError:
     YAML_AVAILABLE = False
 
 from larch.io import read_ascii
-from larch.xafs.feffrunner import feff8l
 
 logger = logging.getLogger("larch_wrapper")
 
@@ -941,7 +943,7 @@ def run_multi_site_feff_calculations(
     cleanup: bool = True,
     parallel: bool = True,
     max_workers: int | None = None,
-    progress_callback: Callable = None,
+    progress_callback: Callable[[int, int], None] | None = None,
     timeout: int = 600,
     max_retries: int = 2,
 ) -> list[tuple[Path, bool]]:
@@ -959,13 +961,13 @@ def run_multi_site_feff_calculations(
             (default: 2)
 
     Returns:
-        List of (feff_dir, success) tuples
+        List of (feff_dir, success) tuples in the same order as input_files
     """
-    import concurrent.futures
-    import time
+    if not input_files:
+        return []
 
-    def run_single_calculation(input_file: Path) -> tuple[Path, bool]:
-        """Run FEFF calculation for a single site with retry logic."""
+    def run_with_retry(input_file: Path) -> tuple[Path, bool]:
+        """Run FEFF calculation with retry logic."""
         feff_dir = input_file.parent
 
         for attempt in range(max_retries + 1):
@@ -976,66 +978,84 @@ def run_multi_site_feff_calculations(
                     cleanup=cleanup,
                     timeout=timeout,
                 )
-
                 if success:
                     return feff_dir, True
 
-                # If not successful and not the last attempt, wait before retry
-                if attempt < max_retries:
-                    time.sleep(1 + attempt)  # Progressive backoff: 1s, 2s, 3s...
-
-            except (OSError, RuntimeError):
-                # Log the error but continue with retry logic
+                # Progressive backoff before retry (except on last attempt)
                 if attempt < max_retries:
                     time.sleep(1 + attempt)
-                else:
-                    # Final attempt failed
+
+            except (OSError, RuntimeError, TimeoutError):
+                # On final attempt, return failure
+                if attempt == max_retries:
                     return feff_dir, False
+                # Otherwise, wait and retry
+                time.sleep(1 + attempt)
 
         return feff_dir, False
+
+    # Determine if parallel execution is beneficial
+    use_parallel = parallel and len(input_files) > 1
+
+    if use_parallel:
+        return _run_parallel(
+            input_files, run_with_retry, max_workers, progress_callback
+        )
+    else:
+        return _run_sequential(input_files, run_with_retry, progress_callback)
+
+
+def _run_parallel(
+    input_files: list[Path],
+    task_fn: Callable[[Path], tuple[Path, bool]],
+    max_workers: int | None,
+    progress_callback: Callable[[int, int], None] | None,
+) -> list[tuple[Path, bool]]:
+    """Execute tasks in parallel using ThreadPoolExecutor."""
+    if max_workers is None:
+        cpu_count = os.cpu_count() or 4
+        max_workers = min(len(input_files), max(1, cpu_count // 2), 4)
 
     total_tasks = len(input_files)
     completed_count = 0
 
-    if parallel and len(input_files) > 1:
-        if max_workers is None:
-            # More conservative default: use fewer workers to reduce resource contention
-            cpu_count = os.cpu_count() or 4
-            max_workers = min(len(input_files), max(1, cpu_count // 2), 3)
-
-        results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_input = {
-                executor.submit(run_single_calculation, input_file): input_file
-                for input_file in input_files
-            }
-
-            # Process results as they complete
-            for future in concurrent.futures.as_completed(future_to_input):
-                result = future.result()
-                results.append(result)
-                completed_count += 1
-
-                # Report progress
-                if progress_callback:
-                    progress_callback(completed_count, total_tasks)
-
-        # Reorder results to match original input order
-        input_to_result = {
-            future_to_input[future]: future.result() for future in future_to_input
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks and maintain order mapping
+        future_to_input = {
+            executor.submit(task_fn, input_file): input_file
+            for input_file in input_files
         }
-        results = [input_to_result[input_file] for input_file in input_files]
-    else:
-        results = []
-        for input_file in input_files:
-            result = run_single_calculation(input_file)
-            results.append(result)
-            completed_count += 1
 
-            # Report progress for sequential execution
+        # Collect results as they complete (for progress tracking)
+        input_to_result = {}
+        for future in concurrent.futures.as_completed(future_to_input):
+            input_file = future_to_input[future]
+            result = future.result()
+            input_to_result[input_file] = result
+
+            completed_count += 1
             if progress_callback:
                 progress_callback(completed_count, total_tasks)
+
+    # Return results in original input order
+    return [input_to_result[input_file] for input_file in input_files]
+
+
+def _run_sequential(
+    input_files: list[Path],
+    task_fn: Callable[[Path], tuple[Path, bool]],
+    progress_callback: Callable[[int, int], None] | None,
+) -> list[tuple[Path, bool]]:
+    """Execute tasks sequentially."""
+    total_tasks = len(input_files)
+    results = []
+
+    for idx, input_file in enumerate(input_files, start=1):
+        result = task_fn(input_file)
+        results.append(result)
+
+        if progress_callback:
+            progress_callback(idx, total_tasks)
 
     return results
 
@@ -1099,11 +1119,11 @@ def generate_feff_input_multi(
 
 def run_feff_calculation(
     feff_dir: Path,
-    verbose: bool = False,
+    verbose: bool = True,
     cleanup: bool = True,
     timeout: int = 600,
 ) -> bool:
-    """Run FEFF calculation with robust encoding handling.
+    """Run FEFF calculation with robust error handling.
 
     Args:
         feff_dir: Directory containing feff.inp
@@ -1114,145 +1134,141 @@ def run_feff_calculation(
     Returns:
         True if calculation succeeded, False otherwise
     """
-    import shutil
-    import subprocess
-    import sys
-
     feff_dir = Path(feff_dir)
     input_path = feff_dir / "feff.inp"
     log_path = feff_dir / "feff.log"
     chi_file = feff_dir / "chi.dat"
+    phase_file = feff_dir / "phase.pad"
+    pot_file = feff_dir / "pot.pad"
 
     if not input_path.exists():
         raise FileNotFoundError(f"FEFF input file {input_path} not found")
 
     try:
-        # Create basic log
-        with open(log_path, "w", encoding="utf-8", errors="replace") as log_file:
-            log_file.write(f"FEFF calculation started at {datetime.now()}\n")
-            log_file.write(f"Input file: {input_path}\n")
-            log_file.write(f"Working directory: {feff_dir}\n")
-            log_file.write("-" * 50 + "\n\n")
+        # Initialize log file
+        _write_log_header(log_path, input_path, feff_dir)
 
-        # Try to use larch feff8l if available, but with encoding fix
-        try:
-            # Use larch's feff8l, but ensure proper encoding
+        # Run FEFF calculation
+        feff_command = ["feff8l"]
+        if verbose:
+            feff_command.append("-v")
 
-            if not verbose:
-                # Don't redirect stdout/stderr for non-verbose mode
-                # Instead, let feff8l handle its own output and capture it differently
-                os.environ["PYTHONIOENCODING"] = "utf-8"
+        _run_feff_subprocess(feff_command, feff_dir, log_path, timeout)
 
-                # Run with verbose=False but don't redirect streams
-                result = feff8l(folder=str(feff_dir), feffinp="feff.inp", verbose=False)
-            else:
-                # For verbose mode, ensure stdout has encoding
-                if not hasattr(sys.stdout, "encoding") or sys.stdout.encoding is None:
-                    sys.stdout.encoding = "utf-8"
-                result = feff8l(
-                    folder=str(feff_dir), feffinp="feff.inp", verbose=verbose
-                )
-
-        except Exception as larch_error:
-            # If larch fails, try using subprocess as fallback
-            with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
-                log_file.write(f"Larch feff8l failed: {larch_error}\n")
-                log_file.write("Attempting subprocess fallback...\n")
-
-            # Look for feff executable
-            feff_exe = shutil.which("feff8l") or shutil.which("feff")
-            if feff_exe is None:
-                raise RuntimeError("No FEFF executable found in PATH") from larch_error
-
-            # Validate executable path for security
-            feff_exe = Path(feff_exe).resolve()
-            if not feff_exe.exists() or not feff_exe.is_file():
-                raise RuntimeError(
-                    f"FEFF executable not found or not a file: {feff_exe}"
-                ) from larch_error
-
-            # Run FEFF via subprocess
-            try:
-                env = os.environ.copy()
-                env["PYTHONIOENCODING"] = "utf-8"
-
-                # Run FEFF via subprocess
-                # S603: subprocess call is safe here - executable path is validated
-                proc = subprocess.run(  # noqa: S603
-                    [str(feff_exe)],  # Convert Path to string for subprocess
-                    cwd=str(feff_dir),
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    env=env,
-                    timeout=timeout,  # Configurable timeout (default 10 minutes)
-                    check=False,  # Don't raise on non-zero exit codes
-                )
-
-                # Log subprocess output
-                with open(
-                    log_path, "a", encoding="utf-8", errors="replace"
-                ) as log_file:
-                    log_file.write(f"FEFF stdout:\n{proc.stdout}\n")
-                    if proc.stderr:
-                        log_file.write(f"FEFF stderr:\n{proc.stderr}\n")
-
-                result = proc.returncode == 0
-
-            except (
-                subprocess.TimeoutExpired,
-                subprocess.SubprocessError,
-            ) as proc_error:
-                with open(
-                    log_path, "a", encoding="utf-8", errors="replace"
-                ) as log_file:
-                    log_file.write(f"Subprocess failed: {proc_error}\n")
-                result = False
-
-        # Check success
-        chi_file = feff_dir / "chi.dat"
-        success = chi_file.exists() and bool(result)
+        # Check if calculation produced expected output files
+        success = _check_output_files(chi_file, phase_file, pot_file)
 
         # Clean up if requested and successful
         if success and cleanup:
             cleanup_feff_output(feff_dir, keep_essential=True)
 
-        # Log final result
-        with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
-            log_file.write(f"\nCalculation completed at {datetime.now()}\n")
-            log_file.write(f"Success: {success}\n")
-            if not chi_file.exists():
-                log_file.write("Warning: chi.dat file not found\n")
+        # Log results
+        _write_log_footer(log_path, success, chi_file, phase_file, pot_file)
 
         return success
 
-    except (
-        OSError,
-        subprocess.CalledProcessError,
-        FileNotFoundError,
-        PermissionError,
-        TimeoutError,
-    ) as e:
-        # Log any errors from FEFF execution or file operations
-        error_msg = str(e)
-        try:
-            with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
-                log_file.write(f"\nERROR: {error_msg}\n")
-                log_file.write(f"Exception type: {type(e).__name__}\n")
-        except OSError:
-            print(f"FEFF calculation failed: {error_msg}")
+    except subprocess.TimeoutExpired as e:
+        _handle_timeout_error(log_path, timeout, e)
+        return False
+    except (subprocess.CalledProcessError, OSError, PermissionError) as e:
+        _handle_general_error(log_path, e)
         return False
 
 
-def get_feff_numbered_files(feff_dir: Path) -> list[Path]:
+def _write_log_header(log_path: Path, input_path: Path, feff_dir: Path) -> None:
+    """Write initial log header."""
+    with open(log_path, "w", encoding="utf-8", errors="replace") as log_file:
+        log_file.write(f"FEFF calculation started at {datetime.now()}\n")
+        log_file.write(f"Input file: {input_path}\n")
+        log_file.write(f"Working directory: {feff_dir}\n")
+        log_file.write("-" * 50 + "\n\n")
+
+
+def _run_feff_subprocess(
+    command: list[str], cwd: Path, log_path: Path, timeout: int
+) -> None:
+    """Execute FEFF subprocess and capture output."""
+    # Simple safety check for command
+    if not command or not isinstance(command, list):
+        raise ValueError("Invalid FEFF command")
+    # Ensure all elements are strings
+    if not all(isinstance(arg, str) for arg in command):
+        raise ValueError("FEFF command arguments must be strings")
+
+    with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
+        log_file.write(f"Running command: {' '.join(command)}\n\n")
+        subprocess.run(  # noqa: S603
+            command,
+            cwd=cwd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=True,
+        )
+
+
+def _check_output_files(chi_file: Path, phase_file: Path, pot_file: Path) -> bool:
+    """Check if expected output files exist.
+
+    Success criteria: chi.dat exists OR both phase.pad and pot.pad exist.
+    """
+    return chi_file.exists() or (phase_file.exists() and pot_file.exists())
+
+
+def _write_log_footer(
+    log_path: Path,
+    success: bool,
+    chi_file: Path,
+    phase_file: Path,
+    pot_file: Path,
+) -> None:
+    """Write final log summary."""
+    with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
+        log_file.write(f"\nCalculation completed at {datetime.now()}\n")
+        log_file.write(f"Success: {success}\n")
+        log_file.write("\nOutput files check:\n")
+        log_file.write(f"  chi.dat: {'✓' if chi_file.exists() else '✗'}\n")
+        log_file.write(f"  phase.pad: {'✓' if phase_file.exists() else '✗'}\n")
+        log_file.write(f"  pot.pad: {'✓' if pot_file.exists() else '✗'}\n")
+
+        if not success:
+            log_file.write(
+                "\nWarning: Neither chi.dat nor both phase.pad and pot.pad found\n"
+            )
+
+
+def _handle_timeout_error(log_path: Path, timeout: int, error: Exception) -> None:
+    """Handle subprocess timeout errors."""
+    error_msg = (
+        f"FEFF command timed out after {timeout}s. "
+        "Consider increasing the timeout or inspecting the input."
+    )
+    try:
+        with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
+            log_file.write(f"\nERROR: {error_msg}\n")
+            log_file.write(f"Exception: {error}\n")
+    except OSError:
+        print(f"FEFF calculation failed: {error_msg}")
+
+
+def _handle_general_error(log_path: Path, error: Exception) -> None:
+    """Handle general errors during FEFF execution."""
+    error_msg = f"{type(error).__name__}: {error}"
+    try:
+        with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
+            log_file.write(f"\nERROR: {error_msg}\n")
+    except OSError:
+        print(f"FEFF calculation failed: {error_msg}")
+
+
+def get_feff_numbered_files(feff_dir: Path, base_string="feff") -> list[Path]:
     """Get all feff####.dat files (any number of digits)."""
     feff_dir = Path(feff_dir)
     if not feff_dir.exists():
         return []
 
     # Simple regex: feff + digits + .dat (case insensitive)
-    pattern = re.compile(r"^feff\d+\.dat$", re.IGNORECASE)
+    pattern = re.compile(rf"^{base_string}\d+\.dat$", re.IGNORECASE)
 
     feff_files = []
     for file_path in feff_dir.iterdir():
