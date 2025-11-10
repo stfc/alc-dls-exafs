@@ -809,6 +809,7 @@ def average_chi_spectra(
     else:
         # Set reference k-grid from first spectrum
         k_ref = k_arrays[0].copy()
+
     chi_list = []
 
     for _i, (k, chi) in enumerate(zip(k_arrays, chi_arrays, strict=False)):
@@ -1347,20 +1348,17 @@ def read_feff_output(feff_dir: Path) -> tuple[np.ndarray, np.ndarray]:
         if not hasattr(feff_data, "k"):
             raise AttributeError("FEFF data missing required 'k' attribute")
 
-        # FEFF format: reconstruct complex chi from mag and phase if available
+        # >>> Change begins: use the 'chi' column (2nd column) as the observable χ(k)
+        if hasattr(feff_data, "chi"):
+            k = np.asarray(feff_data.k)
+            chi = np.asarray(feff_data.chi)  # real χ(k) = |χ| sin(phase)
+            return chi, k
+        # Fallbacks (rare): if 'chi' missing, reconstruct, then take its imaginary part
         if hasattr(feff_data, "mag") and hasattr(feff_data, "phase"):
-            chi = feff_data.mag * np.exp(1j * feff_data.phase)
-            return chi, feff_data.k
-
-        # Fallback: use chi directly (may be real or complex)
-        elif hasattr(feff_data, "chi"):
-            return feff_data.chi, feff_data.k
-
-        else:
-            raise AttributeError(
-                "FEFF data missing chi information. "
-                "Expected either (mag, phase) or (chi) columns"
-            )
+            k = np.asarray(feff_data.k)
+            chi = np.asarray(feff_data.mag) * np.sin(np.asarray(feff_data.phase))
+            return chi, k
+        raise AttributeError("FEFF data missing 'chi' (and mag/phase) in chi.dat")
 
     except (OSError, ValueError, AttributeError) as err:
         raise ValueError(f"Error reading FEFF output {chi_file}: {err}") from err

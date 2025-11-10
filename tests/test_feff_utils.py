@@ -654,31 +654,47 @@ class TestFeffOutput:
 
     @patch("larch_cli_wrapper.feff_utils.read_ascii")
     def test_read_feff_output_mag_phase_format(self, mock_read_ascii):
-        """Test read_feff_output with FEFF mag/phase format."""
+        """Fallback when only mag/phase exist: chi = mag * sin(phase)."""
 
-        # Create mock data for FEFF format with mag and phase
         class MockFeffData:
             def __init__(self):
                 self.k = np.array([3.0, 4.0])
-                self.mag = np.array([0.1118, 0.2236])  # |0.1+0.05j|, |0.2+0.1j|
-                self.phase = np.array([0.4636, 0.4636])  # angle of complex numbers
+                self.mag = np.array([0.1118, 0.2236])
+                self.phase = np.array([0.4636, 0.4636])
 
         mock_data = MockFeffData()
         mock_read_ascii.return_value = mock_data
 
         with tempfile.TemporaryDirectory() as tmpdir:
             feff_dir = Path(tmpdir)
-            chi_file = feff_dir / "chi.dat"
-            chi_file.write_text(
+            (feff_dir / "chi.dat").write_text(
                 "# FEFF format\n3.0 0.1 0.1118 0.4636\n4.0 0.2 0.2236 0.4636\n"
             )
-
             chi, k = read_feff_output(feff_dir)
-
-            # Should reconstruct complex chi from mag * exp(1j * phase)
-            expected_chi = mock_data.mag * np.exp(1j * mock_data.phase)
+            expected_chi = mock_data.mag * np.sin(mock_data.phase)
             np.testing.assert_array_equal(k, mock_data.k)
-            np.testing.assert_array_almost_equal(chi, expected_chi)
+            np.testing.assert_allclose(chi, expected_chi)
+
+    @patch("larch_cli_wrapper.feff_utils.read_ascii")
+    def test_read_feff_output_prefers_chi_column(self, mock_read_ascii):
+        """If chi column exists, return it verbatim."""
+
+        class MockFeffData:
+            def __init__(self):
+                self.k = np.array([3.0, 4.0])
+                self.chi = np.array([0.1, 0.2])
+                self.mag = np.array([0.1118, 0.2236])
+                self.phase = np.array([0.4636, 0.4636])
+
+        mock_data = MockFeffData()
+        mock_read_ascii.return_value = mock_data
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feff_dir = Path(tmpdir)
+            (feff_dir / "chi.dat").write_text("# FEFF format\n")
+            chi, k = read_feff_output(feff_dir)
+            np.testing.assert_array_equal(k, mock_data.k)
+            np.testing.assert_array_equal(chi, mock_data.chi)
 
     def test_cleanup_feff_output(self):
         """Test cleanup_feff_output function."""
