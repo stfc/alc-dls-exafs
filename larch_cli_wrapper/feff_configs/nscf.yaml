@@ -10,7 +10,7 @@ radius: 4.0
 control: "1 1 1 1 1 1"
 print: "1 0 0 0 0 3"
 s02: 1.0              # Amplitude reduction factor
-exchange: 0           # Exchange correlation
+exchange: "0 0 0"           # Exchange model (Hedin–Lundqvist)
 exafs: 20
 scf: null
 

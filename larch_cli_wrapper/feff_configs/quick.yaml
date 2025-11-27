@@ -8,7 +8,7 @@ control: "1 1 1 1 1 1"
 print: "1 0 0 0 0 3"
 s02: 1.0              # Amplitude reduction factor
 scf: "4.5 0 30 .2 1" # Self-consistent field
-exchange: 0           # Exchange correlation
+exchange: "0 0 0"           # Exchange model (Hedin–Lundqvist)
 exafs: 20
 
 # Fourier Transform parameters
