@@ -8,7 +8,7 @@ import re
 import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -252,6 +252,9 @@ class FeffConfig:
     delete_tags: list[str] | str | None = (
         None  # Additional tags to delete (COREHOLE tags always deleted automatically)
     )
+    custom_tags: dict[str, Any] = field(
+        default_factory=dict
+    )  # Free-form FEFF card tags keyed by uppercase names
     # FFT parameters for EXAFS transform:
     kmin: float = 2.0  # starting k for FT Window
     kmax: float = 12.0  # ending k for FT Window (quick preset default)
@@ -318,6 +321,7 @@ class FeffConfig:
 
     def __post_init__(self) -> None:
         """Post-initialization validation of configuration parameters."""
+        self.custom_tags = self._normalize_custom_tags(self.custom_tags)
         self._validate_spectrum_type()
         self._validate_energy_range()
         self._validate_fourier_params()
@@ -364,8 +368,8 @@ class FeffConfig:
                 f"Unknown preset: {preset_name}. Available: {list(PRESETS.keys())}"
             )
         preset = PRESETS[preset_name].copy()
-        # Type: ignore for the unpacking since we know the preset structure is correct
-        return cls(**preset)  # type: ignore[arg-type]
+        init_params = cls._prepare_init_params(preset)
+        return cls(**init_params)  # type: ignore[arg-type]
 
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> "FeffConfig":
@@ -384,31 +388,8 @@ class FeffConfig:
         if not isinstance(params, dict):
             raise ValueError("YAML file must contain a dictionary")
 
-        # Track FEFF card fields that are explicitly set to None
-        explicit_none_fields = [
-            field.upper()
-            for field in FEFF_CARD_FIELDS
-            if field in params and params[field] is None
-        ]
-
-        # If there are fields explicitly set to None, add them to delete_tags
-        if explicit_none_fields:
-            existing_delete_tags = params.get("delete_tags", [])
-            if isinstance(existing_delete_tags, str):
-                existing_delete_tags = [existing_delete_tags]
-            elif existing_delete_tags is None:
-                existing_delete_tags = []
-            else:
-                existing_delete_tags = list(existing_delete_tags)
-
-            # Add explicit None fields to delete list
-            for field in explicit_none_fields:
-                if field not in existing_delete_tags:
-                    existing_delete_tags.append(field)
-
-            params["delete_tags"] = existing_delete_tags
-
-        return cls(**params)  # type: ignore[arg-type]
+        init_params = cls._prepare_init_params(params)
+        return cls(**init_params)  # type: ignore[arg-type]
 
     def to_yaml(self, yaml_path: Path) -> None:
         """Save configuration to a YAML file."""
@@ -493,7 +474,138 @@ class FeffConfig:
                     uniq.append(x)
             tags["_del"] = uniq
 
+        # Add any custom FEFF tags supplied by the user
+        for card_name, card_value in self.custom_tags.items():
+            if card_value is not None:
+                tags[card_name] = self._normalize_tag(card_name, card_value)
+
         return tags
+
+    @classmethod
+    def _prepare_init_params(cls, raw_params: dict[str, Any]) -> dict[str, Any]:
+        """Return normalized kwargs for FeffConfig construction."""
+        params, extra_tags = cls._partition_init_params(raw_params)
+
+        field_custom_raw = params.pop("custom_tags", None)
+        normalized_field_custom = cls._normalize_custom_tags(
+            field_custom_raw, drop_none=False
+        )
+
+        explicit_none_fields = []
+        for field_name in FEFF_CARD_FIELDS:
+            for candidate in (field_name, field_name.upper()):
+                if candidate in raw_params and raw_params[candidate] is None:
+                    explicit_none_fields.append(field_name.upper())
+                    break
+
+        combined_custom_tags = {**normalized_field_custom, **extra_tags}
+        explicit_none_fields.extend(
+            tag for tag, value in combined_custom_tags.items() if value is None
+        )
+
+        delete_tags = cls._normalize_delete_tags(params.get("delete_tags"))
+        if explicit_none_fields:
+            delete_tags = cls._merge_delete_tags(delete_tags, explicit_none_fields)
+        if delete_tags:
+            params["delete_tags"] = delete_tags
+
+        final_custom_tags = {
+            tag: value
+            for tag, value in combined_custom_tags.items()
+            if value is not None
+        }
+        if final_custom_tags:
+            params["custom_tags"] = final_custom_tags
+
+        return params
+
+    @classmethod
+    def _partition_init_params(
+        cls, raw_params: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Split known FeffConfig fields from custom FEFF tags."""
+        field_lookup = {f.name.lower(): f.name for f in fields(cls)}
+        known: dict[str, Any] = {}
+        custom: dict[str, Any] = {}
+
+        for raw_key, value in raw_params.items():
+            key = str(raw_key)
+            normalized = key.lower()
+            if normalized in field_lookup:
+                known[field_lookup[normalized]] = value
+            else:
+                card_name = key.strip().upper()
+                if card_name:
+                    custom[card_name] = value
+
+        return known, custom
+
+    @staticmethod
+    def _normalize_delete_tags(value: Any | None) -> list[str]:
+        """Normalize delete_tags to uppercase strings."""
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            candidate_tags = [value]
+        else:
+            try:
+                candidate_tags = list(value)
+            except TypeError as exc:  # pragma: no cover - defensive
+                raise ValueError(
+                    "delete_tags must be a string or iterable of strings"
+                ) from exc
+
+        normalized: list[str] = []
+        for tag in candidate_tags:
+            if tag is None:
+                continue
+            tag_str = str(tag).strip()
+            if tag_str:
+                normalized.append(tag_str.upper())
+        return normalized
+
+    @staticmethod
+    def _merge_delete_tags(existing: list[str], additions: list[str]) -> list[str]:
+        """Append new delete tags while preserving order and uniqueness."""
+        seen: set[str] = set()
+        merged: list[str] = []
+
+        for tag in existing:
+            normalized = tag.strip().upper()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                merged.append(normalized)
+
+        for tag in additions:
+            normalized = tag.strip().upper()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                merged.append(normalized)
+
+        return merged
+
+    @staticmethod
+    def _normalize_custom_tags(
+        tags: Any | None, *, drop_none: bool = True
+    ) -> dict[str, Any]:
+        """Return a dict with uppercase keys describing custom FEFF tags."""
+        if not tags:
+            return {}
+
+        if not isinstance(tags, dict):
+            raise ValueError("custom_tags must be a dict mapping FEFF tag to value")
+
+        normalized: dict[str, Any] = {}
+        for key, value in tags.items():
+            card_name = str(key).strip().upper()
+            if not card_name:
+                continue
+            if value is None and drop_none:
+                continue
+            normalized[card_name] = value
+
+        return normalized
 
     # -------- Normalization helpers ---------
     @staticmethod
