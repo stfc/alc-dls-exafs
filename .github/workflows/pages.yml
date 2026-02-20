@@ -1,0 +1,96 @@
+name: Deploy notebooks to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "notebooks/debye_waller.py"
+      - "notebooks/nanoparticle_builder.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.6.2"
+          python-version: "3.12"
+
+      - name: 📄 Export debye_waller notebook
+        run: |
+          uv run marimo export html-wasm notebooks/debye_waller.py \
+            -o _site/notebooks/debye_waller \
+            --mode run
+
+      - name: 📄 Export nanoparticle_builder notebook
+        run: |
+          uv run marimo export html-wasm notebooks/nanoparticle_builder.py \
+            -o _site/notebooks/nanoparticle_builder \
+            --mode run
+
+      - name: 🏠 Create index page
+        run: |
+          cat > _site/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <title>ALC DLS EXAFS Notebooks</title>
+            <style>
+              body { font-family: system-ui, sans-serif; max-width: 640px; margin: 4rem auto; padding: 0 1rem; }
+              h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+              p  { color: #555; margin-bottom: 2rem; }
+              ul { list-style: none; padding: 0; }
+              li { margin: 0.75rem 0; }
+              a  { display: inline-block; padding: 0.6rem 1.2rem; background: #1a73e8;
+                   color: #fff; border-radius: 6px; text-decoration: none; font-weight: 500; }
+              a:hover { background: #1558b0; }
+            </style>
+          </head>
+          <body>
+            <h1>ALC DLS EXAFS Notebooks</h1>
+            <p>Interactive marimo notebooks running entirely in the browser via WebAssembly.</p>
+            <ul>
+              <li><a href="notebooks/debye_waller/index.html">MD Debye-Waller &amp; FEFF Analysis</a></li>
+              <li><a href="notebooks/nanoparticle_builder/index.html">Nanoparticle Builder</a></li>
+            </ul>
+          </body>
+          </html>
+          EOF
+
+      - name: 📦 Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    permissions:
+      pages: write
+      id-token: write
+
+    steps:
+      - name: 🌐 Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
