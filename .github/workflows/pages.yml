@@ -1,5 +1,4 @@
 name: Deploy notebooks to GitHub Pages
-
 on:
   push:
     branches: [main]
@@ -8,40 +7,32 @@ on:
       - "notebooks/nanoparticle_builder.py"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: pages
   cancel-in-progress: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
-
       - name: 🐍 Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
         with:
-          version: "0.6.2"
+          version: "0.10.5"
           python-version: "3.12"
-
       - name: 📄 Export debye_waller notebook
         run: |
           uv run marimo export html-wasm notebooks/debye_waller.py \
             -o _site/notebooks/debye_waller \
             --mode run
-
       - name: 📄 Export nanoparticle_builder notebook
         run: |
           uv run marimo export html-wasm notebooks/nanoparticle_builder.py \
             -o _site/notebooks/nanoparticle_builder \
             --mode run
-
       - name: 🏠 Create index page
         run: |
           cat > _site/index.html << 'EOF'
@@ -72,24 +63,19 @@ jobs:
           </body>
           </html>
           EOF
-
       - name: 📦 Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
-
-
   deploy:
     needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-
     permissions:
       pages: write
       id-token: write
-
     steps:
       - name: 🌐 Deploy to GitHub Pages
         id: deployment
