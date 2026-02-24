@@ -48,6 +48,23 @@ def _(mo):
 
 
 @app.cell
+def _(mo):
+    mo.callout(
+        mo.md(
+            "**⚠️ Active development notice** — This notebook is under active "
+            "development and has not yet been validated for production use. "
+            "Results should **not** be used in publications without independent "
+            "verification."
+            "\n\n"
+            "Please report any issues or feedback on the GitHub repository: "
+            "https://github.com/stfc/alc-dls-exafs/issues"
+        ),
+        kind="warn",
+    )
+    return
+
+
+@app.cell
 def _():
     import io
     import logging
