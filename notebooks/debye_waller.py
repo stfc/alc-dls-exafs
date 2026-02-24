@@ -16,7 +16,7 @@ Computes Debye-Waller factors and MSRD for EXAFS/FEFF from MD trajectories.
 
 import marimo
 
-__generated_with = "0.19.11"
+__generated_with = "0.16.5"
 app = marimo.App(width="medium", app_title="MD Debye-Waller & FEFF Analysis")
 
 
@@ -29,7 +29,8 @@ def _():
 
 @app.cell
 def _(mo):
-    mo.md(r"""
+    mo.md(
+        r"""
     # MD Debye-Waller & FEFF Analysis
 
     This notebook computes **Debye-Waller factors** (B-factors / ADP tensors) and
@@ -37,21 +38,31 @@ def _(mo):
     molecular dynamics trajectories.
 
     ### Workflow
-    1. Upload a trajectory file and configure parameters
+    1. Select an MD run and configure parameters
     2. Unwrap PBC positions and optionally Kabsch-align frames
     3. Compute per-atom U tensors and B-factors → export CIF with ADP
     4. (Optional) Select an absorber site to compute 2-body and 3-body MSRD paths
-    """)
+    """
+    )
     return
 
 
 @app.cell
 def _():
+    import io
     import logging
+    import tempfile
     from collections import defaultdict
+    from pathlib import Path
 
+    import altair as alt
     import numpy as np
     import pandas as pd
+    from ase import Atoms
+    from ase.data import atomic_numbers
+    from ase.data.colors import jmol_colors
+    from ase.geometry import find_mic
+    from ase.io import read as ase_read
     from weas_widget.atoms_viewer import AtomsViewer
     from weas_widget.base_widget import BaseWidget
     from weas_widget.utils import ASEAdapter
@@ -65,21 +76,28 @@ def _():
     logger = logging.getLogger("dw_notebook")
     return (
         ASEAdapter,
+        Atoms,
         AtomsViewer,
         BaseWidget,
+        Path,
+        alt,
+        ase_read,
+        atomic_numbers,
         defaultdict,
+        find_mic,
         guiConfig,
+        io,
+        jmol_colors,
         logger,
         np,
         pd,
+        tempfile,
     )
 
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## 1 · Trajectory & Parameters
-    """)
+    mo.md("""## 1 · Trajectory & Parameters""")
     return
 
 
@@ -129,9 +147,7 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## 2 · Core Functions
-    """)
+    mo.md("""## 2 · Core Functions""")
     return
 
 
@@ -275,7 +291,7 @@ def _(logger, np):
 
 
 @app.cell
-def _(defaultdict, logger, np):
+def _(defaultdict, find_mic, logger, np):
     def calculate_grouped_msrd(
         structures,
         unwrapped_positions,
@@ -293,8 +309,6 @@ def _(defaultdict, logger, np):
         res_2b : list[dict]   – sorted by reff
         res_3b : list[dict]   – sorted by reff
         """
-        from ase.geometry import find_mic
-
         if not central_indices:
             return [], []
 
@@ -340,6 +354,8 @@ def _(defaultdict, logger, np):
                         "dists": dists,
                         "mean_d": np.mean(dists),
                         "label": f"{central_element}-{symbols[n_idx]}",
+                        "c_idx": c_idx,
+                        "n_idx": n_idx,
                     }
                 )
 
@@ -386,6 +402,9 @@ def _(defaultdict, logger, np):
                             "reff_series": reff_series,
                             "mean_L": np.mean(reff_series),
                             "angle": np.mean(angles_deg),
+                            "c_idx": c_idx,
+                            "n1_idx": n1,
+                            "n2_idx": n2,
                         }
                     )
 
@@ -416,6 +435,7 @@ def _(defaultdict, logger, np):
                         "reff": np.mean(all_dists),
                         "sigma2": np.var(all_dists, ddof=1),
                         "count": len(cluster),
+                        "atom_indices": [(p["c_idx"], p["n_idx"]) for p in cluster],
                     }
                 )
 
@@ -461,6 +481,9 @@ def _(defaultdict, logger, np):
                             "sigma2": np.var(all_reffs, ddof=1),
                             "angle": np.mean([p["angle"] for p in cluster]),
                             "count": len(cluster),
+                            "atom_indices": [
+                                (p["c_idx"], p["n1_idx"], p["n2_idx"]) for p in cluster
+                            ],
                         }
                     )
 
@@ -473,11 +496,9 @@ def _(defaultdict, logger, np):
 
 
 @app.cell
-def _(np):
+def _(io, np):
     def save_cif_with_adp(results):
         """Return a CIF string containing mean positions and anisotropic U tensors."""
-        import io
-
         pos = results["avg_positions"]
         names = results["atom_names"]
         u_cart = results["u_tensor"]
@@ -541,18 +562,12 @@ def _(np):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## 3 · Load Trajectory
-    """)
+    mo.md("""## 3 · Load Trajectory""")
     return
 
 
 @app.cell
-def _(mo, skip_frames, trajectory_file):
-    import os
-    import pathlib
-    import tempfile
-
+def _(Path, ase_read, mo, skip_frames, tempfile, trajectory_file):
     structures = None
     _load_status = mo.callout(
         mo.md("⬆️  Upload a trajectory file above to begin."),
@@ -561,14 +576,12 @@ def _(mo, skip_frames, trajectory_file):
 
     if trajectory_file.value:
         _tf = trajectory_file.value[0]
-        _suffix = pathlib.Path(_tf.name).suffix or ".xyz"
+        _suffix = Path(_tf.name).suffix or ".xyz"
         _tmp = tempfile.NamedTemporaryFile(suffix=_suffix, delete=False)
         _tmp.write(_tf.contents)
         _tmp.close()
         try:
-            from ase.io import read as _ase_read
-
-            structures = _ase_read(_tmp.name, index=f"{skip_frames.value}:")
+            structures = ase_read(_tmp.name, index=f"{skip_frames.value}:")
             if not isinstance(structures, list):
                 structures = [structures]
             elements_str = ", ".join(sorted(set(structures[0].get_chemical_symbols())))
@@ -586,7 +599,7 @@ def _(mo, skip_frames, trajectory_file):
                 kind="danger",
             )
         finally:
-            os.unlink(_tmp.name)
+            Path(_tmp.name).unlink(missing_ok=True)
 
     _load_status
     return (structures,)
@@ -594,15 +607,14 @@ def _(mo, skip_frames, trajectory_file):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## 4 · Unwrap & Align
-    """)
+    mo.md("""## 4 · Unwrap & Align""")
     return
 
 
 @app.cell
 def _(kabsch_align, logger, mo, no_align, structures, unwrap_positions_pbc):
     unwrapped = None
+    _status = mo.md("")
 
     if structures is not None:
         with mo.status.spinner("Unwrapping PBC positions..."):
@@ -618,13 +630,15 @@ def _(kabsch_align, logger, mo, no_align, structures, unwrap_positions_pbc):
         else:
             logger.info("Kabsch alignment skipped.")
 
-        mo.callout(
+        _status = mo.callout(
             mo.md(
                 f"✅ Trajectory processed · "
                 f"Shape: `{unwrapped.shape}` (frames × atoms × xyz)"
             ),
             kind="success",
         )
+
+    _status
     return (unwrapped,)
 
 
@@ -637,9 +651,7 @@ def _(mo, structures, view_atoms):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## 5 · B-factors & ADP Tensor
-    """)
+    mo.md("""## 5 · B-factors & ADP Tensor""")
     return
 
 
@@ -706,15 +718,27 @@ def _(mo, np, output_prefix, save_cif_with_adp, structures, unwrapped):
 
 
 @app.cell
+def _(Atoms, results, structures):
+    """Build the trajectory-averaged ASE Atoms object."""
+    avg_atoms = None
+    if results is not None:
+        avg_atoms = Atoms(
+            symbols=results["atom_names"],
+            positions=results["avg_positions"],
+            cell=results["avg_cell"],
+            pbc=structures[0].get_pbc(),
+        )
+    return (avg_atoms,)
+
+
+@app.cell
 def _(mo):
-    mo.md("""
-    ## 6 · B-factor Plot
-    """)
+    mo.md("""## 6 · B-factor Plot""")
     return
 
 
 @app.cell
-def _(alt, mo, np, pd, results):
+def _(alt, atomic_numbers, jmol_colors, mo, np, pd, results):
     _plot = mo.md("_Run steps above first._")
 
     if results is not None:
@@ -728,6 +752,18 @@ def _(alt, mo, np, pd, results):
             }
         )
 
+        # JMOL element colours
+        def _jmol_hex(sym):
+            z = atomic_numbers.get(sym, 0)
+            r, g, b = jmol_colors[z]
+            return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+
+        _unique_els = sorted(set(_names))
+        _el_color_scale = alt.Scale(
+            domain=_unique_els,
+            range=[_jmol_hex(el) for el in _unique_els],
+        )
+
         _hover_b = alt.selection_point(on="mouseover", nearest=True, empty=False)
 
         _pts = (
@@ -736,7 +772,7 @@ def _(alt, mo, np, pd, results):
             .encode(
                 x=alt.X("Atom index:Q", title="Atom index"),
                 y=alt.Y("B-factor (Å²):Q", title="B-factor (Å²)"),
-                color=alt.Color("Element:N", title="Element"),
+                color=alt.Color("Element:N", title="Element", scale=_el_color_scale),
                 size=alt.condition(_hover_b, alt.value(120), alt.value(25)),
                 opacity=alt.condition(_hover_b, alt.value(1.0), alt.value(0.6)),
                 tooltip=[
@@ -754,7 +790,7 @@ def _(alt, mo, np, pd, results):
             .mark_rule(strokeDash=[4, 4], strokeWidth=1, opacity=0.6)
             .encode(
                 y=alt.Y("mean(B-factor (Å²)):Q"),
-                color=alt.Color("Element:N"),
+                color=alt.Color("Element:N", scale=_el_color_scale),
                 tooltip=[
                     alt.Tooltip("Element:N", title="Element"),
                     alt.Tooltip(
@@ -778,7 +814,8 @@ def _(alt, mo, np, pd, results):
 
 @app.cell
 def _(mo):
-    mo.md("""
+    mo.md(
+        """
     ## 7 · MSRD Path Analysis
 
     Specify an **absorber site** to calculate mean square relative displacements
@@ -791,7 +828,8 @@ def _(mo):
     | `K.1-3` | First three K atoms |
     | `11` | 11th atom in structure (1-based, any element) |
     | `11-20` | Atoms 11–20 (1-based, inclusive) |
-    """)
+    """
+    )
     return
 
 
@@ -863,6 +901,7 @@ def _(
 ):
     _msrd_ui = mo.md("_Configure absorber site and click **Run MSRD Analysis**._")
     msrd_df = None
+    msrd_path_indices = None
 
     if (
         run_msrd.value
@@ -924,6 +963,7 @@ def _(
                 # ── Build combined DataFrame ──────────────────────────────
                 _df_rows = [
                     {
+                        "_row_id": i,
                         "Body": "2-body",
                         "Path type": r["type"],
                         "Reff (Å)": r["reff"],
@@ -932,9 +972,10 @@ def _(
                         "Count": r["count"],
                         "Degeneracy": r["count"] / len(_indices),
                     }
-                    for r in _res2b
+                    for i, r in enumerate(_res2b)
                 ] + [
                     {
+                        "_row_id": len(_res2b) + i,
                         "Body": "3-body",
                         "Path type": r["type"],
                         "Reff (Å)": r["reff"],
@@ -943,9 +984,12 @@ def _(
                         "Count": r["count"],
                         "Degeneracy": 2 * r["count"] / len(_indices),
                     }
-                    for r in _res3b
+                    for i, r in enumerate(_res3b)
                 ]
                 msrd_df = pd.DataFrame(_df_rows)
+                msrd_path_indices = [r["atom_indices"] for r in _res2b] + [
+                    r["atom_indices"] for r in _res3b
+                ]
                 _msrd_ui = mo.vstack(
                     [
                         mo.md(
@@ -972,89 +1016,317 @@ def _(
                 )
 
     _msrd_ui
-    return (msrd_df,)
+    return msrd_df, msrd_path_indices
 
 
 @app.cell
-def _(alt, mo, msrd_df):
-    _plot = mo.md("_Run MSRD analysis above to see the path plot._")
+def _(alt, atomic_numbers, jmol_colors, mo, msrd_df):
+    msrd_chart = None
 
     if msrd_df is not None:
-        _hover = alt.selection_point(
-            on="mouseover",
-            nearest=True,
-            empty=False,
-        )
+        # JMOL colour per path type, keyed on the first scatterer element
+        # e.g. "Fe-N" → N colour;  "Fe-N-C" → N colour
+        def _jmol_hex(sym):
+            z = atomic_numbers.get(sym, 0)
+            r, g, b = jmol_colors[z]
+            return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+
+        _pt_domain = list(msrd_df["Path type"].unique())
+        _pt_range = [_jmol_hex(pt.split("-")[1]) for pt in _pt_domain]
+        _pt_color_scale = alt.Scale(domain=_pt_domain, range=_pt_range)
 
         _base = alt.Chart(msrd_df)
 
-        _points = (
-            _base.mark_point(filled=True)
-            .encode(
-                x=alt.X("Reff (Å):Q", title="Reff (Å)"),
-                y=alt.Y("σ² (Å²):Q", title="σ² (Å²)"),
-                color=alt.Color("Path type:N", title="Path type"),
-                shape=alt.Shape("Body:N", title="Body"),
-                size=alt.condition(_hover, alt.value(180), alt.value(60)),
-                opacity=alt.condition(_hover, alt.value(1.0), alt.value(0.55)),
-                tooltip=[
-                    alt.Tooltip("Body:N", title="Body"),
-                    alt.Tooltip("Path type:N", title="Path type"),
-                    alt.Tooltip("Reff (Å):Q", format=".4f", title="Reff (Å)"),
-                    alt.Tooltip("σ² (Å²):Q", format=".6f", title="σ² (Å²)"),
-                    alt.Tooltip("Angle (°):Q", format=".1f", title="Angle (°)"),
-                    alt.Tooltip("Degeneracy:Q", format=".2f", title="Degeneracy"),
-                    alt.Tooltip("Count:Q", title="Count"),
-                ],
-            )
-            .add_params(_hover)
+        _points = _base.mark_point(filled=True).encode(
+            x=alt.X("Reff (Å):Q", title="Reff (Å)"),
+            y=alt.Y("σ² (Å²):Q", title="σ² (Å²)"),
+            color=alt.Color("Path type:N", title="Path type", scale=_pt_color_scale),
+            shape=alt.Shape("Body:N", title="Body"),
+            size=alt.value(60),
+            opacity=alt.value(0.75),
+            tooltip=[
+                alt.Tooltip("Body:N", title="Body"),
+                alt.Tooltip("Path type:N", title="Path type"),
+                alt.Tooltip("Reff (Å):Q", format=".4f", title="Reff (Å)"),
+                alt.Tooltip("σ² (Å²):Q", format=".6f", title="σ² (Å²)"),
+                alt.Tooltip("Angle (°):Q", format=".1f", title="Angle (°)"),
+                alt.Tooltip("Degeneracy:Q", format=".2f", title="Degeneracy"),
+                alt.Tooltip("Count:Q", title="Count"),
+            ],
         )
 
-        # Vertical rule that snaps to the hovered point's x position
-        _rule = (
-            _base.mark_rule(color="gray", strokeDash=[4, 4], strokeWidth=1)
-            .encode(x=alt.X("Reff (Å):Q"))
-            .transform_filter(_hover)
-        )
+        _chart = alt.layer(_points).properties(height=340, width="container")
+        msrd_chart = mo.ui.altair_chart(_chart, label="Click a point to inspect it")
 
-        # Text label above hovered point showing σ²
-        _label = (
-            _base.mark_text(align="left", dx=8, dy=-8, fontSize=11)
-            .encode(
-                x=alt.X("Reff (Å):Q"),
-                y=alt.Y("σ² (Å²):Q"),
-                text=alt.Text("σ² (Å²):Q", format=".5f"),
-            )
-            .transform_filter(_hover)
-        )
+    msrd_chart if msrd_chart is not None else mo.md(
+        "_Run MSRD analysis above to see the path plot._"
+    )
+    return (msrd_chart,)
 
-        _chart = (
-            alt.layer(_points, _rule, _label)
-            .properties(height=340, width="container")
-            .interactive()
-        )
-        _plot = _chart
 
-    _plot
+@app.cell
+def _(mo, path_index_slider, path_view, selected_path_info, show_all_paths):
+    mo.vstack(
+        [
+            mo.hstack([show_all_paths, path_index_slider], justify="start")
+            if selected_path_info is not None
+            else mo.md("_Select a path first._"),
+            path_view,
+        ]
+    )
     return
 
 
 @app.cell
-def _():
-    import altair as alt
+def _(avg_atoms, find_mic, mo, msrd_chart, msrd_path_indices, np, results):
+    _sel = msrd_chart.value if msrd_chart is not None else None
+    selected_path_info = None
 
-    return (alt,)
+    if _sel is not None and len(_sel) > 0:
+        _r = _sel.iloc[0]
+        _body = _r["Body"]
+        _row_id = int(_r["_row_id"])
+        _path_pairs = msrd_path_indices[
+            _row_id
+        ]  # list of (c_idx, n_idx) or (c_idx, n1, n2)
+
+        # ── Build atom index table ────────────────────────────────────────
+        _syms = results["atom_names"]
+        _pos = results["avg_positions"]
+        _cell = results["avg_cell"]
+        _pbc = avg_atoms.get_pbc() if avg_atoms is not None else [True, True, True]
+
+        _atom_rows = []
+        _all_vectors = []
+        _path_instances = []  # one entry per equivalent path pair
+        for _pair in _path_pairs:
+            _c = _pair[0]
+            _neighbors = list(_pair[1:])
+            _row = {"Absorber idx": _c, "Absorber element": _syms[_c]}
+            _instance_vecs = []
+
+            if _body == "3-body" and len(_neighbors) == 2:
+                # Chain MIC vectors so the three legs form a closed triangle.
+                # leg c→n1
+                _n1, _n2 = _neighbors
+                _v1_raw = _pos[_n1] - _pos[_c]
+                _v1_mic, _ = find_mic([_v1_raw], _cell, _pbc)
+                _v1 = _v1_mic[0]
+                _d1 = float(np.linalg.norm(_v1))
+                _orig_c = _pos[_c]
+                # leg n1→n2 (origin chains from c + v1)
+                _v12_raw = _pos[_n2] - _pos[_n1]
+                _v12_mic, _ = find_mic([_v12_raw], _cell, _pbc)
+                _v12 = _v12_mic[0]
+                _d12 = float(np.linalg.norm(_v12))
+                _orig_n1 = _orig_c + _v1
+                # leg n2→c closes the triangle exactly
+                _v_ret = -(_v1 + _v12)
+                _d_ret = float(np.linalg.norm(_v_ret))
+                _orig_n2 = _orig_n1 + _v12
+
+                _row["n1 idx"] = _n1
+                _row["n1 element"] = _syms[_n1]
+                _row["n1 dist (Å)"] = f"{_d1:.4f}"
+                _row["n1 vector (Å)"] = f"({_v1[0]:.3f}, {_v1[1]:.3f}, {_v1[2]:.3f})"
+                _row["n2 idx"] = _n2
+                _row["n2 element"] = _syms[_n2]
+                _row["n2 dist (Å)"] = f"{_d_ret:.4f}"
+                _row["n1→n2 dist (Å)"] = f"{_d12:.4f}"
+                _row["n1→n2 vector (Å)"] = (
+                    f"({_v12[0]:.3f}, {_v12[1]:.3f}, {_v12[2]:.3f})"
+                )
+
+                _e1 = {
+                    "from_idx": _c,
+                    "to_idx": _n1,
+                    "leg": "n1",
+                    "vector": _v1,
+                    "dist": _d1,
+                    "origin": _orig_c,
+                }
+                _e12e = {
+                    "from_idx": _n1,
+                    "to_idx": _n2,
+                    "leg": "n1\u2192n2",
+                    "vector": _v12,
+                    "dist": _d12,
+                    "origin": _orig_n1,
+                }
+                _e2 = {
+                    "from_idx": _n2,
+                    "to_idx": _c,
+                    "leg": "n2",
+                    "vector": _v_ret,
+                    "dist": _d_ret,
+                    "origin": _orig_n2,
+                }
+                for _e in (_e1, _e12e, _e2):
+                    _all_vectors.append(_e)
+                    _instance_vecs.append(_e)
+            else:
+                for _k, _n in enumerate(_neighbors):
+                    _v_raw = _pos[_n] - _pos[_c]
+                    _v_mic, _ = find_mic([_v_raw], _cell, _pbc)
+                    _v = _v_mic[0]
+                    _d = float(np.linalg.norm(_v))
+                    _label = "n1" if _k == 0 else "n2"
+                    _row[f"{_label} idx"] = _n
+                    _row[f"{_label} element"] = _syms[_n]
+                    _row[f"{_label} dist (Å)"] = f"{_d:.4f}"
+                    _row[f"{_label} vector (Å)"] = (
+                        f"({_v[0]:.3f}, {_v[1]:.3f}, {_v[2]:.3f})"
+                    )
+                    _entry = {
+                        "from_idx": _c,
+                        "to_idx": _n,
+                        "leg": _label,
+                        "vector": _v,
+                        "dist": _d,
+                    }
+                    _all_vectors.append(_entry)
+                    _instance_vecs.append(_entry)
+
+            _atom_rows.append(_row)
+            _path_instances.append(_instance_vecs)
+
+        selected_path_info = {
+            "body": _body,
+            "path_type": _r["Path type"],
+            "reff": _r["Reff (Å)"],
+            "sigma2": _r["σ² (Å²)"],
+            "path_pairs": _path_pairs,
+            "path_instances": _path_instances,
+            "vectors": _all_vectors,
+            "avg_atoms": avg_atoms,
+        }
+
+        _angle_str = f" · Angle: {_r['Angle (°)']:.1f}°" if _body == "3-body" else ""
+        _summary = mo.vstack(
+            [
+                mo.md(
+                    f"### Selected path: **{_r['Path type']}** ({_body}){_angle_str}\n"
+                    f"**Reff** = {_r['Reff (Å)']:.4f} Å · "
+                    f"**σ²** = {_r['σ² (Å²)']:.6f} Å² · "
+                    f"**Degeneracy** = {_r['Degeneracy']:.2f} · "
+                    f"**Count** = {int(_r['Count'])}"
+                ),
+                mo.md("#### Atom indices and bond vectors (average structure)"),
+                mo.ui.table(_atom_rows),
+            ]
+        )
+    else:
+        _summary = mo.callout(
+            mo.md("Click a point in the chart above to see its details here."),
+            kind="info",
+        )
+
+    _summary
+    return (selected_path_info,)
+
+
+@app.cell
+def _(mo, selected_path_info):
+    _n = (
+        len(selected_path_info["path_instances"])
+        if selected_path_info is not None
+        else 1
+    )
+    show_all_paths = mo.ui.checkbox(label="Show all equivalent paths", value=False)
+    path_index_slider = mo.ui.slider(
+        start=0,
+        stop=max(_n - 1, 0),
+        step=1,
+        value=0,
+        label=f"Path instance (0\u2013{max(_n - 1, 0)})",
+        show_value=True,
+    )
+    return path_index_slider, show_all_paths
+
+
+@app.cell
+def _(
+    ASEAdapter,
+    AtomsViewer,
+    BaseWidget,
+    guiConfig,
+    mo,
+    np,
+    path_index_slider,
+    selected_path_info,
+    show_all_paths,
+):
+    path_view = mo.md("_Select a path above to visualise it._")
+    if selected_path_info is not None:
+        _avg_atoms = selected_path_info["avg_atoms"]
+        _instances = selected_path_info["path_instances"]
+        _n_total = len(_instances)
+        _pos = _avg_atoms.get_positions()
+
+        # Pick which instances to display
+        if show_all_paths.value:
+            _active_instances = list(range(_n_total))
+            _label = f"All {_n_total} equivalent paths"
+        else:
+            _idx = path_index_slider.value
+            _active_instances = [_idx]
+            _label = f"Instance {_idx + 1} of {_n_total}"
+
+        # Leg colours
+        _leg_colors = {
+            "n1": "#e05c2e",
+            "n2": "#2e94e0",
+            "n1\u2192n2": "#2eac50",
+        }
+
+        _vf_groups: dict = {}
+        _highlight = set()
+        for _i in _active_instances:
+            for _v in _instances[_i]:
+                _leg = _v["leg"]
+                _color = _leg_colors.get(_leg, "#aaaaaa")
+                # Unique key per (leg, instance)
+                # so all-paths mode doesn't collapse entries
+                _key = f"leg_{_leg}_i{_i}"
+                if _key not in _vf_groups:
+                    _vf_groups[_key] = {
+                        "origins": [],
+                        "vectors": [],
+                        "color": _color,
+                        "radius": 0.12,
+                    }
+                _vf_groups[_key]["origins"].append(
+                    _v["origin"].tolist()
+                    if "origin" in _v
+                    else _pos[_v["from_idx"]].tolist()
+                )
+                _vf_groups[_key]["vectors"].append(np.array(_v["vector"]).tolist())
+                _highlight.add(_v["from_idx"])
+                _highlight.add(_v["to_idx"])
+
+        _viewer = AtomsViewer(BaseWidget(guiConfig=guiConfig))
+        _viewer.atoms = ASEAdapter.to_weas(_avg_atoms)
+        _viewer.model_style = 1
+        # boundary
+        _viewer.boundary = [[-0.15, 1.15], [-0.15, 1.15], [-0.15, 1.15]]
+        _viewer.highlight = list(_highlight)
+        _viewer.vf.settings = _vf_groups
+        _viewer.vf.show = True
+        path_view = _viewer._widget
+    return (path_view,)
 
 
 @app.cell
 def _(mo):
-    mo.md("""
+    mo.md(
+        """
     ---
     ### References
     - Rehr & Albers, *Rev. Mod. Phys.* **72**, 621 (2000) – EXAFS path definitions
     - Kabsch, *Acta Cryst. A* **32**, 922 (1976) – Optimal rotation algorithm
     - Debye-Waller factor: B = 8π²⟨u²⟩
-    """)
+    """
+    )
     return
 
 
