@@ -1,12 +1,20 @@
 """Nanoparticle builder."""
 # /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "ase==3.27.0",
+#     "marimo>=0.19.11",
+#     "numpy==2.2.6",
+#     "weas-widget==0.1.26",
+# ]
+#
 # [tool.marimo.runtime]
 # auto_instantiate = false
 # ///
 
 import marimo
 
-__generated_with = "0.16.0"
+__generated_with = "0.19.11"
 app = marimo.App(width="medium")
 
 
@@ -456,8 +464,7 @@ def _(atoms, view_atoms):
 
 @app.cell
 def _(atoms, mo):
-    mo.md(
-        f"""
+    mo.md(f"""
     ### Cluster Summary
 
     - **Total atoms:** {len(atoms)}
@@ -466,8 +473,7 @@ def _(atoms, mo):
       (diameter of a sphere with the same volume as the atoms.
     - **Diameter (shape):** {atoms.get_diameter(method="shape"):.2f} Å
       (averaged diameter calculated from the directions given by the defined surfaces.)
-    """
-    )
+    """)
     return
 
 

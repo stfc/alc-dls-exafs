@@ -124,6 +124,8 @@ convention = "google"
     'B018']
 'notebooks/nanoparticle_builder.py' = [
     'B018']
+'notebooks/debye_waller.py' = [
+    'B018']
 
 
 # =======================
