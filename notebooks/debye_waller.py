@@ -124,7 +124,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _(Path, mo, trajectory_file):
     skip_frames = mo.ui.number(
         value=0,
         start=0,
@@ -133,7 +133,10 @@ def _(mo):
         label="Frames to skip at start",
     )
     no_align = mo.ui.switch(label="Skip Kabsch alignment", value=False)
-    output_prefix = mo.ui.text(value="output", label="Output file prefix")
+    _default_prefix = (
+        Path(trajectory_file.value[0].name).stem if trajectory_file.value else "output"
+    )
+    output_prefix = mo.ui.text(value=_default_prefix, label="Output file prefix")
 
     mo.hstack(
         [
@@ -581,18 +584,74 @@ def _(Path, ase_read, mo, skip_frames, tempfile, trajectory_file):
         _tmp.write(_tf.contents)
         _tmp.close()
         try:
-            structures = ase_read(_tmp.name, index=f"{skip_frames.value}:")
-            if not isinstance(structures, list):
-                structures = [structures]
-            elements_str = ", ".join(sorted(set(structures[0].get_chemical_symbols())))
-            _load_status = mo.callout(
-                mo.md(
+            _raw = ase_read(_tmp.name, index=f"{skip_frames.value}:")
+            if not isinstance(_raw, list):
+                _raw = [_raw]
+
+            # ── Validation ────────────────────────────────────────────────
+            _errors = []
+            _warnings = []
+
+            # 1. Must have more than one frame
+            if len(_raw) < 2:
+                _errors.append(
+                    f"Trajectory has only **{len(_raw)} frame** after skipping "
+                    f"{skip_frames.value}. At least 2 frames are required."
+                )
+
+            # 2. Consistent atom count across all frames
+            _n_atoms_0 = len(_raw[0])
+            _bad_frames = [i for i, _a in enumerate(_raw) if len(_a) != _n_atoms_0]
+            if _bad_frames:
+                _errors.append(
+                    f"Inconsistent atom count: frame(s) {_bad_frames[:5]}"
+                    f"{'…' if len(_bad_frames) > 5 else ''} "
+                    f"differ from frame 0 ({_n_atoms_0} atoms)."
+                )
+
+            # 3. Consistent chemical symbols across all frames
+            _syms_0 = _raw[0].get_chemical_symbols()
+            _bad_sym_frames = [
+                i
+                for i, _a in enumerate(_raw)
+                if len(_a) == _n_atoms_0 and _a.get_chemical_symbols() != _syms_0
+            ]
+            if _bad_sym_frames:
+                _errors.append(
+                    f"Inconsistent chemical symbols in frame(s) "
+                    f"{_bad_sym_frames[:5]}"
+                    f"{'…' if len(_bad_sym_frames) > 5 else ''}."
+                )
+
+            # 4. Warn if no periodic cell
+            if not _raw[0].get_cell().any():
+                _warnings.append(
+                    "No periodic cell found. PBC unwrapping will be skipped "
+                    "(positions used as-is)."
+                )
+
+            if _errors:
+                _load_status = mo.callout(
+                    mo.md(
+                        "❌ **Trajectory validation failed:**\n\n"
+                        + "\n\n".join(f"- {e}" for e in _errors)
+                    ),
+                    kind="danger",
+                )
+            else:
+                structures = _raw
+                elements_str = ", ".join(sorted(set(_syms_0)))
+                _msg = (
                     f"✅ Loaded **{len(structures)} frames** · "
-                    f"**{len(structures[0])} atoms** per frame · "
+                    f"**{_n_atoms_0} atoms** per frame · "
                     f"Elements: `{elements_str}`"
-                ),
-                kind="success",
-            )
+                )
+                if _warnings:
+                    _msg += "\n\n" + "\n\n".join(f"⚠️ {w}" for w in _warnings)
+                _load_status = mo.callout(
+                    mo.md(_msg),
+                    kind="success" if not _warnings else "warn",
+                )
         except (OSError, ValueError) as _e:
             _load_status = mo.callout(
                 mo.md(f"❌ Failed to load trajectory: `{_e}`"),
@@ -891,6 +950,7 @@ def _(
     cutoff_3body,
     element_spec,
     mo,
+    output_prefix,
     pd,
     results,
     run_msrd,
@@ -1009,7 +1069,9 @@ def _(
                         # Button to download the dataframe as CSV
                         mo.download(
                             data=msrd_df.to_csv(index=False).encode(),
-                            filename=f"msrd_paths_{_spec.replace(' ', '_')}.csv",
+                            # line too long:
+                            filename=f"{output_prefix.value}_msrd_paths_"
+                            f"{_spec.replace(' ', '_')}.csv",
                             label="⬇ Download MSRD paths as CSV",
                         ),
                     ]
