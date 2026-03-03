@@ -27,9 +27,10 @@ dependencies = [
     "rich<14.0.0,>=13.9.1",
     "matplotlib>=3.5",
     "larixite>=0.1.0",
-    "marimo<0.17.0,>=0.16.4",
+    "marimo>=0.16.4",
     "weas-widget>=0.1.26",
     "pymatgen<2026.0,>=2025.1.24",
+    "altair>=6.0.0",
 ]
 
 
@@ -118,7 +119,7 @@ convention = "google"
 'tests/**/*' = ['D', 'S101']
 '**/test_*.py' = ['D', 'S101']
 '__init__.py' = ['D', 'F401']
-'larch_cli_wrapper/cli.py' = ['B008']
+'larch_cli_wrapper/cli.py' = ['B008', 'D301', 'D415']
 'notebooks/exafs_pipeline.py' = [
     'F841',
     'B018']

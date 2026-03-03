@@ -16,7 +16,7 @@ Computes Debye-Waller factors and MSRD for EXAFS/FEFF from MD trajectories.
 
 import marimo
 
-__generated_with = "0.16.5"
+__generated_with = "0.20.2"
 app = marimo.App(width="medium", app_title="MD Debye-Waller & FEFF Analysis")
 
 
@@ -29,8 +29,7 @@ def _():
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
+    mo.md(r"""
     # MD Debye-Waller & FEFF Analysis
 
     This notebook computes **Debye-Waller factors** (B-factors / ADP tensors) and
@@ -42,8 +41,7 @@ def _(mo):
     2. Unwrap PBC positions and optionally Kabsch-align frames
     3. Compute per-atom U tensors and B-factors → export CIF with ADP
     4. (Optional) Select an absorber site to compute 2-body and 3-body MSRD paths
-    """
-    )
+    """)
     return
 
 
@@ -66,10 +64,8 @@ def _(mo):
 
 @app.cell
 def _():
-    import io
     import logging
     import tempfile
-    from collections import defaultdict
     from pathlib import Path
 
     import altair as alt
@@ -100,10 +96,8 @@ def _():
         alt,
         ase_read,
         atomic_numbers,
-        defaultdict,
         find_mic,
         guiConfig,
-        io,
         jmol_colors,
         logger,
         np,
@@ -114,7 +108,9 @@ def _():
 
 @app.cell
 def _(mo):
-    mo.md("""## 1 · Trajectory & Parameters""")
+    mo.md("""
+    ## 1 · Trajectory & Parameters
+    """)
     return
 
 
@@ -167,7 +163,9 @@ def _(Path, mo, trajectory_file):
 
 @app.cell
 def _(mo):
-    mo.md("""## 2 · Core Functions""")
+    mo.md("""
+    ## 2 · Core Functions
+    """)
     return
 
 
@@ -182,407 +180,439 @@ def _(ASEAdapter, AtomsViewer, BaseWidget, guiConfig):
     return (view_atoms,)
 
 
-@app.function
-def parse_site_specification(spec, symbols):
-    """Parse site specification string and return list of atomic indices.
-
-    Supported formats
-    -----------------
-    'K'       – all K atoms
-    'K.1'     – first K atom (1-based within element)
-    'K.1-3'   – first three K atoms
-    '11'      – 11th atom in full structure (1-based)
-    '11-20'   – atoms 11–20 (1-based, inclusive)
-    """
-    if spec.replace("-", "").replace(" ", "").isdigit():
-        spec = spec.replace(" ", "")
-        if "-" in spec:
-            start, end = spec.split("-")
-            return list(range(int(start) - 1, int(end)))
-        else:
-            return [int(spec) - 1]
-
-    if "." in spec:
-        element, index_part = spec.split(".", 1)
-        element_indices = [i for i, sym in enumerate(symbols) if sym == element]
-        if not element_indices:
-            raise ValueError(f"No atoms of element '{element}' found")
-        index_part = index_part.replace(" ", "")
-        if "-" in index_part:
-            start, end = index_part.split("-")
-            start_idx = int(start) - 1
-            end_idx = int(end)
-            if end_idx > len(element_indices):
-                raise ValueError(
-                    f"'{element}' only has {len(element_indices)} atoms, "
-                    f"cannot select up to {end_idx}"
-                )
-            return element_indices[start_idx:end_idx]
-        else:
-            idx = int(index_part) - 1
-            if idx >= len(element_indices):
-                raise ValueError(
-                    f"'{element}' only has {len(element_indices)} atoms, "
-                    f"cannot select index {idx + 1}"
-                )
-            return [element_indices[idx]]
-    else:
-        matching = [i for i, sym in enumerate(symbols) if sym == spec]
-        if not matching:
-            raise ValueError(f"No atoms of element '{spec}' found")
-        return matching
-
-
 @app.cell
-def _(logger, np):
-    def unwrap_positions_pbc(structures):
-        """Unwrap atomic positions.
+def _(find_mic, logger, np):
+    import io
+    from collections import defaultdict
 
-        This helps to produce continuous trajectories across
-        periodic boundary conditions.
-
-        Returns:
-        -------
-        unwrapped : ndarray, shape (n_frames, n_atoms, 3)
-        """
-        logger.info("Unwrapping positions for PBC...")
-        n_frames = len(structures)
-        n_atoms = len(structures[0])
-        unwrapped = np.zeros((n_frames, n_atoms, 3))
-
-        ref_atoms = structures[0].copy()
-        ref_atoms.center()
-        unwrapped[0] = ref_atoms.get_positions()
-
-        for i in range(1, n_frames):
-            if i % 500 == 0:
-                logger.info(f"  Unwrapping frame {i}/{n_frames}...")
-            atoms = structures[i]
-            cell = atoms.get_cell()
-            if np.all(cell.lengths() == 0):
-                unwrapped[i] = atoms.get_positions()
-                continue
-            cell_matrix = cell.complete()
-            inv_cell = np.linalg.inv(cell_matrix)
-            frac_current = atoms.get_scaled_positions()
-            frac_previous = unwrapped[i - 1] @ inv_cell.T
-            frac_disp = frac_current - frac_previous
-            frac_disp -= np.round(frac_disp)
-            unwrapped[i] = unwrapped[i - 1] + (frac_disp @ cell_matrix)
-
-        return unwrapped
-
-    return (unwrap_positions_pbc,)
-
-
-@app.cell
-def _(logger, np):
-    def kabsch_align(unwrapped_positions, reference_idx=0, reference_pos=None):
-        """Align all trajectory frames to a reference using the Kabsch algorithm.
-
-        Returns:
-        -------
-        aligned : ndarray, shape (n_frames, n_atoms, 3)
-        """
-        logger.info("Aligning trajectory (Kabsch)...")
-        ref_pos = (
-            reference_pos
-            if reference_pos is not None
-            else unwrapped_positions[reference_idx]
+    try:
+        from larch_cli_wrapper.debye_waller_core import (
+            calculate_grouped_msrd,
+            compute_adp_results,
+            kabsch_align,
+            parse_site_specification,
+            save_cif_with_adp,
+            unwrap_positions_pbc,
         )
-        ref_com = ref_pos.mean(axis=0)
-        ref_pos_centered = ref_pos - ref_com
+    except ImportError:
+        # ---------------------------------------------------------------------------
+        # Fallback: functions inlined from larch_cli_wrapper.debye_waller_core
+        # so that this notebook works in WASM / sandbox mode without the local
+        # package on sys.path.
+        # ---------------------------------------------------------------------------
 
-        aligned = np.zeros_like(unwrapped_positions)
-        for i in range(len(unwrapped_positions)):
-            pos = unwrapped_positions[i]
-            com = pos.mean(axis=0)
-            pos_c = pos - com
-            H = pos_c.T @ ref_pos_centered
-            U, _S, Vt = np.linalg.svd(H)
-            R = Vt.T @ U.T
-            if np.linalg.det(R) < 0:
-                Vt[-1, :] *= -1
+        def unwrap_positions_pbc(structures):
+            """Unwrap atomic positions for continuous trajectories across PBC."""
+            logger.info("Unwrapping positions for PBC...")
+            n_frames = len(structures)
+            n_atoms = len(structures[0])
+            unwrapped = np.zeros((n_frames, n_atoms, 3))
+
+            ref_atoms = structures[0].copy()
+            ref_atoms.center()
+            unwrapped[0] = ref_atoms.get_positions()
+
+            for i in range(1, n_frames):
+                if i % 500 == 0:
+                    logger.info("  Unwrapping frame %d/%d...", i, n_frames)
+                atoms = structures[i]
+                cell = atoms.get_cell()
+                if np.all(cell.lengths() == 0):
+                    unwrapped[i] = atoms.get_positions()
+                    continue
+                cell_matrix = cell.complete()
+                inv_cell = np.linalg.inv(cell_matrix)
+                frac_current = atoms.get_scaled_positions()
+                frac_previous = unwrapped[i - 1] @ inv_cell.T
+                frac_disp = frac_current - frac_previous
+                frac_disp -= np.round(frac_disp)
+                unwrapped[i] = unwrapped[i - 1] + (frac_disp @ cell_matrix)
+
+            return unwrapped
+
+        def kabsch_align(unwrapped_positions, reference_idx=0, reference_pos=None):
+            """Align all trajectory frames to a reference using the Kabsch algorithm."""
+            logger.info("Aligning trajectory (Kabsch)...")
+            ref_pos = (
+                reference_pos
+                if reference_pos is not None
+                else unwrapped_positions[reference_idx]
+            )
+            ref_com = ref_pos.mean(axis=0)
+            ref_pos_centered = ref_pos - ref_com
+
+            aligned = np.zeros_like(unwrapped_positions)
+            for i in range(len(unwrapped_positions)):
+                pos = unwrapped_positions[i]
+                com = pos.mean(axis=0)
+                pos_c = pos - com
+                H = pos_c.T @ ref_pos_centered
+                U, _S, Vt = np.linalg.svd(H)
                 R = Vt.T @ U.T
-            aligned[i] = (pos_c @ R) + ref_com
-        return aligned
+                if np.linalg.det(R) < 0:
+                    Vt[-1, :] *= -1
+                    R = Vt.T @ U.T
+                aligned[i] = (pos_c @ R) + ref_com
+            return aligned
 
-    return (kabsch_align,)
+        def compute_adp_results(structures, unwrapped):
+            """Compute per-atom ADP tensors and B-factors from unwrapped positions."""
+            avg_pos = np.mean(unwrapped, axis=0)
+            displacements = unwrapped - avg_pos[np.newaxis, :, :]
+            u_tensor = np.einsum("fni,fnj->nij", displacements, displacements) / len(
+                structures
+            )
+            b_factors = 8 * np.pi**2 * np.trace(u_tensor, axis1=1, axis2=2) / 3
 
+            return {
+                "b_factors": b_factors,
+                "u_tensor": u_tensor,
+                "avg_positions": avg_pos,
+                "atom_names": structures[0].get_chemical_symbols(),
+                "avg_cell": structures[0].get_cell().complete(),
+                "atom_indices": np.arange(len(b_factors)),
+            }
 
-@app.cell
-def _(defaultdict, find_mic, logger, np):
-    def calculate_grouped_msrd(
-        structures,
-        unwrapped_positions,
-        central_indices,
-        central_label,
-        cutoff=3.5,
-        tol_dist=0.1,
-        tol_angle=5.0,
-        cutoff_3body=None,
-    ):
-        """Calculate grouped MSRD for 2-body and 3-body EXAFS paths.
+        def save_cif_with_adp(results):
+            """Return a CIF string with mean positions and anisotropic U tensors."""
+            pos = results["avg_positions"]
+            names = results["atom_names"]
+            u_cart = results["u_tensor"]
+            cell = results["avg_cell"]
+            inv_cell = np.linalg.inv(cell)
+            frac_pos = pos @ inv_cell.T
+            a, b, c = np.linalg.norm(cell, axis=1)
 
-        Returns:
-        -------
-        res_2b : list[dict]   – sorted by reff
-        res_3b : list[dict]   – sorted by reff
-        """
-        if not central_indices:
-            return [], []
+            def ang(v1, v2):
+                return float(
+                    np.degrees(
+                        np.arccos(
+                            np.clip(
+                                np.dot(v1, v2)
+                                / (np.linalg.norm(v1) * np.linalg.norm(v2)),
+                                -1,
+                                1,
+                            )
+                        )
+                    )
+                )
 
-        symbols = structures[0].get_chemical_symbols()
-        central_element = symbols[central_indices[0]]
-        reference_atoms = structures[0].copy()
-        cell = structures[0].get_cell()
-        pbc = structures[0].get_pbc()
+            alpha = ang(cell[1], cell[2])
+            beta = ang(cell[0], cell[2])
+            gamma = ang(cell[0], cell[1])
 
-        pair_list = []
-        triplet_list = []
+            buf = io.StringIO()
+            buf.write("data_MD_results\n\n")
+            buf.write(f"_cell_length_a {a:.6f}\n")
+            buf.write(f"_cell_length_b {b:.6f}\n")
+            buf.write(f"_cell_length_c {c:.6f}\n")
+            buf.write(f"_cell_angle_alpha {alpha:.4f}\n")
+            buf.write(f"_cell_angle_beta  {beta:.4f}\n")
+            buf.write(f"_cell_angle_gamma {gamma:.4f}\n\n")
+            buf.write(
+                "loop_\n"
+                "_atom_site_label\n_atom_site_type_symbol\n"
+                "_atom_site_fract_x\n_atom_site_fract_y\n_atom_site_fract_z\n"
+                "_atom_site_B_iso_or_equiv\n"
+            )
+            for i in range(len(names)):
+                buf.write(
+                    f"{names[i]}{i + 1} {names[i]} "
+                    f"{frac_pos[i, 0]:.6f} {frac_pos[i, 1]:.6f} {frac_pos[i, 2]:.6f} "
+                    f"{results['b_factors'][i]:.4f}\n"
+                )
+            buf.write(
+                "\nloop_\n"
+                "_atom_site_aniso_label\n"
+                "_atom_site_aniso_U_11\n_atom_site_aniso_U_22\n_atom_site_aniso_U_33\n"
+                "_atom_site_aniso_U_23\n_atom_site_aniso_U_13\n_atom_site_aniso_U_12\n"
+            )
+            for i in range(len(names)):
+                u = u_cart[i]
+                buf.write(
+                    f"{names[i]}{i + 1} "
+                    f"{u[0, 0]:.5f} {u[1, 1]:.5f} {u[2, 2]:.5f} "
+                    f"{u[1, 2]:.5f} {u[0, 2]:.5f} {u[0, 1]:.5f}\n"
+                )
+            return buf.getvalue()
 
-        logger.info(
-            f"Analysing MSRD paths for {central_label} "
-            f"({len(central_indices)} sites)..."
-        )
+        def parse_site_specification(spec, symbols):
+            """Parse a site specification string and return atomic indices."""
+            if spec.replace("-", "").replace(" ", "").isdigit():
+                spec = spec.replace(" ", "")
+                if "-" in spec:
+                    start, end = spec.split("-")
+                    return list(range(int(start) - 1, int(end)))
+                else:
+                    return [int(spec) - 1]
 
-        for c_idx in central_indices:
-            all_indices = [i for i in range(len(symbols)) if i != c_idx]
-            distances = reference_atoms.get_distances(c_idx, all_indices, mic=True)
-            neighbors = [
-                all_indices[i] for i in range(len(all_indices)) if distances[i] < cutoff
-            ]
+            if "." in spec:
+                element, index_part = spec.split(".", 1)
+                element_indices = [i for i, sym in enumerate(symbols) if sym == element]
+                if not element_indices:
+                    raise ValueError(f"No atoms of element '{element}' found")
+                index_part = index_part.replace(" ", "")
+                if "-" in index_part:
+                    start, end = index_part.split("-")
+                    start_idx = int(start) - 1
+                    end_idx = int(end)
+                    if end_idx > len(element_indices):
+                        raise ValueError(
+                            f"'{element}' only has {len(element_indices)} atoms, "
+                            f"cannot select up to {end_idx}"
+                        )
+                    return element_indices[start_idx:end_idx]
+                else:
+                    idx = int(index_part) - 1
+                    if idx >= len(element_indices):
+                        raise ValueError(
+                            f"'{element}' only has {len(element_indices)} atoms, "
+                            f"cannot select index {idx + 1}"
+                        )
+                    return [element_indices[idx]]
+
+            matching = [i for i, sym in enumerate(symbols) if sym == spec]
+            if not matching:
+                raise ValueError(f"No atoms of element '{spec}' found")
+            return matching
+
+        def calculate_grouped_msrd(
+            structures,
+            unwrapped_positions,
+            central_indices,
+            central_label,
+            cutoff=3.5,
+            tol_dist=0.1,
+            tol_angle=5.0,
+            cutoff_3body=None,
+            exclude_hydrogen=True,
+        ):
+            """Calculate grouped MSRD for 2-body and 3-body EXAFS paths."""
+            if not central_indices:
+                return [], []
+
+            symbols = structures[0].get_chemical_symbols()
+            central_element = symbols[central_indices[0]]
+            reference_atoms = structures[0].copy()
+            cell = structures[0].get_cell()
+            pbc = structures[0].get_pbc()
+
+            if exclude_hydrogen:
+                neighbor_candidates = {i for i, sym in enumerate(symbols) if sym != "H"}
+                logger.info("Hydrogen excluded from neighbor search.")
+            else:
+                neighbor_candidates = set(range(len(symbols)))
+
+            pair_list = []
+            triplet_list = []
+
             logger.info(
-                f"  {len(neighbors)} neighbors within {cutoff} Å of atom {c_idx}"
+                "Analysing MSRD paths for %s (%d sites)...",
+                central_label,
+                len(central_indices),
             )
 
-            # Pre-compute MIC vectors for all neighbors
-            neighbor_vectors_mic = {}
-            for n_idx in neighbors:
-                v_raw = (
-                    unwrapped_positions[:, n_idx, :] - unwrapped_positions[:, c_idx, :]
-                )
-                v_mic, dists = find_mic(v_raw, cell, pbc)
-                neighbor_vectors_mic[n_idx] = (v_mic, dists)
-
-            # ── 2-body paths ──────────────────────────────────────────────
-            for n_idx in neighbors:
-                v_mic, dists = neighbor_vectors_mic[n_idx]
-                pair_list.append(
-                    {
-                        "element": symbols[n_idx],
-                        "dists": dists,
-                        "mean_d": np.mean(dists),
-                        "label": f"{central_element}-{symbols[n_idx]}",
-                        "c_idx": c_idx,
-                        "n_idx": n_idx,
-                    }
-                )
-
-            # ── 3-body paths ──────────────────────────────────────────────
-            if cutoff_3body == 0:
-                continue
-            cutoff_for_3body = cutoff_3body if cutoff_3body is not None else cutoff
-            if cutoff_for_3body < cutoff:
-                neighbors_3body = [
-                    n
-                    for n in neighbors
-                    if np.mean(neighbor_vectors_mic[n][1]) <= cutoff_for_3body
+            for c_idx in central_indices:
+                all_indices = [
+                    i
+                    for i in range(len(symbols))
+                    if i != c_idx and i in neighbor_candidates
                 ]
-            else:
-                neighbors_3body = neighbors
+                distances = reference_atoms.get_distances(c_idx, all_indices, mic=True)
+                neighbors = [
+                    all_indices[i]
+                    for i in range(len(all_indices))
+                    if distances[i] < cutoff
+                ]
+                logger.info(
+                    "  %d neighbors within %.2f Å of atom %d",
+                    len(neighbors),
+                    cutoff,
+                    c_idx,
+                )
 
-            for i in range(len(neighbors_3body)):
-                for j in range(i + 1, len(neighbors_3body)):
-                    n1, n2 = neighbors_3body[i], neighbors_3body[j]
-                    v01_mic, d01 = neighbor_vectors_mic[n1]
-                    v02_mic, d02 = neighbor_vectors_mic[n2]
-                    v12_raw = (
-                        unwrapped_positions[:, n2, :] - unwrapped_positions[:, n1, :]
+                neighbor_vectors_mic = {}
+                for n_idx in neighbors:
+                    v_raw = (
+                        unwrapped_positions[:, n_idx, :]
+                        - unwrapped_positions[:, c_idx, :]
                     )
-                    v12_mic, d12 = find_mic(v12_raw, cell, pbc)
-                    d20 = d02
-                    L = d01 + d12 + d20
+                    v_mic, dists = find_mic(v_raw, cell, pbc)
+                    neighbor_vectors_mic[n_idx] = (v_mic, dists)
 
-                    # Angle at n1 (intermediate atom)
-                    v1 = -v01_mic
-                    v2 = v12_mic
-                    v1_norm = np.linalg.norm(v1, axis=1, keepdims=True)
-                    v2_norm = np.linalg.norm(v2, axis=1, keepdims=True)
-                    v1_unit = v1 / np.maximum(v1_norm, 1e-10)
-                    v2_unit = v2 / np.maximum(v2_norm, 1e-10)
-                    cos_t = np.clip(np.sum(v1_unit * v2_unit, axis=1), -1, 1)
-                    angles_deg = np.degrees(np.arccos(cos_t))
-
-                    reff_series = L / 2.0
-                    elem_pair = tuple(sorted([symbols[n1], symbols[n2]]))
-                    triplet_list.append(
+                for n_idx in neighbors:
+                    v_mic, dists = neighbor_vectors_mic[n_idx]
+                    pair_list.append(
                         {
-                            "elements": elem_pair,
-                            "reff_series": reff_series,
-                            "mean_L": np.mean(reff_series),
-                            "angle": np.mean(angles_deg),
+                            "element": symbols[n_idx],
+                            "dists": dists,
+                            "mean_d": float(np.mean(dists)),
+                            "label": f"{central_element}-{symbols[n_idx]}",
                             "c_idx": c_idx,
-                            "n1_idx": n1,
-                            "n2_idx": n2,
+                            "n_idx": n_idx,
                         }
                     )
 
-        # ── Cluster 2-body paths ──────────────────────────────────────────
-        pairs_by_element = defaultdict(list)
-        for path in pair_list:
-            pairs_by_element[path["element"]].append(path)
-
-        res_2b = []
-        for _element, paths in pairs_by_element.items():
-            paths.sort(key=lambda x: x["mean_d"])
-            clusters, current = [], [paths[0]]
-            for path in paths[1:]:
-                if (
-                    abs(path["mean_d"] - np.mean([p["mean_d"] for p in current]))
-                    <= tol_dist
-                ):
-                    current.append(path)
-                else:
-                    clusters.append(current)
-                    current = [path]
-            clusters.append(current)
-            for cluster in clusters:
-                all_dists = np.concatenate([p["dists"] for p in cluster])
-                res_2b.append(
-                    {
-                        "type": cluster[0]["label"],
-                        "reff": np.mean(all_dists),
-                        "sigma2": np.var(all_dists, ddof=1),
-                        "count": len(cluster),
-                        "atom_indices": [(p["c_idx"], p["n_idx"]) for p in cluster],
-                    }
+                if cutoff_3body == 0 or cutoff_3body is None:
+                    continue
+                neighbors_3body = (
+                    [
+                        n
+                        for n in neighbors
+                        if np.mean(neighbor_vectors_mic[n][1]) <= cutoff_3body
+                    ]
+                    if cutoff_3body < cutoff
+                    else neighbors
                 )
 
-        # ── Cluster 3-body paths ──────────────────────────────────────────
-        triplets_by_elements = defaultdict(list)
-        for path in triplet_list:
-            triplets_by_elements[path["elements"]].append(path)
+                for i in range(len(neighbors_3body)):
+                    for j in range(i + 1, len(neighbors_3body)):
+                        n1, n2 = neighbors_3body[i], neighbors_3body[j]
+                        v01_mic, d01 = neighbor_vectors_mic[n1]
+                        v02_mic, d02 = neighbor_vectors_mic[n2]
+                        v12_raw = (
+                            unwrapped_positions[:, n2, :]
+                            - unwrapped_positions[:, n1, :]
+                        )
+                        v12_mic, d12 = find_mic(v12_raw, cell, pbc)
+                        d20 = d02
+                        L = d01 + d12 + d20
 
-        res_3b = []
-        for elem_pair, paths in triplets_by_elements.items():
-            paths.sort(key=lambda x: x["angle"])
-            angle_clusters, current = [], [paths[0]]
-            for path in paths[1:]:
-                if (
-                    abs(path["angle"] - np.mean([p["angle"] for p in current]))
-                    <= tol_angle
-                ):
-                    current.append(path)
-                else:
-                    angle_clusters.append(current)
-                    current = [path]
-            angle_clusters.append(current)
+                        v1 = -v01_mic
+                        v2 = v12_mic
+                        v1_norm = np.linalg.norm(v1, axis=1, keepdims=True)
+                        v2_norm = np.linalg.norm(v2, axis=1, keepdims=True)
+                        v1_unit = v1 / np.maximum(v1_norm, 1e-10)
+                        v2_unit = v2 / np.maximum(v2_norm, 1e-10)
+                        cos_t = np.clip(np.sum(v1_unit * v2_unit, axis=1), -1, 1)
+                        angles_deg = np.degrees(np.arccos(cos_t))
 
-            for angle_cluster in angle_clusters:
-                angle_cluster.sort(key=lambda x: x["mean_L"])
-                dist_clusters, current = [], [angle_cluster[0]]
-                for path in angle_cluster[1:]:
+                        reff_series = L / 2.0
+                        elem_pair = tuple(sorted([symbols[n1], symbols[n2]]))
+                        triplet_list.append(
+                            {
+                                "elements": elem_pair,
+                                "reff_series": reff_series,
+                                "mean_L": float(np.mean(reff_series)),
+                                "angle": float(np.mean(angles_deg)),
+                                "c_idx": c_idx,
+                                "n1_idx": n1,
+                                "n2_idx": n2,
+                            }
+                        )
+
+            pairs_by_element = defaultdict(list)
+            for path in pair_list:
+                pairs_by_element[path["element"]].append(path)
+
+            res_2b = []
+            for _element, paths in pairs_by_element.items():
+                paths.sort(key=lambda x: x["mean_d"])
+                clusters = []
+                current = [paths[0]]
+                for path in paths[1:]:
                     if (
-                        abs(path["mean_L"] - np.mean([p["mean_L"] for p in current]))
+                        abs(
+                            path["mean_d"]
+                            - float(np.mean([p["mean_d"] for p in current]))
+                        )
                         <= tol_dist
                     ):
                         current.append(path)
                     else:
-                        dist_clusters.append(current)
+                        clusters.append(current)
                         current = [path]
-                dist_clusters.append(current)
-                for cluster in dist_clusters:
-                    all_reffs = np.concatenate([p["reff_series"] for p in cluster])
-                    res_3b.append(
+                clusters.append(current)
+                for cluster in clusters:
+                    all_dists = np.concatenate([p["dists"] for p in cluster])
+                    res_2b.append(
                         {
-                            "type": f"{central_element}-{elem_pair[0]}-{elem_pair[1]}",
-                            "reff": np.mean(all_reffs),
-                            "sigma2": np.var(all_reffs, ddof=1),
-                            "angle": np.mean([p["angle"] for p in cluster]),
+                            "type": cluster[0]["label"],
+                            "reff": float(np.mean(all_dists)),
+                            "sigma2": float(np.var(all_dists, ddof=1)),
                             "count": len(cluster),
-                            "atom_indices": [
-                                (p["c_idx"], p["n1_idx"], p["n2_idx"]) for p in cluster
-                            ],
+                            "atom_indices": [(p["c_idx"], p["n_idx"]) for p in cluster],
                         }
                     )
 
-        return (
-            sorted(res_2b, key=lambda x: x["reff"]),
-            sorted(res_3b, key=lambda x: x["reff"]),
-        )
+            triplets_by_elements = defaultdict(list)
+            for path in triplet_list:
+                triplets_by_elements[path["elements"]].append(path)
 
-    return (calculate_grouped_msrd,)
+            res_3b = []
+            for elem_pair, paths in triplets_by_elements.items():
+                paths.sort(key=lambda x: x["angle"])
+                angle_clusters = []
+                current = [paths[0]]
+                for path in paths[1:]:
+                    if (
+                        abs(
+                            path["angle"]
+                            - float(np.mean([p["angle"] for p in current]))
+                        )
+                        <= tol_angle
+                    ):
+                        current.append(path)
+                    else:
+                        angle_clusters.append(current)
+                        current = [path]
+                angle_clusters.append(current)
 
+                for angle_cluster in angle_clusters:
+                    angle_cluster.sort(key=lambda x: x["mean_L"])
+                    dist_clusters = []
+                    current = [angle_cluster[0]]
+                    for path in angle_cluster[1:]:
+                        if (
+                            abs(
+                                path["mean_L"]
+                                - float(np.mean([p["mean_L"] for p in current]))
+                            )
+                            <= tol_dist
+                        ):
+                            current.append(path)
+                        else:
+                            dist_clusters.append(current)
+                            current = [path]
+                    dist_clusters.append(current)
+                    for cluster in dist_clusters:
+                        all_reffs = np.concatenate([p["reff_series"] for p in cluster])
+                        res_3b.append(
+                            {
+                                "type": (
+                                    f"{central_element}-{elem_pair[0]}-{elem_pair[1]}"
+                                ),
+                                "reff": float(np.mean(all_reffs)),
+                                "sigma2": float(np.var(all_reffs, ddof=1)),
+                                "angle": float(np.mean([p["angle"] for p in cluster])),
+                                "count": len(cluster),
+                                "atom_indices": [
+                                    (p["c_idx"], p["n1_idx"], p["n2_idx"])
+                                    for p in cluster
+                                ],
+                            }
+                        )
 
-@app.cell
-def _(io, np):
-    def save_cif_with_adp(results):
-        """Return a CIF string containing mean positions and anisotropic U tensors."""
-        pos = results["avg_positions"]
-        names = results["atom_names"]
-        u_cart = results["u_tensor"]
-        cell = results["avg_cell"]
-        inv_cell = np.linalg.inv(cell)
-        frac_pos = pos @ inv_cell.T
-        a, b, c = np.linalg.norm(cell, axis=1)
-
-        def ang(v1, v2):
-            return np.degrees(
-                np.arccos(
-                    np.clip(
-                        np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)),
-                        -1,
-                        1,
-                    )
-                )
+            return (
+                sorted(res_2b, key=lambda x: x["reff"]),
+                sorted(res_3b, key=lambda x: x["reff"]),
             )
 
-        alpha = ang(cell[1], cell[2])
-        beta = ang(cell[0], cell[2])
-        gamma = ang(cell[0], cell[1])
-
-        buf = io.StringIO()
-        buf.write("data_MD_results\n\n")
-        buf.write(f"_cell_length_a {a:.6f}\n")
-        buf.write(f"_cell_length_b {b:.6f}\n")
-        buf.write(f"_cell_length_c {c:.6f}\n")
-        buf.write(f"_cell_angle_alpha {alpha:.4f}\n")
-        buf.write(f"_cell_angle_beta  {beta:.4f}\n")
-        buf.write(f"_cell_angle_gamma {gamma:.4f}\n\n")
-        buf.write(
-            "loop_\n"
-            "_atom_site_label\n_atom_site_type_symbol\n"
-            "_atom_site_fract_x\n_atom_site_fract_y\n_atom_site_fract_z\n"
-            "_atom_site_B_iso_or_equiv\n"
-        )
-        for i in range(len(names)):
-            buf.write(
-                f"{names[i]}{i + 1} {names[i]} "
-                f"{frac_pos[i, 0]:.6f} {frac_pos[i, 1]:.6f} {frac_pos[i, 2]:.6f} "
-                f"{results['b_factors'][i]:.4f}\n"
-            )
-        buf.write(
-            "\nloop_\n"
-            "_atom_site_aniso_label\n"
-            "_atom_site_aniso_U_11\n_atom_site_aniso_U_22\n_atom_site_aniso_U_33\n"
-            "_atom_site_aniso_U_23\n_atom_site_aniso_U_13\n_atom_site_aniso_U_12\n"
-        )
-        for i in range(len(names)):
-            u = u_cart[i]
-            buf.write(
-                f"{names[i]}{i + 1} "
-                f"{u[0, 0]:.5f} {u[1, 1]:.5f} {u[2, 2]:.5f} "
-                f"{u[1, 2]:.5f} {u[0, 2]:.5f} {u[0, 1]:.5f}\n"
-            )
-        return buf.getvalue()
-
-    return (save_cif_with_adp,)
+    return (
+        calculate_grouped_msrd,
+        compute_adp_results,
+        kabsch_align,
+        parse_site_specification,
+        save_cif_with_adp,
+        unwrap_positions_pbc,
+    )
 
 
 @app.cell
 def _(mo):
-    mo.md("""## 3 · Load Trajectory""")
+    mo.md("""
+    ## 3 · Load Trajectory
+    """)
     return
 
 
@@ -683,7 +713,9 @@ def _(Path, ase_read, mo, skip_frames, tempfile, trajectory_file):
 
 @app.cell
 def _(mo):
-    mo.md("""## 4 · Unwrap & Align""")
+    mo.md("""
+    ## 4 · Unwrap & Align
+    """)
     return
 
 
@@ -727,31 +759,28 @@ def _(mo, structures, view_atoms):
 
 @app.cell
 def _(mo):
-    mo.md("""## 5 · B-factors & ADP Tensor""")
+    mo.md("""
+    ## 5 · B-factors & ADP Tensor
+    """)
     return
 
 
 @app.cell
-def _(mo, np, output_prefix, save_cif_with_adp, structures, unwrapped):
+def _(
+    compute_adp_results,
+    mo,
+    np,
+    output_prefix,
+    save_cif_with_adp,
+    structures,
+    unwrapped,
+):
     results = None
     _b_status = mo.md("")
 
     if unwrapped is not None and structures is not None:
-        _avg_pos = np.mean(unwrapped, axis=0)
-        _displacements = unwrapped - _avg_pos[np.newaxis, :, :]
-        _u_tensor = np.einsum("fni,fnj->nij", _displacements, _displacements) / len(
-            structures
-        )
-        _b_factors = 8 * np.pi**2 * np.trace(_u_tensor, axis1=1, axis2=2) / 3
-
-        results = {
-            "b_factors": _b_factors,
-            "u_tensor": _u_tensor,
-            "avg_positions": _avg_pos,
-            "atom_names": structures[0].get_chemical_symbols(),
-            "avg_cell": structures[0].get_cell().complete(),
-            "atom_indices": np.arange(len(_b_factors)),
-        }
+        results = compute_adp_results(structures, unwrapped)
+        _b_factors = results["b_factors"]
 
         # ── Per-element summary table ──────────────────────────────────────
         _names = results["atom_names"]
@@ -809,7 +838,9 @@ def _(Atoms, results, structures):
 
 @app.cell
 def _(mo):
-    mo.md("""## 6 · B-factor Plot""")
+    mo.md("""
+    ## 6 · B-factor Plot
+    """)
     return
 
 
@@ -890,22 +921,20 @@ def _(alt, atomic_numbers, jmol_colors, mo, np, pd, results):
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
+    mo.md(r"""
     ## 7 · MSRD Path Analysis
 
     Specify an **absorber site** to calculate mean square relative displacements
     for EXAFS/FEFF.
 
     | Format | Meaning |
-    |--------|---------|
+    |--------|----------|
     | `K` | All K atoms |
     | `K.1` | First K atom (1-based within element) |
     | `K.1-3` | First three K atoms |
     | `11` | 11th atom in structure (1-based, any element) |
     | `11-20` | Atoms 11–20 (1-based, inclusive) |
-    """
-    )
+    """)
     return
 
 
@@ -941,7 +970,11 @@ def _(mo):
         start=0.0,
         stop=20.0,
         step=0.1,
-        label="3-body cutoff (Å) — set 0 to skip 3-body paths",
+        label="3-body neighbor cutoff (Å) (0 = skip)",
+    )
+    exclude_hydrogen_cb = mo.ui.checkbox(
+        label="Exclude hydrogen from neighbor search",
+        value=True,
     )
     run_msrd = mo.ui.run_button(label="▶  Run MSRD Analysis")
 
@@ -950,14 +983,22 @@ def _(mo):
             mo.hstack(
                 [
                     mo.vstack([element_spec, cutoff, tol_dist]),
-                    mo.vstack([cutoff_3body, tol_angle]),
+                    mo.vstack([cutoff_3body, tol_angle, exclude_hydrogen_cb]),
                 ],
                 gap=2,
             ),
             run_msrd,
         ]
     )
-    return cutoff, cutoff_3body, element_spec, run_msrd, tol_angle, tol_dist
+    return (
+        cutoff,
+        cutoff_3body,
+        element_spec,
+        exclude_hydrogen_cb,
+        run_msrd,
+        tol_angle,
+        tol_dist,
+    )
 
 
 @app.cell
@@ -966,8 +1007,10 @@ def _(
     cutoff,
     cutoff_3body,
     element_spec,
+    exclude_hydrogen_cb,
     mo,
     output_prefix,
+    parse_site_specification,
     pd,
     results,
     run_msrd,
@@ -1012,6 +1055,7 @@ def _(
                         tol_dist=tol_dist.value,
                         tol_angle=tol_angle.value,
                         cutoff_3body=_c3b,
+                        exclude_hydrogen=exclude_hydrogen_cb.value,
                     )
 
                 # ── Build display tables ─────────────────────────────────
@@ -1120,7 +1164,13 @@ def _(alt, atomic_numbers, jmol_colors, mo, msrd_df):
             x=alt.X("Reff (Å):Q", title="Reff (Å)"),
             y=alt.Y("σ² (Å²):Q", title="σ² (Å²)"),
             color=alt.Color("Path type:N", title="Path type", scale=_pt_color_scale),
-            shape=alt.Shape("Body:N", title="Body"),
+            shape=alt.Shape(
+                "Body:N",
+                title="Body",
+                scale=alt.Scale(
+                    domain=["2-body", "3-body"], range=["circle", "triangle-up"]
+                ),
+            ),
             size=alt.value(60),
             opacity=alt.value(0.75),
             tooltip=[
@@ -1397,15 +1447,13 @@ def _(
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
+    mo.md(r"""
     ---
     ### References
     - Rehr & Albers, *Rev. Mod. Phys.* **72**, 621 (2000) – EXAFS path definitions
     - Kabsch, *Acta Cryst. A* **32**, 922 (1976) – Optimal rotation algorithm
     - Debye-Waller factor: B = 8π²⟨u²⟩
-    """
-    )
+    """)
     return
 
 

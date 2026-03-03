@@ -1487,5 +1487,256 @@ def create_config_example(
         raise typer.Exit(1) from e
 
 
+@app.command("debye-waller")
+def debye_waller(
+    trajectory: Path = typer.Argument(
+        ..., help="Path to trajectory file (any ASE-readable format)"
+    ),
+    prefix: str = typer.Option(
+        "",
+        "--prefix",
+        "-p",
+        help="Output file prefix (defaults to trajectory file stem)",
+    ),
+    skip_frames: int = typer.Option(
+        0, "--skip-frames", "-s", help="Number of frames to skip at the start"
+    ),
+    no_align: bool = typer.Option(
+        False, "--no-align", help="Skip Kabsch alignment (use raw unwrapped positions)"
+    ),
+    site: str = typer.Option(
+        "",
+        "--site",
+        help=(
+            "Absorber site for MSRD analysis. "
+            "Formats: 'K' (all K atoms), 'K.1' (first K), 'K.1-3' (first three K), "
+            "'11' (11th atom), '11-20' (atoms 11-20, 1-based)."
+        ),
+    ),
+    cutoff: float = typer.Option(3.5, "--cutoff", "-r", help="Neighbor cutoff in Å"),
+    cutoff_3body: float = typer.Option(
+        0.0,
+        "--cutoff-3body",
+        help=(
+            "Maximum absorber-to-neighbor distance (Å) used to select legs for "
+            "3-body paths. This is a neighbor distance cutoff, not an Reff cutoff — "
+            "it limits each individual leg length, not the total path length. "
+            "Set to 0 to skip 3-body paths entirely."
+        ),
+    ),
+    tol_dist: float = typer.Option(
+        0.1, "--tol-dist", help="Distance grouping tolerance in Å"
+    ),
+    tol_angle: float = typer.Option(
+        5.0, "--tol-angle", help="Angle grouping tolerance in degrees"
+    ),
+    include_hydrogen: bool = typer.Option(
+        False,
+        "--include-hydrogen",
+        help=(
+            "Include hydrogen atoms in the neighbor search "
+            "for MSRD paths (excluded by default)."
+        ),
+    ),
+) -> None:
+    """Compute Debye-Waller factors and MSRD from an MD trajectory.
+
+    Always writes:
+
+    \b
+      <prefix>_with_adp.cif    CIF with anisotropic displacement parameters
+      <prefix>_bfactors.png    B-factor scatter plot per atom / element
+      <prefix>_msrd.png        σ² vs Reff plot (only when --site is given)
+      <prefix>_msrd_paths.csv  MSRD path table (only when --site is given)
+    """
+    from rich.table import Table
+
+    from .debye_waller_core import (
+        calculate_grouped_msrd,
+        compute_adp_results,
+        load_trajectory,
+        msrd_to_dataframe,
+        parse_site_specification,
+        plot_bfactors,
+        plot_sigma2_vs_reff,
+        process_trajectory,
+        save_cif_with_adp,
+    )
+
+    # ── Resolve output prefix ─────────────────────────────────────────────
+    out_prefix = prefix if prefix else trajectory.stem
+
+    # ── Load ──────────────────────────────────────────────────────────────
+    console.print(
+        f"[bold]Loading trajectory:[/bold] [cyan]{trajectory}[/cyan]"
+        + (f" (skipping {skip_frames} frames)" if skip_frames else "")
+    )
+    try:
+        structures = load_trajectory(trajectory, skip_frames=skip_frames)
+    except (OSError, ValueError) as exc:
+        console.print(f"[red]Error loading trajectory: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    n_frames = len(structures)
+    n_atoms = len(structures[0])
+    elements_str = ", ".join(sorted(set(structures[0].get_chemical_symbols())))
+    console.print(
+        f"  [green]✓[/green] {n_frames} frames · {n_atoms} atoms · "
+        f"elements: {elements_str}"
+    )
+
+    # ── Unwrap & align ────────────────────────────────────────────────────
+    with console.status(
+        "[bold]Unwrapping PBC" + (" and Kabsch-aligning" if not no_align else "") + "…"
+    ):
+        unwrapped = process_trajectory(structures, align=not no_align)
+    console.print(
+        f"  [green]✓[/green] Positions processed "
+        f"({'aligned' if not no_align else 'no alignment'}) · "
+        f"shape: {unwrapped.shape}"
+    )
+
+    # ── ADP / B-factors ───────────────────────────────────────────────────
+    with console.status("[bold]Computing ADP tensors…"):
+        results = compute_adp_results(structures, unwrapped)
+
+    b_factors = results["b_factors"]
+    atom_names = results["atom_names"]
+    import numpy as _np
+
+    unique_elements = sorted(set(atom_names))
+
+    # Summary table
+    summary_table = Table(title="Debye-Waller factors by element", show_header=True)
+    summary_table.add_column("Element")
+    summary_table.add_column("N atoms", justify="right")
+    summary_table.add_column("Mean B (Å²)", justify="right")
+    summary_table.add_column("Std B (Å²)", justify="right")
+    summary_table.add_column("Min B (Å²)", justify="right")
+    summary_table.add_column("Max B (Å²)", justify="right")
+    for el in unique_elements:
+        mask = _np.array([n == el for n in atom_names])
+        bv = b_factors[mask]
+        summary_table.add_row(
+            el,
+            str(int(mask.sum())),
+            f"{_np.mean(bv):.4f}",
+            f"{_np.std(bv):.4f}",
+            f"{_np.min(bv):.4f}",
+            f"{_np.max(bv):.4f}",
+        )
+    console.print(summary_table)
+    console.print(f"  Overall mean B-factor: [bold]{_np.mean(b_factors):.4f}[/bold] Å²")
+
+    # ── Save CIF ──────────────────────────────────────────────────────────
+    cif_path = Path(f"{out_prefix}_with_adp.cif")
+    cif_path.write_text(save_cif_with_adp(results))
+    console.print(f"  [green]✓[/green] CIF saved → [cyan]{cif_path}[/cyan]")
+
+    # ── B-factor plot ─────────────────────────────────────────────────────
+    bfactor_plot_path = Path(f"{out_prefix}_bfactors.png")
+    plot_bfactors(results, output_path=bfactor_plot_path)
+    console.print(
+        f"  [green]✓[/green] B-factor plot → [cyan]{bfactor_plot_path}[/cyan]"
+    )
+
+    # ── MSRD ──────────────────────────────────────────────────────────────
+    if not site:
+        console.print("[dim]No --site specified; skipping MSRD analysis.[/dim]")
+        return
+
+    symbols = structures[0].get_chemical_symbols()
+    try:
+        central_indices = parse_site_specification(site, symbols)
+    except ValueError as exc:
+        console.print(f"[red]Site specification error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    console.print(
+        f"\n[bold]MSRD analysis:[/bold] site=[cyan]{site}[/cyan] "
+        f"({len(central_indices)} absorber(s)) · cutoff={cutoff} Å"
+        + (f" · 3-body cutoff={cutoff_3body} Å" if cutoff_3body > 0 else "")
+    )
+
+    with console.status("[bold]Computing MSRD paths…"):
+        res_2b, res_3b = calculate_grouped_msrd(
+            structures,
+            unwrapped,
+            central_indices,
+            site,
+            cutoff=cutoff,
+            tol_dist=tol_dist,
+            tol_angle=tol_angle,
+            cutoff_3body=cutoff_3body if cutoff_3body > 0 else 0,
+            exclude_hydrogen=not include_hydrogen,
+        )
+
+    # ── Path summary tables ───────────────────────────────────────────────
+    if res_2b:
+        t2 = Table(title="2-Body MSRD Paths", show_header=True)
+        for col, just in [
+            ("Path type", "left"),
+            ("Reff (Å)", "right"),
+            ("σ² (Å²)", "right"),
+            ("Count", "right"),
+            ("Degeneracy", "right"),
+        ]:
+            t2.add_column(col, justify=just)
+        for r in res_2b:
+            t2.add_row(
+                r["type"],
+                f"{r['reff']:.4f}",
+                f"{r['sigma2']:.6f}",
+                str(r["count"]),
+                f"{r['count'] / len(central_indices):.1f}",
+            )
+        console.print(t2)
+
+    if res_3b:
+        t3 = Table(title="3-Body MSRD Paths", show_header=True)
+        for col, just in [
+            ("Path type", "left"),
+            ("Reff (Å)", "right"),
+            ("σ² (Å²)", "right"),
+            ("Angle (°)", "right"),
+            ("Count", "right"),
+            ("Degeneracy", "right"),
+        ]:
+            t3.add_column(col, justify=just)
+        for r in res_3b:
+            t3.add_row(
+                r["type"],
+                f"{r['reff']:.4f}",
+                f"{r['sigma2']:.6f}",
+                f"{r['angle']:.1f}",
+                str(r["count"]),
+                f"{2 * r['count'] / len(central_indices):.1f}",
+            )
+        console.print(t3)
+
+    if not res_2b and not res_3b:
+        console.print(
+            "[yellow]No MSRD paths found. Try increasing the cutoff.[/yellow]"
+        )
+        return
+
+    console.print(
+        f"\n  [green]✓[/green] Found [bold]{len(res_2b)}[/bold] two-body and "
+        f"[bold]{len(res_3b)}[/bold] three-body paths."
+    )
+
+    # ── CSV ───────────────────────────────────────────────────────────────
+    msrd_df = msrd_to_dataframe(res_2b, res_3b, n_absorbers=len(central_indices))
+    site_label = site.replace(" ", "_")
+    csv_path = Path(f"{out_prefix}_msrd_paths_{site_label}.csv")
+    msrd_df.to_csv(csv_path, index=False)
+    console.print(f"  [green]✓[/green] MSRD CSV → [cyan]{csv_path}[/cyan]")
+
+    # ── σ² vs Reff plot ───────────────────────────────────────────────────
+    msrd_plot_path = Path(f"{out_prefix}_msrd_{site_label}.png")
+    plot_sigma2_vs_reff(res_2b, res_3b, output_path=msrd_plot_path)
+    console.print(f"  [green]✓[/green] σ² vs Reff plot → [cyan]{msrd_plot_path}[/cyan]")
+
+
 if __name__ == "__main__":
     app()
