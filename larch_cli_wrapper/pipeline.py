@@ -18,6 +18,7 @@ from larch import Group
 
 from .feff_utils import (
     FeffConfig,
+    cleanup_feff_output,
     generate_multi_site_feff_inputs,
     normalize_absorbers,
     run_multi_site_feff_calculations,
@@ -285,6 +286,7 @@ class FeffExecutor:
         max_workers: int | None = None,
         cache_dir: Path | None = None,
         force_recalculate: bool = False,
+        hdf5_store=None,
     ):
         """Initialize the FEFF executor.
 
@@ -292,10 +294,13 @@ class FeffExecutor:
             max_workers: Maximum number of parallel workers
             cache_dir: Directory for caching results
             force_recalculate: Whether to force recalculation
+            hdf5_store: Optional :class:`~larch_cli_wrapper.hdf5_store.ExafsHDF5Store`
+                for writing per-site chi(k) and path contributions incrementally.
         """
         self.max_workers = max_workers
         self.cache_dir = cache_dir
         self.force_recalculate = force_recalculate
+        self.hdf5_store = hdf5_store
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
         if self.cache_dir:
@@ -383,6 +388,7 @@ class FeffExecutor:
                 parallel=parallel,
                 max_workers=self.max_workers,
                 progress_callback=None,  # Don't report precompute progress separately
+                require_chi=False,  # Precompute: phase.pad+pot.pad only, not chi.dat
             )
 
             # Check all precompute tasks succeeded
@@ -475,53 +481,70 @@ class FeffExecutor:
         tasks_to_run = []
 
         for task in batch.tasks:
-            cache_key = self._get_feff_input_hash(task.input_file)
-            cached_data = self._load_cached_result(cache_key)
-
-            if cached_data is not None:
-                chi, k = cached_data
-                self.logger.debug(f"Cache hit for {task.task_id}")
-
-                # Write cached data directly to chi.dat using FEFF format
-                try:
-                    # Ensure output directory exists
-                    task.feff_dir.mkdir(parents=True, exist_ok=True)
-                    chi_file = task.feff_dir / "chi.dat"
-
-                    # If it already exists, raise a warning
-                    if chi_file.exists():
-                        self.logger.warning(
-                            f"chi.dat already exists for {task.task_id} ({chi_file}), "
-                            f"overwriting from cache"
+            # ── Priority 1: HDF5 cache (when --hdf5 is active) ──────────────
+            if self.hdf5_store and not self.force_recalculate:
+                if self.hdf5_store.has_site_result(task.frame_index, task.site_index):
+                    try:
+                        g = self.hdf5_store.load_site_as_group(
+                            task.frame_index, task.site_index
                         )
+                        task.feff_dir.mkdir(parents=True, exist_ok=True)
+                        chi_file = task.feff_dir / "chi.dat"
+                        # Write minimal chi.dat so ResultProcessor can read it
+                        data = np.column_stack(
+                            [g.k, g.chi, np.zeros_like(g.k), np.zeros_like(g.k)]
+                        )
+                        header = (
+                            "#       k          chi          mag           phase @#"
+                        )
+                        np.savetxt(chi_file, data, header=header, fmt="%.8e")
+                        cached_results[task.task_id] = True
+                        completed_tasks += 1
+                        if progress_callback:
+                            progress_callback(completed_tasks, total_tasks)
+                        self.logger.debug(f"HDF5 cache hit for {task.task_id}")
+                        continue  # skip pkl cache and FEFF run
+                    except Exception as exc:  # noqa: BLE001
+                        self.logger.warning(
+                            f"HDF5 cache read failed for {task.task_id}: {exc}"
+                        )
+                        # fall through to FEFF run
 
-                    # Create FEFF-style format with k, chi, mag, phase columns
-                    mag = np.abs(chi)
-                    phase = np.angle(chi)
+            # ── Priority 2: pkl cache (only when HDF5 is not active) ────────
+            cache_key = self._get_feff_input_hash(task.input_file)
+            if not self.hdf5_store:
+                cached_data = self._load_cached_result(cache_key)
+                if cached_data is not None:
+                    chi, k = cached_data
+                    self.logger.debug(f"Pkl cache hit for {task.task_id}")
+                    try:
+                        task.feff_dir.mkdir(parents=True, exist_ok=True)
+                        chi_file = task.feff_dir / "chi.dat"
+                        if chi_file.exists():
+                            self.logger.warning(
+                                f"chi.dat already exists for {task.task_id} "
+                                f"({chi_file}), overwriting from cache"
+                            )
+                        mag = np.abs(chi)
+                        phase = np.angle(chi)
+                        chi_real = np.real(chi) if np.iscomplexobj(chi) else chi
+                        data = np.column_stack([k, chi_real, mag, phase])
+                        header = (
+                            "#       k          chi          mag           phase @#"
+                        )
+                        np.savetxt(chi_file, data, header=header, fmt="%.8e")
+                        cached_results[task.task_id] = True
+                        completed_tasks += 1
+                        if progress_callback:
+                            progress_callback(completed_tasks, total_tasks)
+                        continue
+                    except (OSError, ValueError, TypeError) as e:
+                        self.logger.warning(
+                            f"Failed to restore pkl cache for {task.task_id}: {e}"
+                        )
+                        # fall through to FEFF run
 
-                    # Create data array in FEFF format: k, chi (real), mag, phase
-                    chi_real = np.real(chi) if np.iscomplexobj(chi) else chi
-                    data = np.column_stack([k, chi_real, mag, phase])
-
-                    # Write with FEFF-style header
-                    header = "#       k          chi          mag           phase @#"
-                    np.savetxt(chi_file, data, header=header, fmt="%.8e")
-
-                    cached_results[task.task_id] = True
-                    completed_tasks += 1
-
-                    # Report progress for cached result
-                    if progress_callback:
-                        progress_callback(completed_tasks, total_tasks)
-
-                except (OSError, ValueError, TypeError) as e:
-                    self.logger.warning(
-                        f"Failed to write cached result for {task.task_id}: {e}"
-                    )
-                    # If writing cached result fails, add to tasks_to_run
-                    tasks_to_run.append((task, cache_key))
-            else:
-                tasks_to_run.append((task, cache_key))
+            tasks_to_run.append((task, cache_key))
 
         # Log cache statistics
         n_cached = len(cached_results)
@@ -547,7 +570,10 @@ class FeffExecutor:
 
             results = run_multi_site_feff_calculations(
                 input_files=input_files,
-                cleanup=batch.config.cleanup_feff_files,
+                # Disable auto-cleanup when keep_path_files is set; we'll
+                # do cleanup manually after reading the per-path feffNNNN.dat files.
+                cleanup=batch.config.cleanup_feff_files
+                and not batch.config.keep_path_files,
                 parallel=parallel,
                 max_workers=self.max_workers,
                 progress_callback=feff_progress_callback,
@@ -566,8 +592,69 @@ class FeffExecutor:
                         from .feff_utils import read_feff_output
 
                         chi, k = read_feff_output(feff_dir)
-                        self._save_to_cache(cache_key, chi, k)
+                        # Persist: pkl when no HDF5, HDF5 is its own persistence
+                        if not self.hdf5_store:
+                            self._save_to_cache(cache_key, chi, k)
                         self.logger.debug(f"Cached result for {task.task_id}")
+
+                        # Write to HDF5 store (and path contributions if requested)
+                        if self.hdf5_store:
+                            try:
+                                path_contributions: list | None = None
+                                # Use the store's own store_paths flag (single source
+                                # of truth set at ExafsHDF5Store construction time)
+                                # rather than batch.config.keep_path_files to avoid
+                                # any config-to-batch propagation issues.
+                                if self.hdf5_store.store_paths:
+                                    from .feff_utils import get_feff_numbered_files
+                                    from .hdf5_store import (
+                                        _read_path_contributions_from_dir,
+                                    )
+
+                                    n_feff_files = len(
+                                        get_feff_numbered_files(feff_dir)
+                                    )
+                                    path_contributions = (
+                                        _read_path_contributions_from_dir(feff_dir)
+                                    )
+                                    if n_feff_files > 0 and not path_contributions:
+                                        self.logger.warning(
+                                            f"{task.task_id}: {n_feff_files}"
+                                            " feffNNNN.dat files found but 0"
+                                            " paths were successfully parsed."
+                                            " Check larch FeffPathGroup"
+                                            " compatibility."
+                                        )
+                                    elif n_feff_files == 0:
+                                        self.logger.warning(
+                                            f"{task.task_id}: store_paths=True but no "
+                                            f"feffNNNN.dat files found in {feff_dir}. "
+                                            "Was FEFF run with CONTROL …1 1 1?"
+                                        )
+
+                                self.hdf5_store.write_site_result(
+                                    frame_index=task.frame_index,
+                                    site_index=task.site_index,
+                                    k=np.asarray(k),
+                                    chi=np.asarray(chi),
+                                    success=True,
+                                    absorber_element=task.absorber_element,
+                                    path_contributions=path_contributions,
+                                )
+
+                                # Manual cleanup after path reading when keep_path_files
+                                if (
+                                    self.hdf5_store.store_paths
+                                    and batch.config.cleanup_feff_files
+                                ):
+                                    cleanup_feff_output(feff_dir)
+                            except Exception as exc:  # noqa: BLE001
+                                import traceback
+
+                                self.logger.warning(
+                                    f"HDF5 write failed for {task.task_id}: {exc}\n"
+                                    + traceback.format_exc()
+                                )
                     except (OSError, ValueError, TypeError) as e:
                         self.logger.warning(
                             f"Failed to cache result for {task.task_id}: {e}"
@@ -776,6 +863,7 @@ class PipelineProcessor:
         max_workers: int | None = None,
         cache_dir: Path | None = None,
         force_recalculate: bool = False,
+        hdf5_path: Path | None = None,
     ):
         """Initialize the pipeline processor.
 
@@ -784,13 +872,32 @@ class PipelineProcessor:
             max_workers: Maximum number of parallel workers
             cache_dir: Directory for caching results
             force_recalculate: Whether to force recalculation
+            hdf5_path: Optional path for HDF5 output file. When set, all
+                per-site chi(k) data and aggregates are written into a single
+                HDF5 file instead of scattered ASCII files.  If the file
+                already exists it will be appended to (new frames will be added).
         """
         self.config = config
+        self.hdf5_path = hdf5_path
+
+        # Create HDF5 store if requested (closed again before executor starts)
+        self._hdf5_store = None
+        if hdf5_path is not None:
+            from .hdf5_store import ExafsHDF5Store
+
+            self._hdf5_store = ExafsHDF5Store(
+                hdf5_path,
+                config=config,
+                store_paths=config.keep_path_files,
+                dedup_k=True,
+            )
+
         self.input_generator = InputGenerator(config)
         self.feff_executor = FeffExecutor(
             max_workers=max_workers,
             cache_dir=cache_dir,
             force_recalculate=force_recalculate,
+            hdf5_store=self._hdf5_store,
         )
         self.result_processor = ResultProcessor(config)
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
@@ -848,6 +955,28 @@ class PipelineProcessor:
         overall_average = self.result_processor.create_overall_average(
             list(groups.values())
         )
+
+        # Write aggregates to HDF5 store if one is active
+        if self._hdf5_store is not None:
+            try:
+                if overall_average is not None:
+                    self._hdf5_store.write_overall_average(
+                        overall_average, n_components=len(groups)
+                    )
+                for frame_idx, grp in frame_averages.items():
+                    self._hdf5_store.write_frame_average(
+                        frame_idx,
+                        grp,
+                        n_components=getattr(grp, "n_components", 1),
+                    )
+                for site_idx, grp in site_averages.items():
+                    self._hdf5_store.write_site_average(
+                        site_idx,
+                        grp,
+                        n_components=getattr(grp, "n_components", 1),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning(f"HDF5 aggregate write failed: {exc}")
 
         # Collect individual groups for plotting
         individual_groups = list(groups.values())

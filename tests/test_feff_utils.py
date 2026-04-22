@@ -433,15 +433,27 @@ class TestSpectraAveraging:
         np.testing.assert_array_almost_equal(chi_avg, expected)
 
     def test_average_chi_spectra_complex_data(self):
-        """Test averaging with complex chi data."""
+        """Test that complex chi data is cast to real (imaginary part discarded).
+
+        chi(k) is always real float64 in this codebase.  If complex data is
+        accidentally passed (e.g. from external code), numpy will discard the
+        imaginary part and issue a ComplexWarning.  This test verifies the
+        behaviour is non-crashing and returns the real part only.
+        """
+        import warnings
+
         k = np.linspace(2, 14, 50)
         chi1 = np.sin(k) + 1j * np.cos(k)
         chi2 = np.cos(k) + 1j * np.sin(k)
 
-        chi_avg, k_avg = average_chi_spectra([k, k], [chi1, chi2])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # suppress ComplexWarning
+            chi_avg, k_avg = average_chi_spectra([k, k], [chi1, chi2])
 
-        expected_avg = (chi1 + chi2) / 2
+        # Complex imaginary part is discarded; only real parts are averaged
+        expected_avg = (np.real(chi1) + np.real(chi2)) / 2
         np.testing.assert_array_almost_equal(chi_avg, expected_avg)
+        assert not np.iscomplexobj(chi_avg)
 
     def test_average_chi_spectra_empty_input(self):
         """Test averaging with empty inputs."""
@@ -631,7 +643,13 @@ class TestFeffOutput:
 
     @patch("larch_cli_wrapper.feff_utils.read_ascii")
     def test_read_feff_output_larch_success(self, mock_read_ascii):
-        """Test successful read_feff_output with larch."""
+        """Test successful read_feff_output with larch.
+
+        chi(k) is always returned as real float64 (imaginary part of the complex
+        FEFF amplitude).  If a mock provides complex chi, only the real part
+        is returned.
+        """
+        import warnings
 
         # Create a simple object with only the attributes we want
         class MockData:
@@ -647,10 +665,14 @@ class TestFeffOutput:
             chi_file = feff_dir / "chi.dat"
             chi_file.write_text("# Mock chi.dat\n3.0 0.1 0.2\n4.0 0.3 0.4\n")
 
-            chi, k = read_feff_output(feff_dir)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")  # suppress ComplexWarning
+                chi, k = read_feff_output(feff_dir)
 
-            np.testing.assert_array_equal(chi, mock_data.chi)
+            # chi is always real float64 - imaginary part discarded
+            np.testing.assert_array_equal(chi, np.real(mock_data.chi))
             np.testing.assert_array_equal(k, mock_data.k)
+            assert chi.dtype == np.float64
 
     @patch("larch_cli_wrapper.feff_utils.read_ascii")
     def test_read_feff_output_mag_phase_format(self, mock_read_ascii):

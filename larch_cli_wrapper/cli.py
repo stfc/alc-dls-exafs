@@ -44,6 +44,7 @@ class PlotComponent(str, Enum):
     AVERAGE = "average"
     FRAMES = "frames"
     SITES = "sites"
+    PATHS = "paths"
     ALL = "all"
 
 
@@ -62,7 +63,7 @@ def parse_plot_components(components_str: str) -> list[PlotComponent]:
             raise typer.BadParameter(
                 f"Invalid plot component '{comp}'. Available: {available}"
             ) from None
-    # If 'all' is specified, return all components
+    # If 'all' is specified, return all components EXCEPT 'paths' (opt-in)
     if PlotComponent.ALL in components:
         return [
             PlotComponent.INDIVIDUAL,
@@ -71,6 +72,81 @@ def parse_plot_components(components_str: str) -> list[PlotComponent]:
             PlotComponent.SITES,
         ]
     return components
+
+
+def _diagnose_missing_paths(hdf5_path: "Path", output_dir: "Path", console) -> None:
+    """Print diagnostic information when path contributions are unexpectedly empty."""
+    import h5py
+
+    lines = ["[yellow]Warning: No path contributions found in HDF5.[/yellow]"]
+
+    try:
+        with h5py.File(hdf5_path, "r") as h5:
+            frames_grp = h5.get("frames")
+            if frames_grp is None:
+                lines.append("  [dim]HDF5 has no frames group at all.[/dim]")
+            else:
+                n_frames = len(frames_grp)
+                n_sites_total = 0
+                n_sites_with_paths = 0
+                n_sites_without_paths = 0
+                for frame_name in frames_grp:
+                    sites_grp = frames_grp[frame_name].get("sites")
+                    if sites_grp is None:
+                        continue
+                    for site_name in sites_grp:
+                        n_sites_total += 1
+                        if "paths" in sites_grp[site_name]:
+                            n_sites_with_paths += 1
+                        else:
+                            n_sites_without_paths += 1
+
+                lines.append(
+                    f"  [dim]HDF5 has {n_frames} frames, "
+                    f"{n_sites_total} sites total, "
+                    f"{n_sites_with_paths} with paths stored.[/dim]"
+                )
+                if n_sites_with_paths == 0 and n_sites_total > 0:
+                    lines.append(
+                        "  [yellow]Hint: paths were not written to HDF5. "
+                        "Possible causes:[/yellow]"
+                    )
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+    # Look for feffNNNN.dat files on disk
+    try:
+        from .feff_utils import get_feff_numbered_files
+
+        feff_dat_dirs = []
+        for site_dir in output_dir.glob("frame_*/site_*"):
+            if get_feff_numbered_files(site_dir):
+                feff_dat_dirs.append(site_dir)
+        if feff_dat_dirs:
+            lines.append(
+                f"  [dim]Found feffNNNN.dat files in {len(feff_dat_dirs)} "
+                "site dir(s) on disk — path files exist but parsing failed.[/dim]"
+            )
+            lines.append(
+                "  [yellow]Try running with --log-level debug to see "
+                "FeffPathGroup errors.[/yellow]"
+            )
+        else:
+            lines.append(
+                "  [dim]No feffNNNN.dat files found on disk in output tree.[/dim]"
+            )
+            lines.append(
+                "  [yellow]Possible causes:[/yellow]\n"
+                "    • FEFF ran with CONTROL 0 0 0 … 0 0 (paths/genfmt disabled)\n"
+                "    • Used --reuse-potentials and FEFF crashed before generating"
+                " paths\n"
+                "    • Files were cleaned up before path reading"
+            )
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+    for line in lines:
+        console.print(line)
 
 
 app = typer.Typer(
@@ -108,6 +184,40 @@ def load_config(
         config = FeffConfig()
         console.print("[dim]Using default configuration[/dim]")
     return config
+
+
+def load_cli_defaults(config_file: Path | None) -> dict:
+    """Return the ``cli:`` section from a YAML config file as a flat dict.
+
+    The ``cli:`` section lets users encode pipeline flag defaults that are
+    normally CLI-only (e.g. ``all_frames``, ``hdf5``, ``plot_include``) so
+    they don't have to be repeated on every invocation.  Explicit CLI flags
+    always override these values.
+    """
+    if config_file is None:
+        return {}
+    try:
+        import yaml
+
+        with open(config_file) as f:
+            raw = yaml.safe_load(f)
+        if isinstance(raw, dict):
+            return dict(raw.get("cli", {}) or {})
+    except Exception:  # noqa: BLE001, S110
+        pass
+    return {}
+
+
+def _resolve_cli_arg(cli_value, yaml_value, default):
+    """Return the first non-None value.
+
+    Priority: explicit CLI arg > YAML cli: default > hardcoded default.
+    """
+    if cli_value is not None:
+        return cli_value
+    if yaml_value is not None:
+        return yaml_value
+    return default
 
 
 def update_config_from_cli_options(
@@ -619,8 +729,12 @@ def run_feff(
 
 @app.command("analyze")
 def analyze_feff_outputs(
-    directories: list[Path] = typer.Argument(
-        ..., help="Directories containing FEFF output files"
+    inputs: list[Path] = typer.Argument(
+        None,
+        help=(
+            "Either a single HDF5 results file (results.h5) or one or more "
+            "directories containing FEFF chi.dat output files."
+        ),
     ),
     output_dir: Path = typer.Option(
         Path("analysis"), "--output", "-o", help="Output directory for plots"
@@ -650,14 +764,28 @@ def analyze_feff_outputs(
         "--plot-include",
         help=(
             "Comma-separated list of plot components to include. "
-            "Options: 'individual' (individual spectra), "
-            "'average' (overall average across frames & sites), "
-            "'frames' (one curve per frame; averaged over sites if needed), "
-            "'sites' (one curve per site; averaged over frames) and 'all' "
-            "(all components present). "
-            "Examples: 'average', 'average,frames', 'individual,average,sites' "
-            "Default is 'all'."
+            "Options: 'individual', 'average', 'frames', 'sites', 'paths', 'all'. "
+            "'paths' requires an HDF5 input with stored path contributions. "
+            "Examples: 'average', 'average,paths', 'average,frames,paths'"
         ),
+    ),
+    max_paths: int | None = typer.Option(
+        None,
+        "--max-paths",
+        help=(
+            "Maximum number of path contributions to display in paths panel"
+            " (ranked by amplitude)."
+        ),
+    ),
+    absorber: str | None = typer.Option(
+        None,
+        "--absorber",
+        help="Absorber element symbol for plot labelling (e.g. 'Cu').",
+    ),
+    edge: str | None = typer.Option(
+        None,
+        "--edge",
+        help="Absorption edge for plot labelling (e.g. 'K').",
     ),
     # Analysis Parameters
     kmin: float | None = typer.Option(
@@ -687,63 +815,38 @@ def analyze_feff_outputs(
     nfft: int | None = typer.Option(None, "--nfft", help="Number of FFT points"),
     kstep: float | None = typer.Option(None, "--kstep", help="k-step for FFT (Å⁻¹)"),
 ) -> None:
-    """Analyze FEFF output files and generate plots.
+    """Analyze EXAFS data and generate plots.
+
+    Accepts either an HDF5 results file (from ``larch-cli pipeline --hdf5``) or
+    one or more directories containing FEFF chi.dat output files.
+
+    HDF5 mode (recommended):
+      larch-cli analyze results.h5 --plot-include average,paths
+      larch-cli analyze results.h5 --kmax 14 --dk 2 --plot-include average,paths --show
+
+    All FFT parameters (--kmin, --kmax, --dk, etc.) are applied fresh each time,
+    so you can tweak and re-run without re-running FEFF calculations.
+
+    Directory mode (legacy):
+      larch-cli analyze pipeline_output/frame_*/site_* --plot-include average
 
     Plot components:
-    - 'individual': Plot individual spectra (before averaging)
-    - 'average': Plot the overall average spectrum (averaged over all sites and frames)
-    - 'frames': Plot frame averages (each frame averaged over sites)
-    - 'sites': Plot site averages (each site averaged over frames)
-    - 'all': Plot all available components
-
-    You can combine multiple components with commas, e.g.:
-    - 'average,frames': Plot both overall average and frame averages
-    - 'individual,average': Plot individual spectra with overall average overlay
-    - 'average,frames,sites': Plot overall average with both frame and site averages
+    - 'individual': Individual per-site spectra
+    - 'average': Overall average (all sites and frames)
+    - 'frames': Per-frame averages
+    - 'sites': Per-site averages
+    - 'paths': Path contributions panel (HDF5 mode only)
+    - 'all': All components except 'paths' (opt-in)
     """
-    # Validate directories and create FeffTask objects
-
-    valid_tasks = []
-    for feff_dir in directories:
-        if not feff_dir.exists():
-            console.print(
-                f"[yellow]Warning: Directory {feff_dir} not found, skipping[/yellow]"
-            )
-            continue
-        if not (feff_dir / "chi.dat").exists():
-            console.print(
-                f"[yellow]Warning: No chi.dat in {feff_dir}, skipping[/yellow]"
-            )
-            continue
-
-        # Create FeffTask from directory (similar to run-feff)
-        # Extract frame/site indices from directory name if possible
-        frame_index = 0
-        site_index = 0
-
-        # Try to parse frame_XXXX/site_XXXX pattern
-        parts = feff_dir.parts
-        for _i, part in enumerate(parts):
-            if part.startswith("frame_") and part[6:].isdigit():
-                frame_index = int(part[6:])
-            if part.startswith("site_") and part[5:].isdigit():
-                site_index = int(part[5:])
-
-        # Use feff.inp if exists, otherwise chi.dat
-        input_file = feff_dir / "feff.inp"
-        if not input_file.exists():
-            input_file = feff_dir / "chi.dat"
-
-        task = FeffTask(
-            input_file=input_file,
-            site_index=site_index,
-            frame_index=frame_index,
+    if not inputs:
+        console.print(
+            "[red]Error: provide an HDF5 file or FEFF output directories[/red]"
         )
-        valid_tasks.append(task)
-
-    if not valid_tasks:
-        console.print("[red]Error: No valid FEFF output directories found[/red]")
         raise typer.Exit(1)
+
+    # ── Detect input mode ────────────────────────────────────────────────────
+    hdf5_mode = len(inputs) == 1 and inputs[0].suffix.lower() in (".h5", ".hdf5")
+    hdf5_path: Path | None = inputs[0] if hdf5_mode else None
 
     try:
         config = load_config(config_file, preset)
@@ -761,196 +864,316 @@ def analyze_feff_outputs(
             kstep=kstep,
         )
 
-        # Resolve output_dir to absolute path
-        # immediately to avoid issues with CWD changes
         output_dir = output_dir.resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        console.print(
-            f"[cyan]Analyzing {len(valid_tasks)} FEFF output directories...[/cyan]"
+        plot_components = parse_plot_components(plot_include)
+        want_paths = PlotComponent.PATHS in plot_components
+        max_paths_val = max_paths if max_paths is not None else 10
+
+        # ── HDF5 mode ────────────────────────────────────────────────────────
+        if hdf5_mode:
+            if not hdf5_path.exists():
+                console.print(f"[red]Error: HDF5 file not found: {hdf5_path}[/red]")
+                raise typer.Exit(1)
+
+            console.print(f"[cyan]Loading EXAFS data from {hdf5_path}...[/cyan]")
+
+            from larch import Group
+            from larch.xafs import xftf
+
+            from .exafs_data import PathAggregator
+            from .hdf5_store import ExafsHDF5Store
+
+            groups: dict[str, Group] = {}
+            tasks: list[FeffTask] = []
+            path_contributions: dict = {}
+
+            with ExafsHDF5Store(hdf5_path, mode="r") as store:
+                # Load per-site k/chi and reapply FTs with current params
+                frames_grp = store._h5.get("frames")
+                if frames_grp is not None:
+                    for frame_name in sorted(frames_grp.keys()):
+                        fidx = int(frame_name.split("_")[1])
+                        sites_grp = frames_grp[frame_name].get("sites")
+                        if sites_grp is None:
+                            continue
+                        for site_name in sorted(sites_grp.keys()):
+                            sidx = int(site_name.split("_")[1])
+                            s = sites_grp[site_name]
+                            if "k" not in s or "chi" not in s:
+                                continue
+
+                            import numpy as _np
+
+                            g = Group()
+                            g.k = _np.array(s["k"])
+                            g.chi = _np.array(s["chi"])
+                            # (Re)apply Fourier transform with active params
+                            xftf(g, **config.fourier_params)
+                            g.frame_idx = fidx
+                            g.site_idx = sidx
+                            g.absorber_element = str(
+                                s.attrs.get("absorber_element", "")
+                            )
+                            task_id = f"frame_{fidx:04d}_site_{sidx:04d}"
+                            g.task_id = task_id
+                            groups[task_id] = g
+                            tasks.append(
+                                FeffTask(
+                                    input_file=Path("/dev/null"),
+                                    site_index=sidx,
+                                    frame_index=fidx,
+                                    absorber_element=g.absorber_element,
+                                )
+                            )
+
+                # Load path contributions if requested
+                if want_paths:
+                    try:
+                        agg = PathAggregator()
+                        n_path_records = 0
+                        for path_key, info in store.iter_path_contributions():
+                            agg.add({path_key: info})
+                            n_path_records += 1
+                        if n_path_records > 0:
+                            path_contributions = agg.finalize(config.fourier_params)
+                    except Exception as exc:  # noqa: BLE001
+                        console.print(
+                            "[yellow]Warning: Could not load path"
+                            f" contributions: {exc}[/yellow]"
+                        )
+
+            if not groups:
+                console.print(
+                    "[red]Error: No per-site data found in HDF5 file. "
+                    "Was the pipeline run with --hdf5?[/red]"
+                )
+                raise typer.Exit(1)
+
+            console.print(f"[dim]Loaded {len(groups)} site spectra from HDF5[/dim]")
+            if path_contributions:
+                console.print(
+                    f"[dim]Path contributions: {len(path_contributions)}"
+                    " unique paths[/dim]"
+                )
+            elif want_paths:
+                console.print(
+                    "[yellow]Warning: No path contributions found in HDF5. "
+                    "Re-run pipeline with --keep-paths to store them.[/yellow]"
+                )
+
+            # Compute averages
+            batch = FeffBatch(tasks=tasks, output_dir=output_dir, config=config)
+            rp = ResultProcessor(config)
+            frame_averages = rp.create_frame_averages(groups, batch)
+            site_averages = rp.create_site_averages(groups, batch)
+            overall_average = rp.create_overall_average(list(groups.values()))
+
+            # Absorber/edge for plot labels (from HDF5 metadata if not overridden)
+            plot_absorber = absorber or ""
+            plot_edge = edge or config.edge
+            if not plot_absorber and groups:
+                plot_absorber = next(iter(groups.values())).absorber_element or "X"
+
+        # ── Directory mode (legacy) ───────────────────────────────────────────
+        else:
+            if want_paths:
+                console.print(
+                    "[yellow]Warning: 'paths' component requires HDF5 input; "
+                    "ignoring for directory mode.[/yellow]"
+                )
+                plot_components = [
+                    c for c in plot_components if c != PlotComponent.PATHS
+                ]
+                want_paths = False
+
+            valid_tasks: list[FeffTask] = []
+            for feff_dir in inputs:
+                if not feff_dir.exists():
+                    console.print(
+                        f"[yellow]Warning: {feff_dir} not found, skipping[/yellow]"
+                    )
+                    continue
+                if not (feff_dir / "chi.dat").exists():
+                    console.print(
+                        f"[yellow]Warning: No chi.dat in {feff_dir}, skipping[/yellow]"
+                    )
+                    continue
+
+                frame_index = 0
+                site_index = 0
+                for part in feff_dir.parts:
+                    if part.startswith("frame_") and part[6:].isdigit():
+                        frame_index = int(part[6:])
+                    if part.startswith("site_") and part[5:].isdigit():
+                        site_index = int(part[5:])
+
+                input_file = feff_dir / "feff.inp"
+                if not input_file.exists():
+                    input_file = feff_dir / "chi.dat"
+
+                valid_tasks.append(
+                    FeffTask(
+                        input_file=input_file,
+                        site_index=site_index,
+                        frame_index=frame_index,
+                    )
+                )
+
+            if not valid_tasks:
+                console.print(
+                    "[red]Error: No valid FEFF output directories found[/red]"
+                )
+                raise typer.Exit(1)
+
+            console.print(
+                f"[cyan]Analyzing {len(valid_tasks)} FEFF output directories...[/cyan]"
+            )
+
+            batch = FeffBatch(tasks=valid_tasks, output_dir=output_dir, config=config)
+            rp = ResultProcessor(config)
+            task_results = {t.task_id: True for t in valid_tasks}
+
+            with create_progress() as progress:
+                tid = progress.add_task("Processing outputs...", total=len(valid_tasks))
+                groups = rp.load_successful_results(batch, task_results)
+                progress.update(
+                    tid,
+                    completed=len(valid_tasks),
+                    description="[green]✓ Complete![/green]",
+                )
+
+            frame_averages = rp.create_frame_averages(groups, batch)
+            site_averages = rp.create_site_averages(groups, batch)
+            overall_average = rp.create_overall_average(list(groups.values()))
+            path_contributions = {}
+            plot_absorber = absorber or "X"
+            plot_edge = edge or config.edge
+
+        # ── Build collection and plot ────────────────────────────────────────
+        collection = EXAFSDataCollection(
+            kweight_used=config.kweight,
+            fourier_params=config.fourier_params,
         )
+        if overall_average:
+            collection.overall_average = overall_average
+        if frame_averages:
+            collection.frame_averages = frame_averages
+        if site_averages:
+            collection.site_averages = site_averages
+        if groups:
+            collection.individual_spectra = list(groups.values())
+        if path_contributions:
+            collection.path_contributions = path_contributions
 
-        # Use PipelineProcessor ResultProcessor
-        # Create batch and mark all tasks as successful
-        batch_output_dir = valid_tasks[0].feff_dir.parent if valid_tasks else output_dir
-        batch = FeffBatch(tasks=valid_tasks, output_dir=batch_output_dir, config=config)
-        processor = ResultProcessor(config)
-
-        # Create fake task_results marking all as successful (since we validated
-        # chi.dat exists)
-        task_results = {task.task_id: True for task in valid_tasks}
-
-        with create_progress() as progress:
-            task_id = progress.add_task("Processing outputs...", total=len(valid_tasks))
-
-            # Load all successful results using ResultProcessor
-            groups = processor.load_successful_results(batch, task_results)
-
-            progress.update(
-                task_id,
-                completed=len(valid_tasks),
-                description="[green]✓ Processing complete![/green]",
-            )
-
-            # Generate plots
-            console.print("[cyan]Generating plots...[/cyan]")
-
-            frame_averages = processor.create_frame_averages(
-                groups, batch
-            )  # These are frame averages (averaged over sites)
-            site_averages = processor.create_site_averages(
-                groups, batch
-            )  # These are site averages (averaged over frames)
-            overall_average = processor.create_overall_average(
-                list(groups.values())
-            )  # Overall average (averaged over all sites and/or frames)
-
-            # Parse plot components and create plot
-            plot_components = parse_plot_components(plot_include)
-
-            # Create collection with all available data
-            collection = EXAFSDataCollection(
-                kweight_used=config.kweight,
-                fourier_params=config.fourier_params,
-            )
-
-            # Set data based on what's available
-            if overall_average:
-                collection.overall_average = overall_average
-            if frame_averages:
-                collection.frame_averages = frame_averages
-            if site_averages:
-                collection.site_averages = site_averages
-            if groups:
-                collection.individual_spectra = list(groups.values())
-
-            # Check what components are available and warn if requested but missing
-            available_components = []
-            missing_components = []
-
-            for component in plot_components:
-                if (
-                    component == PlotComponent.INDIVIDUAL
-                    and collection.individual_spectra
-                ):
-                    available_components.append(component)
-                elif component == PlotComponent.AVERAGE and collection.overall_average:
-                    available_components.append(component)
-                elif component == PlotComponent.FRAMES and collection.frame_averages:
-                    available_components.append(component)
-                elif component == PlotComponent.SITES and collection.site_averages:
+        available_components = []
+        missing_components = []
+        for component in plot_components:
+            if component == PlotComponent.INDIVIDUAL and collection.individual_spectra:
+                available_components.append(component)
+            elif component == PlotComponent.AVERAGE and collection.overall_average:
+                available_components.append(component)
+            elif component == PlotComponent.FRAMES and collection.frame_averages:
+                available_components.append(component)
+            elif component == PlotComponent.SITES and collection.site_averages:
+                available_components.append(component)
+            elif component == PlotComponent.PATHS:
+                if path_contributions:
                     available_components.append(component)
                 else:
                     missing_components.append(component)
-
-            if missing_components:
-                missing_str = ", ".join([c.value for c in missing_components])
-                console.print(
-                    f"[yellow]Warning: Requested components not available: "
-                    f"{missing_str}[/yellow]"
-                )
-
-            if available_components:
-                # Determine plot flags
-                plot_individual = PlotComponent.INDIVIDUAL in available_components
-                plot_overall = PlotComponent.AVERAGE in available_components
-                plot_frames = PlotComponent.FRAMES in available_components
-                plot_sites = PlotComponent.SITES in available_components
-
-                # Generate filename based on components
-                component_names = [c.value for c in available_components]
-                filename_base = "_and_".join(component_names) + "_EXAFS"
-
-                # Create plot configuration
-                plot_config = PlotConfig(
-                    plot_individual=plot_individual,
-                    plot_overall_avg=plot_overall,
-                    plot_frame_avg=plot_frames,
-                    plot_site_avg=plot_sites,
-                    absorber="X",  # Generic absorber for analysis
-                    edge="K",
-                    style=plot_style,
-                )
-
-                # Generate plot using new matplotlib function
-                plot_result = plot_exafs_matplotlib(
-                    collection=collection,
-                    config=plot_config,
-                    output_dir=output_dir,
-                    filename_base=filename_base,
-                    show_plot=show_plot,
-                )
-
-                # Success message
-                components_str = ", ".join(component_names)
-                console.print(
-                    f"[green]✓ Plot generated with components: {components_str}[/green]"
-                )
-
-                # Additional info
-                if plot_individual:
-                    console.print(
-                        f"  Individual spectra: {len(collection.individual_spectra)}"
-                    )
-                if plot_frames:
-                    console.print(f"  Frame averages: {len(collection.frame_averages)}")
-                if plot_sites:
-                    console.print(f"  Site averages: {len(collection.site_averages)}")
-
             else:
-                console.print(
-                    "[yellow]Warning: No data available for any requested "
-                    "plot components[/yellow]"
-                )
-                plot_result = None
+                missing_components.append(component)
 
-            # Show plot information
-            if plot_result:
-                console.print("\n[bold]Generated plots:[/bold]")
-                # Handle nested PlotResult structure
-                plot_paths = None
-                if hasattr(plot_result, "plot_paths"):
-                    if isinstance(plot_result.plot_paths, dict):
-                        plot_paths = plot_result.plot_paths
-                    elif hasattr(plot_result.plot_paths, "plot_paths") and isinstance(
-                        plot_result.plot_paths.plot_paths, dict
-                    ):
-                        # Handle nested PlotResult
-                        plot_paths = plot_result.plot_paths.plot_paths
+        if missing_components:
+            missing_str = ", ".join([c.value for c in missing_components])
+            console.print(
+                f"[yellow]Warning: Requested components not available:"
+                f" {missing_str}[/yellow]"
+            )
 
-                if plot_paths:
-                    for fmt, path in plot_paths.items():
-                        console.print(f"  {fmt.upper()}: {path}")
-                else:
-                    console.print("  Plot result available but format not recognized")
+        if not available_components:
+            console.print(
+                "[yellow]Warning: No data available for any requested"
+                " plot components[/yellow]"
+            )
+            return
 
-            # Save averaged groups if requested
-            if save_groups:
-                console.print("\n[cyan]Saving averaged Larch Groups...[/cyan]")
+        plot_individual = PlotComponent.INDIVIDUAL in available_components
+        plot_overall = PlotComponent.AVERAGE in available_components
+        plot_frames = PlotComponent.FRAMES in available_components
+        plot_sites = PlotComponent.SITES in available_components
 
-                # Create collection with all the computed data
-                collection = EXAFSDataCollection(
-                    kweight_used=config.kweight,
-                    fourier_params=config.fourier_params,
-                )
+        component_names = [
+            c.value for c in available_components if c != PlotComponent.PATHS
+        ]
+        filename_base = (
+            "_and_".join(component_names) + "_EXAFS" if component_names else "EXAFS"
+        )
 
-                if overall_average:
-                    collection.overall_average = overall_average
+        plot_config = PlotConfig(
+            plot_individual=plot_individual,
+            plot_overall_avg=plot_overall,
+            plot_frame_avg=plot_frames,
+            plot_site_avg=plot_sites,
+            plot_paths=want_paths,
+            max_paths=max_paths_val,
+            absorber=plot_absorber,
+            edge=plot_edge,
+            style=plot_style,
+        )
 
-                collection.frame_averages = frame_averages
-                collection.site_averages = site_averages
-                collection.individual_spectra = list(groups.values())
+        plot_result = plot_exafs_matplotlib(
+            collection=collection,
+            config=plot_config,
+            output_dir=output_dir,
+            filename_base=filename_base,
+            show_plot=show_plot,
+        )
 
-                # Save to subdirectory
-                groups_dir = output_dir / "larch_groups"
-                saved_dir = collection.export_larch_groups(
-                    output_dir=groups_dir, save_individual=True, save_averages=True
-                )
+        components_str = ", ".join(c.value for c in available_components)
+        console.print(
+            f"[green]✓ Plot generated with components: {components_str}[/green]"
+        )
+        if plot_individual:
+            console.print(f"  Individual spectra: {len(collection.individual_spectra)}")
+        if plot_frames:
+            console.print(f"  Frame averages: {len(collection.frame_averages)}")
+        if plot_sites:
+            console.print(f"  Site averages: {len(collection.site_averages)}")
 
-                console.print(f"[green]✓ Larch Groups saved to {saved_dir}[/green]")
-                console.print(
-                    "  Use EXAFSDataCollection.load_larch_groups() to load them back"
-                )
+        if plot_result:
+            console.print("\n[bold]Generated plots:[/bold]")
+            plot_paths_out = None
+            if hasattr(plot_result, "plot_paths"):
+                if isinstance(plot_result.plot_paths, dict):
+                    plot_paths_out = plot_result.plot_paths
+                elif hasattr(plot_result.plot_paths, "plot_paths") and isinstance(
+                    plot_result.plot_paths.plot_paths, dict
+                ):
+                    plot_paths_out = plot_result.plot_paths.plot_paths
+            if plot_paths_out:
+                for fmt, path in plot_paths_out.items():
+                    console.print(f"  {fmt.upper()}: {path}")
+
+        # Save averaged groups if requested
+        if save_groups:
+            console.print("\n[cyan]Saving averaged Larch Groups...[/cyan]")
+            save_collection = EXAFSDataCollection(
+                kweight_used=config.kweight,
+                fourier_params=config.fourier_params,
+            )
+            if overall_average:
+                save_collection.overall_average = overall_average
+            save_collection.frame_averages = frame_averages
+            save_collection.site_averages = site_averages
+            save_collection.individual_spectra = list(groups.values())
+            groups_dir = output_dir / "larch_groups"
+            saved_dir = save_collection.export_larch_groups(
+                output_dir=groups_dir, save_individual=True, save_averages=True
+            )
+            console.print(f"[green]✓ Larch Groups saved to {saved_dir}[/green]")
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -974,14 +1197,14 @@ def run_full_pipeline(
     preset: str | None = typer.Option(
         None, "--preset", "-p", help=f"Configuration preset: {list(PRESETS.keys())}"
     ),
-    all_sites: bool = typer.Option(
-        False, "--all-sites", help="Process all sites of the given element"
+    all_sites: bool | None = typer.Option(
+        None,
+        "--all-sites/--no-all-sites",
+        help="Process all sites of the given element",
     ),
-    all_frames: bool = typer.Option(
-        False,
-        "--all-frames",
-        "--trajectory",
-        "-t",
+    all_frames: bool | None = typer.Option(
+        None,
+        "--all-frames/--no-all-frames",
         help="Process all frames in trajectory",
     ),
     ase_read_kwargs: str | None = typer.Option(
@@ -1003,40 +1226,71 @@ def run_full_pipeline(
             "or path to matplotlib style file"
         ),
     ),
-    save_groups: bool = typer.Option(
-        False,
-        "--save-groups",
+    save_groups: bool | None = typer.Option(
+        None,
+        "--save-groups/--no-save-groups",
         help="Save averaged Larch Groups to files (ASCII format)",
     ),
-    plot_include: str = typer.Option(
-        "all",
+    plot_include: str | None = typer.Option(
+        None,
         "--plot-include",
         help=(
             "Comma-separated list of plot components to include. "
             "Options: 'individual' (individual spectra), 'average' (overall average), "
-            "'frames' (frame averages), 'sites' (site averages) and 'all' "
-            "(all components present). "
+            "'frames' (frame averages), 'sites' (site averages), "
+            "'paths' (path contributions panel), and 'all' "
+            "(all components present, excluding paths). "
             "Examples: 'average', 'average,frames', 'individual,average,sites' "
             "Default is 'all'."
         ),
     ),
-    parallel: bool = typer.Option(
-        True, "--parallel/--sequential", help="Enable parallel processing"
+    use_hdf5: bool | None = typer.Option(
+        None,
+        "--hdf5/--no-hdf5",
+        help=(
+            "Write per-site chi(k) and aggregates to a single HDF5 file "
+            "instead of many ASCII .dat files. Implies --keep-paths when "
+            "'paths' is included in --plot-include."
+        ),
     ),
-    workers: int | None = typer.Option(
-        None, "--workers", "-w", help="Number of parallel workers"
+    hdf5_file: Path | None = typer.Option(
+        None,
+        "--hdf5-file",
+        help="Path for the HDF5 output file (default: <output_dir>/results.h5).",
     ),
-    cleanup: bool = typer.Option(
-        True, "--cleanup/--no-cleanup", help="Clean up intermediate files"
+    keep_path_files: bool | None = typer.Option(
+        None,
+        "--keep-paths/--no-keep-paths",
+        help=(
+            "Keep per-path feff####.dat files so path contributions can be "
+            "extracted.  Automatically enabled when 'paths' is in --plot-include "
+            "with --hdf5."
+        ),
     ),
-    force_recalculate: bool = typer.Option(
-        False, "--force/--no-force", help="Force recalculation even if output exists"
+    max_paths: int | None = typer.Option(
+        None,
+        "--max-paths",
+        help=(
+            "Maximum number of path contributions to display (ranked by peak |chi(R)|)."
+        ),
     ),
     cache_dir: Path | None = typer.Option(
         None, "--cache-dir", help="Cache directory for FEFF results"
     ),
-    precompute_potentials: bool = typer.Option(
-        False,
+    parallel: bool | None = typer.Option(
+        None, "--parallel/--sequential", help="Enable parallel processing"
+    ),
+    workers: int | None = typer.Option(
+        None, "--workers", "-w", help="Number of parallel workers"
+    ),
+    cleanup: bool | None = typer.Option(
+        None, "--cleanup/--no-cleanup", help="Clean up intermediate files"
+    ),
+    force_recalculate: bool | None = typer.Option(
+        None, "--force/--no-force", help="Force recalculation even if output exists"
+    ),
+    precompute_potentials: bool | None = typer.Option(
+        None,
         "--reuse-potentials/--no-reuse-potentials",
         help="Reuse precomputed potentials for faster calculations "
         "i.e. compute potentials once for each specified site and "
@@ -1119,8 +1373,44 @@ def run_full_pipeline(
         console.print(f"[red]Error: Structure file {structure} not found[/red]")
         raise typer.Exit(1)
 
+    # Ensure library-level warnings (logger.warning calls) are visible in the terminal.
+    import logging as _logging
+
+    if not _logging.root.handlers:
+        _logging.basicConfig(
+            level=_logging.WARNING, format="%(levelname)s: %(message)s"
+        )
+
     try:
         config = load_config(config_file, preset)
+
+        # Resolve CLI-only flags:
+        # explicit CLI arg > yaml cli: section > hardcoded default
+        _c = load_cli_defaults(config_file)
+        all_sites = _resolve_cli_arg(all_sites, _c.get("all_sites"), False)
+        all_frames = _resolve_cli_arg(all_frames, _c.get("all_frames"), False)
+        show_plot = _resolve_cli_arg(show_plot, _c.get("show"), False)
+        save_groups = _resolve_cli_arg(save_groups, _c.get("save_groups"), False)
+        plot_include = _resolve_cli_arg(plot_include, _c.get("plot_include"), "all")
+        use_hdf5 = _resolve_cli_arg(use_hdf5, _c.get("hdf5"), False)
+        keep_path_files = _resolve_cli_arg(keep_path_files, _c.get("keep_paths"), False)
+        max_paths = _resolve_cli_arg(max_paths, _c.get("max_paths"), 10)
+        ase_read_kwargs = _resolve_cli_arg(ase_read_kwargs, _c.get("ase_kwargs"), None)
+        precompute_potentials = _resolve_cli_arg(
+            precompute_potentials, _c.get("reuse_potentials"), False
+        )
+        _hdf5_file_raw = _resolve_cli_arg(hdf5_file, _c.get("hdf5_file"), None)
+        hdf5_file = Path(_hdf5_file_raw) if _hdf5_file_raw is not None else None
+        # These overlap with FeffConfig fields; cli: section wins over hardcoded
+        # default but config file field wins over cli: default.
+        parallel = _resolve_cli_arg(parallel, _c.get("parallel"), config.parallel)
+        cleanup = _resolve_cli_arg(
+            cleanup, _c.get("cleanup"), config.cleanup_feff_files
+        )
+        force_recalculate = _resolve_cli_arg(
+            force_recalculate, _c.get("force_recalculate"), config.force_recalculate
+        )
+
         config = update_config_from_cli_options(
             config,
             # FEFF Input parameters
@@ -1205,18 +1495,26 @@ def run_full_pipeline(
             cache_dir = DEFAULT_CACHE_DIR
 
         # The config object returned by update_config_from_cli_options
-        # is already a FeffConfig
-        # Update cleanup setting and other processing parameters
-        config.cleanup_feff_files = cleanup
-        config.parallel = parallel
-        config.n_workers = workers
-        config.force_recalculate = force_recalculate
+        # is already a FeffConfig; keep_path_files is set below.
+        # Auto-enable keep_path_files when paths plotting is requested with HDF5.
+        plot_components_early = parse_plot_components(plot_include)
+        want_paths = PlotComponent.PATHS in plot_components_early
+        if want_paths and use_hdf5:
+            keep_path_files = True
+        config.keep_path_files = keep_path_files
+
+        # Determine HDF5 output path
+        effective_hdf5_path: Path | None = None
+        if use_hdf5:
+            effective_hdf5_path = hdf5_file if hdf5_file else output_dir / "results.h5"
+            console.print(f"[dim]HDF5 output: {effective_hdf5_path}[/dim]")
 
         processor = PipelineProcessor(
             config=config,
             max_workers=workers,
             cache_dir=cache_dir,
             force_recalculate=force_recalculate,
+            hdf5_path=effective_hdf5_path,
         )
 
         with create_progress() as progress:
@@ -1258,12 +1556,48 @@ def run_full_pipeline(
         )
         console.print(f"  Successful calculations: {len(individual_groups)}")
 
+        # Close the HDF5 write handle before the plot section opens a new read handle.
+        # This ensures all buffered writes are fully committed to disk before
+        # iter_path_contributions() opens the same file in a separate handle.
+        if processor._hdf5_store is not None:
+            processor._hdf5_store.close()
+
         # Generate plots if show_plot is enabled or plot components specified
         if show_plot or plot_include != "all":
             console.print("\n[cyan]Generating plots...[/cyan]")
 
             # Parse plot components and create plot
             plot_components = parse_plot_components(plot_include)
+            want_paths = PlotComponent.PATHS in plot_components
+
+            # Build PathAggregator from HDF5 if paths were stored
+            path_contributions: dict = {}
+            if want_paths and effective_hdf5_path and effective_hdf5_path.exists():
+                try:
+                    from .exafs_data import PathAggregator
+                    from .hdf5_store import ExafsHDF5Store
+
+                    store = ExafsHDF5Store(effective_hdf5_path, config=config)
+                    agg = PathAggregator()
+                    for path_key, info in store.iter_path_contributions():
+                        agg.add({path_key: info})
+                    path_contributions = agg.finalize(config.fourier_params)
+                    store.close()
+                    if path_contributions:
+                        console.print(
+                            f"[dim]Path contributions:"
+                            f" {len(path_contributions)} unique paths[/dim]"
+                        )
+                    else:
+                        # Diagnose why paths are missing
+                        _diagnose_missing_paths(
+                            effective_hdf5_path, output_dir, console
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    console.print(
+                        f"[yellow]Warning: Could not load path"
+                        f" contributions: {exc}[/yellow]"
+                    )
 
             # Create collection with all available data
             collection = EXAFSDataCollection(
@@ -1280,6 +1614,8 @@ def run_full_pipeline(
                 collection.site_averages = actual_site_averages
             if individual_groups:
                 collection.individual_spectra = individual_groups
+            if path_contributions:
+                collection.path_contributions = path_contributions
 
             # Check what components are available and warn if requested but missing
             available_components = []
@@ -1297,6 +1633,11 @@ def run_full_pipeline(
                     available_components.append(component)
                 elif component == PlotComponent.SITES and collection.site_averages:
                     available_components.append(component)
+                elif component == PlotComponent.PATHS:
+                    if path_contributions:
+                        available_components.append(component)
+                    else:
+                        missing_components.append(component)
                 else:
                     missing_components.append(component)
 
@@ -1314,8 +1655,10 @@ def run_full_pipeline(
                 plot_frames = PlotComponent.FRAMES in available_components
                 plot_sites = PlotComponent.SITES in available_components
 
-                # Generate filename based on components
-                component_names = [c.value for c in available_components]
+                # Generate filename (exclude PATHS from the name)
+                component_names = [
+                    c.value for c in available_components if c != PlotComponent.PATHS
+                ]
                 filename_base = "_and_".join(component_names) + "_EXAFS"
 
                 # Create plot configuration
@@ -1324,6 +1667,8 @@ def run_full_pipeline(
                     plot_overall_avg=plot_overall,
                     plot_frame_avg=plot_frames,
                     plot_site_avg=plot_sites,
+                    plot_paths=want_paths,
+                    max_paths=max_paths,
                     absorber=absorber_spec["element"],  # Generic absorber for analysis
                     edge=config.edge,
                     style=plot_style,
@@ -1339,7 +1684,7 @@ def run_full_pipeline(
                 )
 
                 # Success message
-                components_str = ", ".join(component_names)
+                components_str = ", ".join(c.value for c in available_components)
                 console.print(
                     f"[green]✓ Plot generated with components: {components_str}[/green]"
                 )

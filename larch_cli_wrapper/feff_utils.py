@@ -169,6 +169,8 @@ __all__ = [
     "read_feff_output",
     "average_chi_spectra",
     "cleanup_feff_output",
+    "get_feff_numbered_files",
+    "parse_paths_dat",
 ]
 
 
@@ -238,6 +240,9 @@ class FeffConfig:
     spectrum_type: str = "EXAFS"
     edge: str = "K"
     radius: float = 4.0  # cluster size (quick preset default)
+    exclude_hydrogen: bool = (
+        False  # Exclude H atoms from structure before FEFF input generation
+    )
     # Explicit FEFF card fields. Values accept strings, numbers, or sequences and
     # will be normalized.
     control: Any | None = None
@@ -274,6 +279,9 @@ class FeffConfig:
     force_recalculate: bool = False
     # Clean up unnecessary FEFF output files
     cleanup_feff_files: bool = True
+    # Keep per-path feffNNNN.dat files before cleanup (needed for path contributions).
+    # Automatically forced True when HDF5 store is used with store_paths=True.
+    keep_path_files: bool = False
 
     # Get dictionary of the FT parameters
     @property
@@ -305,10 +313,11 @@ class FeffConfig:
         not the analysis/Fourier transform parameters. Used for caching
         to determine when FEFF calculations need to be re-run.
         """
-        params: dict[str, str | float | dict[str, str | list[str]]] = {
+        params: dict[str, str | float | bool | dict[str, str | list[str]]] = {
             "spectrum_type": self.spectrum_type,
             "edge": self.edge,
             "radius": self.radius,
+            "exclude_hydrogen": self.exclude_hydrogen,
         }
         # Include a stable representation of FEFF cards for cache keys
         cards = self.to_pymatgen_user_tags()
@@ -408,6 +417,8 @@ class FeffConfig:
 
             params["delete_tags"] = existing_delete_tags
 
+        # Strip cli: section (pipeline CLI defaults) — not a FeffConfig field
+        params.pop("cli", None)
         return cls(**params)  # type: ignore[arg-type]
 
     def to_yaml(self, yaml_path: Path) -> None:
@@ -813,19 +824,13 @@ def average_chi_spectra(
     chi_list = []
 
     for _i, (k, chi) in enumerate(zip(k_arrays, chi_arrays, strict=False)):
-        # Interpolate to common k-grid if needed
+        # chi(k) is always real float64 (Im of complex FEFF amplitude).
+        # Interpolate to the common k-grid where needed.
+        chi_real = np.asarray(chi, dtype=np.float64)
         if not np.array_equal(k, k_ref):
-            # Handle complex chi data by interpolating real and imaginary parts
-            # separately
-            if np.iscomplexobj(chi):
-                chi_real = np.interp(k_ref, k, chi.real, left=0, right=0)
-                chi_imag = np.interp(k_ref, k, chi.imag, left=0, right=0)
-                chi_interp = chi_real + 1j * chi_imag
-            else:
-                chi_interp = np.interp(k_ref, k, chi, left=0, right=0)
+            chi_interp = np.interp(k_ref, k, chi_real, left=0.0, right=0.0)
         else:
-            chi_interp = chi
-
+            chi_interp = chi_real
         chi_list.append(chi_interp)
 
     # Apply weights if provided
@@ -869,6 +874,33 @@ def generate_pymatgen_input(
         )
 
     logger.debug(f"Generating FEFF input for absorber index {absorber_index}")
+
+    # Exclude H atoms from structure before generating FEFF input.
+    # absorber_index is always given in terms of the *original* (full) structure,
+    # so we must remap it to the compressed index after H removal.
+    if config.exclude_hydrogen:
+        non_H_indices = [atom.index for atom in atoms if atom.symbol != "H"]
+        n_H = len(atoms) - len(non_H_indices)
+        if n_H == 0:
+            logger.debug(
+                "exclude_hydrogen=True but no hydrogen atoms found in structure "
+                f"(absorber index {absorber_index} unchanged)"
+            )
+        else:
+            if absorber_index not in non_H_indices:
+                raise ValueError(
+                    f"Absorber index {absorber_index} corresponds to a hydrogen atom, "
+                    f"which is excluded by exclude_hydrogen=True. "
+                    f"Choose a non-hydrogen absorber site."
+                )
+            new_absorber_index = non_H_indices.index(absorber_index)
+            logger.debug(
+                f"Excluding {n_H} hydrogen atom(s) from structure "
+                f"({len(atoms)} -> {len(non_H_indices)} atoms). "
+                f"Absorber index remapped: {absorber_index} -> {new_absorber_index}"
+            )
+            atoms = atoms[non_H_indices]
+            absorber_index = new_absorber_index
 
     # Convert to pymatgen structure
     adaptor = AseAtomsAdaptor()
@@ -947,6 +979,7 @@ def run_multi_site_feff_calculations(
     progress_callback: Callable[[int, int], None] | None = None,
     timeout: int = 600,
     max_retries: int = 2,
+    require_chi: bool = True,
 ) -> list[tuple[Path, bool]]:
     """Run FEFF calculations for multiple sites efficiently.
 
@@ -960,6 +993,9 @@ def run_multi_site_feff_calculations(
         timeout: Timeout per calculation in seconds (default: 600 = 10 minutes)
         max_retries: Maximum number of retry attempts for failed calculations
             (default: 2)
+        require_chi: Whether chi.dat must exist for success.  Set to False for
+            potentials-only precompute runs (CONTROL 1 1 1 0 0 0) where only
+            phase.pad + pot.pad are produced.
 
     Returns:
         List of (feff_dir, success) tuples in the same order as input_files
@@ -978,6 +1014,7 @@ def run_multi_site_feff_calculations(
                     verbose=False,
                     cleanup=cleanup,
                     timeout=timeout,
+                    require_chi=require_chi,
                 )
                 if success:
                     return feff_dir, True
@@ -1123,6 +1160,7 @@ def run_feff_calculation(
     verbose: bool = True,
     cleanup: bool = True,
     timeout: int = 600,
+    require_chi: bool = True,
 ) -> bool:
     """Run FEFF calculation with robust error handling.
 
@@ -1131,6 +1169,8 @@ def run_feff_calculation(
         verbose: Whether to enable verbose output
         cleanup: Whether to clean up unnecessary output files
         timeout: Timeout in seconds (default: 600 = 10 minutes)
+        require_chi: Whether chi.dat is required for success (True for full runs;
+            False for potentials-only precompute runs with CONTROL 1 1 1 0 0 0)
 
     Returns:
         True if calculation succeeded, False otherwise
@@ -1157,7 +1197,9 @@ def run_feff_calculation(
         _run_feff_subprocess(feff_command, feff_dir, log_path, timeout)
 
         # Check if calculation produced expected output files
-        success = _check_output_files(chi_file, phase_file, pot_file)
+        success = _check_output_files(
+            chi_file, phase_file, pot_file, require_chi=require_chi
+        )
 
         # Clean up if requested and successful
         if success and cleanup:
@@ -1208,12 +1250,19 @@ def _run_feff_subprocess(
         )
 
 
-def _check_output_files(chi_file: Path, phase_file: Path, pot_file: Path) -> bool:
+def _check_output_files(
+    chi_file: Path, phase_file: Path, pot_file: Path, require_chi: bool = True
+) -> bool:
     """Check if expected output files exist.
 
-    Success criteria: chi.dat exists OR both phase.pad and pot.pad exist.
+    When ``require_chi=True`` (the default for full runs) ``chi.dat`` must
+    exist.  When ``require_chi=False`` (potentials-only precompute runs with
+    ``CONTROL 1 1 1 0 0 0``) success is inferred from ``phase.pad`` and
+    ``pot.pad`` instead.
     """
-    return chi_file.exists() or (phase_file.exists() and pot_file.exists())
+    if require_chi:
+        return chi_file.exists()
+    return phase_file.exists() and pot_file.exists()
 
 
 def _write_log_footer(
@@ -1279,6 +1328,84 @@ def get_feff_numbered_files(feff_dir: Path, base_string="feff") -> list[Path]:
     return feff_files
 
 
+def parse_paths_dat(feff_dir: Path) -> dict[int, dict]:
+    """Parse FEFF paths.dat file to extract path metadata.
+
+    paths.dat format (one block per path)::
+
+        idx  nleg  deg  index, nleg, degeneracy, r=  R_eff
+          x           y           z     ipot  label      rleg      beta        eta
+        x1  y1  z1  ipot1  'El1  '  rleg1  beta1  eta1
+        0.0  0.0  0.0  0  'El0  '  rleg0  beta0  eta0    ← absorber (last)
+
+    For single-scattering (nleg=2) the scatterer label is taken from the first
+    atom line.  For multiple-scattering (nleg≥3) a joined label of all
+    intermediate atoms is used (e.g. ``'Cl-K'``).
+
+    Args:
+        feff_dir: Directory containing paths.dat
+
+    Returns:
+        ``{path_index: {"r_eff": float, "nlegs": int, "degeneracy": float,
+                        "scatterer": str}}``
+        Returns an empty dict if paths.dat is not present.
+    """
+    feff_dir = Path(feff_dir)
+    paths_dat = feff_dir / "paths.dat"
+    if not paths_dat.exists():
+        return {}
+
+    # Pattern for a path header line: leading whitespace, index, nlegs, deg,
+    # then the literal text "index, nleg, degeneracy, r=", then R_eff
+    header_re = re.compile(
+        r"^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+index,\s*nleg,\s*degeneracy,\s*r=\s*([\d.]+)"
+    )
+    # Pattern to extract the label from an atom line: ' ... ipot  'Label  ' ...
+    # The label is a quoted, potentially space-padded element symbol.
+    label_re = re.compile(r"'([^']+)'")
+
+    results: dict[int, dict] = {}
+    lines = paths_dat.read_text().splitlines()
+    i = 0
+    while i < len(lines):
+        m = header_re.match(lines[i])
+        if m:
+            path_idx = int(m.group(1))
+            nlegs = int(m.group(2))
+            deg = float(m.group(3))
+            r_eff = float(m.group(4))
+
+            # Next line is the column-header row ("x  y  z  ipot  label ...")
+            # Then nlegs atom lines follow.
+            atom_labels: list[str] = []
+            j = i + 2  # skip header line
+            for _ in range(nlegs):
+                if j < len(lines):
+                    lm = label_re.findall(lines[j])
+                    if lm:
+                        atom_labels.append(lm[0].strip())
+                    j += 1
+
+            # The absorber is the last atom line (ipot=0, at origin).
+            # Intermediate (scattering) atoms are all but the last.
+            scatterers = atom_labels[:-1] if len(atom_labels) > 1 else atom_labels
+
+            # Build a compact scatterer string: "Cl" for SS, "Cl-K" for MS3…
+            scatterer_str = "-".join(scatterers) if scatterers else "?"
+
+            results[path_idx] = {
+                "r_eff": r_eff,
+                "nlegs": nlegs,
+                "degeneracy": deg,
+                "scatterer": scatterer_str,
+            }
+            i = j
+        else:
+            i += 1
+
+    return results
+
+
 def cleanup_feff_output(feff_dir: Path, keep_essential: bool = True) -> int:
     """Clean up FEFF output files to save disk space.
 
@@ -1328,11 +1455,16 @@ def cleanup_feff_output(feff_dir: Path, keep_essential: bool = True) -> int:
 def read_feff_output(feff_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     """Read FEFF chi.dat output using larch.
 
+    chi(k) is the *imaginary part* of the complex FEFF amplitude, i.e.
+    ``chi = |chi| * sin(phase)`` where ``phase`` is in radians.  It is a
+    plain real-valued float64 array — the standard XAFS observable.
+
     Args:
         feff_dir: Directory containing FEFF output files
 
     Returns:
-        Tuple of (chi, k) arrays where chi is complex and k is real
+        Tuple of (chi, k) where both arrays are real float64.
+        chi is the second column of chi.dat: the oscillating EXAFS signal.
 
     Raises:
         FileNotFoundError: If chi.dat file is not found
@@ -1348,15 +1480,17 @@ def read_feff_output(feff_dir: Path) -> tuple[np.ndarray, np.ndarray]:
         if not hasattr(feff_data, "k"):
             raise AttributeError("FEFF data missing required 'k' attribute")
 
-        # >>> Change begins: use the 'chi' column (2nd column) as the observable χ(k)
+        # The 'chi' column is Im(cchi) — the standard real XAFS observable.
         if hasattr(feff_data, "chi"):
-            k = np.asarray(feff_data.k)
-            chi = np.asarray(feff_data.chi)  # real χ(k) = |χ| sin(phase)
+            k = np.asarray(feff_data.k, dtype=np.float64)
+            chi = np.asarray(feff_data.chi, dtype=np.float64)
             return chi, k
-        # Fallbacks (rare): if 'chi' missing, reconstruct, then take its imaginary part
+        # Fallback: reconstruct chi = |chi| * sin(phase) where phase is in radians
         if hasattr(feff_data, "mag") and hasattr(feff_data, "phase"):
-            k = np.asarray(feff_data.k)
-            chi = np.asarray(feff_data.mag) * np.sin(np.asarray(feff_data.phase))
+            k = np.asarray(feff_data.k, dtype=np.float64)
+            chi = np.asarray(feff_data.mag, dtype=np.float64) * np.sin(
+                np.asarray(feff_data.phase, dtype=np.float64)
+            )
             return chi, k
         raise AttributeError("FEFF data missing 'chi' (and mag/phase) in chi.dat")
 
