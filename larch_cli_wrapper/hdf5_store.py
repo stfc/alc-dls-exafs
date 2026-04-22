@@ -277,6 +277,7 @@ class ExafsHDF5Store:
                     p_grp.attrs["nlegs"] = int(pc["nlegs"])
                     p_grp.attrs["degeneracy"] = float(pc["degeneracy"])
                     p_grp.attrs["scatterer"] = str(pc["scatterer"])
+                    p_grp.attrs["cw_ratio"] = float(pc.get("cw_ratio", 0.0))
 
             self._h5.flush()
 
@@ -482,6 +483,7 @@ class ExafsHDF5Store:
                         "nlegs": nlegs,
                         "degeneracy": float(p.attrs["degeneracy"]),
                         "scatterer": scatterer,
+                        "cw_ratio": float(p.attrs["cw_ratio"]),
                     }
                     yield path_key, info
 
@@ -693,7 +695,7 @@ def _read_path_contributions_from_dir(feff_dir: Path) -> list[dict]:
     path_contributions parameter.  Returns an empty list if no path files are
     found.
     """
-    from .feff_utils import get_feff_numbered_files, parse_paths_dat
+    from .feff_utils import get_feff_numbered_files, parse_files_dat, parse_paths_dat
 
     path_files = get_feff_numbered_files(feff_dir)
     if not path_files:
@@ -705,6 +707,13 @@ def _read_path_contributions_from_dir(feff_dir: Path) -> list[dict]:
         paths_meta = parse_paths_dat(feff_dir)
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"Could not parse paths.dat in {feff_dir}: {exc}")
+
+    # Parse files.dat for cw_ratio (curved-wave amplitude ratio)
+    files_meta: dict[str, dict] = {}
+    try:
+        files_meta = parse_files_dat(feff_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"Could not parse files.dat in {feff_dir}: {exc}")
 
     results = []
     n_failed = 0
@@ -722,6 +731,10 @@ def _read_path_contributions_from_dir(feff_dir: Path) -> list[dict]:
                 result["degeneracy"] = float(meta.get("deg", result["degeneracy"]))
                 if "scatterer" in meta:
                     result["scatterer"] = str(meta["scatterer"])
+
+            # Add cw_ratio from files.dat
+            file_entry = files_meta.get(path_file.name, {})
+            result["cw_ratio"] = float(file_entry.get("cw_ratio", 0.0))
 
             results.append(result)
         except Exception as exc:  # noqa: BLE001

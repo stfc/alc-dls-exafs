@@ -171,6 +171,7 @@ __all__ = [
     "cleanup_feff_output",
     "get_feff_numbered_files",
     "parse_paths_dat",
+    "parse_files_dat",
 ]
 
 
@@ -1402,6 +1403,70 @@ def parse_paths_dat(feff_dir: Path) -> dict[int, dict]:
             i = j
         else:
             i += 1
+
+    return results
+
+
+def parse_files_dat(feff_dir: Path) -> dict[str, dict]:
+    """Parse FEFF files.dat to extract per-path amplitude ratios and metadata.
+
+    files.dat maps each feffNNNN.dat filename to its curved-wave chi amplitude
+    ratio (relative to the strongest path = 100) along with sig2, degeneracy,
+    nlegs and r_eff.  This is the primary source for path importance ranking.
+
+    files.dat format (after a variable-length preamble)::
+
+        file        sig2   amp ratio    deg    nlegs  r effective
+     feff0001.dat 0.00000   100.000     1.000     2   2.4283
+     feff0002.dat 0.00000    96.430     1.000     2   2.4710
+
+    Args:
+        feff_dir: Directory containing files.dat
+
+    Returns:
+        ``{"feff0001.dat": {"sig2": float, "cw_ratio": float,
+                            "deg": float, "nlegs": int, "r_eff": float}, ...}``
+        Returns an empty dict if files.dat is not present or the data
+        block cannot be found.
+    """
+    feff_dir = Path(feff_dir)
+    files_dat = feff_dir / "files.dat"
+    if not files_dat.exists():
+        return {}
+
+    results: dict[str, dict] = {}
+    in_data = False
+
+    for line in files_dat.read_text().splitlines():
+        stripped = line.strip()
+        # Locate the column header line
+        if not in_data and "amp ratio" in stripped:
+            in_data = True
+            continue
+        if not in_data:
+            continue
+        if not stripped:
+            continue
+        tokens = stripped.split()
+        # Expect: filename sig2 cw_ratio deg nlegs r_eff  (6 tokens minimum)
+        if len(tokens) < 6:
+            continue
+        try:
+            filename = tokens[0]
+            sig2 = float(tokens[1])
+            cw_ratio = float(tokens[2])
+            deg = float(tokens[3])
+            nlegs = int(tokens[4])
+            r_eff = float(tokens[5])
+        except (ValueError, IndexError):
+            continue
+        results[filename] = {
+            "sig2": sig2,
+            "cw_ratio": cw_ratio,
+            "deg": deg,
+            "nlegs": nlegs,
+            "r_eff": r_eff,
+        }
 
     return results
 

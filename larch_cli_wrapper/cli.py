@@ -777,6 +777,15 @@ def analyze_feff_outputs(
             " (ranked by amplitude)."
         ),
     ),
+    min_cw_ratio: float | None = typer.Option(
+        None,
+        "--min-cw-ratio",
+        help=(
+            "Minimum curved-wave amplitude ratio (0-100) relative to the strongest"
+            " path. Paths below this threshold are excluded before display."
+            " E.g. 5.0 keeps paths with >=5% of the peak amplitude."
+        ),
+    ),
     absorber: str | None = typer.Option(
         None,
         "--absorber",
@@ -931,6 +940,8 @@ def analyze_feff_outputs(
                 # Load path contributions if requested
                 if want_paths:
                     try:
+                        from .exafs_data import filter_path_contributions
+
                         agg = PathAggregator()
                         n_path_records = 0
                         for path_key, info in store.iter_path_contributions():
@@ -938,6 +949,11 @@ def analyze_feff_outputs(
                             n_path_records += 1
                         if n_path_records > 0:
                             path_contributions = agg.finalize(config.fourier_params)
+                            if min_cw_ratio is not None:
+                                path_contributions = filter_path_contributions(
+                                    path_contributions,
+                                    min_cw_ratio=min_cw_ratio,
+                                )
                     except Exception as exc:  # noqa: BLE001
                         console.print(
                             "[yellow]Warning: Could not load path"
@@ -1274,6 +1290,15 @@ def run_full_pipeline(
             "Maximum number of path contributions to display (ranked by peak |chi(R)|)."
         ),
     ),
+    min_cw_ratio: float | None = typer.Option(
+        None,
+        "--min-cw-ratio",
+        help=(
+            "Minimum curved-wave amplitude ratio (0-100) relative to the strongest"
+            " path. Paths below this threshold are excluded from the plot."
+            " E.g. 5.0 keeps paths with >=5% of the peak amplitude."
+        ),
+    ),
     cache_dir: Path | None = typer.Option(
         None, "--cache-dir", help="Cache directory for FEFF results"
     ),
@@ -1395,6 +1420,7 @@ def run_full_pipeline(
         use_hdf5 = _resolve_cli_arg(use_hdf5, _c.get("hdf5"), False)
         keep_path_files = _resolve_cli_arg(keep_path_files, _c.get("keep_paths"), False)
         max_paths = _resolve_cli_arg(max_paths, _c.get("max_paths"), 10)
+        min_cw_ratio = _resolve_cli_arg(min_cw_ratio, _c.get("min_cw_ratio"), None)
         ase_read_kwargs = _resolve_cli_arg(ase_read_kwargs, _c.get("ase_kwargs"), None)
         precompute_potentials = _resolve_cli_arg(
             precompute_potentials, _c.get("reuse_potentials"), False
@@ -1584,6 +1610,13 @@ def run_full_pipeline(
                     path_contributions = agg.finalize(config.fourier_params)
                     store.close()
                     if path_contributions:
+                        if min_cw_ratio is not None:
+                            from .exafs_data import filter_path_contributions
+
+                            path_contributions = filter_path_contributions(
+                                path_contributions,
+                                min_cw_ratio=min_cw_ratio,
+                            )
                         console.print(
                             f"[dim]Path contributions:"
                             f" {len(path_contributions)} unique paths[/dim]"

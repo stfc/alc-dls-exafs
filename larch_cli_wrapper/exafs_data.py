@@ -28,6 +28,7 @@ __all__ = [
     "prepare_exafs_data_collection",
     "PathContribution",
     "PathAggregator",
+    "filter_path_contributions",
     "make_path_key",
     "PlotConfig",
 ]
@@ -699,6 +700,8 @@ class PathContribution:
     chir_mag: np.ndarray = field(default_factory=lambda: np.array([]))
     chir_re: np.ndarray = field(default_factory=lambda: np.array([]))
     chir_im: np.ndarray = field(default_factory=lambda: np.array([]))
+    cw_ratio: float = 0.0
+    """Mean curved-wave chi amplitude ratio (0–100, relative to strongest path)."""
 
 
 class PathAggregator:
@@ -786,11 +789,59 @@ class PathAggregator:
                 chir_im=np.asarray(g.chir_im)
                 if hasattr(g, "chir_im")
                 else np.array([]),
+                cw_ratio=float(
+                    np.mean([s["cw_ratio"] for s in samples]) if samples else 0.0
+                ),
             )
             result[key] = pc
 
         # Sort by mean r_eff
         return dict(sorted(result.items(), key=lambda kv: kv[1].r_eff))
+
+
+def filter_path_contributions(
+    contribs: dict[str, PathContribution],
+    top_n: int | None = None,
+    min_cw_ratio: float | None = None,
+) -> dict[str, PathContribution]:
+    """Filter path contributions by curved-wave amplitude ratio.
+
+    Paths are ranked by ``cw_ratio`` (the FEFF curved-wave chi amplitude ratio,
+    relative to the strongest path = 100).  Two independent filters can be
+    applied in combination:
+
+    - ``min_cw_ratio`` keeps only paths whose mean ``cw_ratio`` is at or above
+      the threshold (e.g. ``5.0`` retains paths with ≥5% of the peak amplitude).
+    - ``top_n`` keeps at most the N strongest paths after the ratio filter.
+
+    The relative ordering among surviving paths (by ``r_eff``) is preserved.
+
+    Args:
+        contribs: Mapping of path_key → :class:`PathContribution` as returned
+            by :meth:`PathAggregator.finalize`.
+        top_n: Maximum number of paths to keep (strongest first).  ``None``
+            means no cap.
+        min_cw_ratio: Minimum curved-wave ratio threshold (0–100).  Paths
+            below this value are excluded.  ``None`` means no threshold.
+
+    Returns:
+        Filtered dict with the same key type, ordered by ``r_eff``.
+    """
+    if not contribs:
+        return {}
+
+    # Rank all paths by cw_ratio descending to apply top_n / threshold
+    ranked = sorted(contribs.values(), key=lambda pc: pc.cw_ratio, reverse=True)
+
+    if min_cw_ratio is not None:
+        ranked = [pc for pc in ranked if pc.cw_ratio >= min_cw_ratio]
+
+    if top_n is not None:
+        ranked = ranked[:top_n]
+
+    # Restore r_eff ordering among survivors
+    surviving_keys = {pc.path_key for pc in ranked}
+    return {k: v for k, v in contribs.items() if k in surviving_keys}
 
 
 # ---------------------------------------------------------------------------

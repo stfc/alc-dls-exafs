@@ -144,6 +144,48 @@ larch-cli run-feff feff_inputs/ --parallel --workers 2
 larch-cli analyze feff_inputs/ --output plots/ --plot-mode sites --show
 ```
 
+##### Storing Results in HDF5
+
+The pipeline can write all per-site spectra and path contributions to a single
+HDF5 file, which is more convenient for later re-analysis than individual ASCII
+files.
+
+```bash
+# Run pipeline and write results to an HDF5 file
+larch-cli pipeline trajectory.xyz Cu --all-frames --hdf5 --keep-paths \
+    --output pipeline_output/
+
+# Re-analyze from the HDF5 file with different FT parameters
+larch-cli analyze pipeline_output/results.h5 --kmax 16 --dk 2 \
+    --plot-include average,paths
+```
+
+If you already have a `pipeline_output/` directory from a previous run (without
+`--hdf5`), use the bundled helper script to pack it directly — no FEFF
+re-execution or caching involved:
+
+```bash
+# Pack chi.dat files only
+python scripts/pack_output_to_hdf5.py pipeline_output/
+
+# Also include per-path contributions (needed for --plot-include paths)
+python scripts/pack_output_to_hdf5.py pipeline_output/ --keep-paths
+
+# The HDF5 file is written to pipeline_output/results.h5 by default
+# Analyze with path contributions and filter weak paths
+larch-cli analyze pipeline_output/results.h5 \
+    --plot-include average,paths \
+    --min-cw-ratio 5.0
+```
+
+You can also specify a custom path for the HDF5 file:
+
+```bash
+larch-cli pipeline trajectory.xyz Cu --all-frames \
+    --output pipeline_output/ --hdf5 --hdf5-file cu_trajectory.h5
+larch-cli analyze cu_trajectory.h5 --plot-include average,paths --show
+```
+
 ##### Advanced Options
 
 ```bash
