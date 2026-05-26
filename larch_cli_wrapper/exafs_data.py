@@ -702,6 +702,27 @@ class PathContribution:
     chir_im: np.ndarray = field(default_factory=lambda: np.array([]))
     cw_ratio: float = 0.0
     """Mean curved-wave chi amplitude ratio (0–100, relative to strongest path)."""
+    source_frames: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=np.int64)
+    )
+    """Frame indices that contributed to this averaged path."""
+    source_sites: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=np.int64)
+    )
+    """Site indices that contributed to this averaged path."""
+    contribution_pct: float = 0.0
+    """Percentage contribution to the total MD-averaged χ(k) amplitude."""
+    # Averaged raw FEFF parameters for on-the-fly χ recomputation
+    amp: np.ndarray = field(default_factory=lambda: np.array([]))
+    """Averaged scattering amplitude on FEFF's native coarse k-grid."""
+    pha: np.ndarray = field(default_factory=lambda: np.array([]))
+    """Averaged total phase on FEFF's native coarse k-grid."""
+    lam: np.ndarray = field(default_factory=lambda: np.array([]))
+    """Averaged mean free path on FEFF's native coarse k-grid."""
+    rep: np.ndarray = field(default_factory=lambda: np.array([]))
+    """Averaged real part of complex momentum on FEFF's native coarse k-grid."""
+    k_param: np.ndarray = field(default_factory=lambda: np.array([]))
+    """Native coarse k-grid that amp/pha/lam/rep live on (Å⁻¹)."""
 
 
 class PathAggregator:
@@ -770,6 +791,30 @@ class PathAggregator:
             xftf(g, **fourier_params)
 
             first = samples[0]
+            source_frames = np.array(
+                [int(s.get("frame_index", -1)) for s in samples], dtype=np.int64
+            )
+            source_sites = np.array(
+                [int(s.get("site_index", -1)) for s in samples], dtype=np.int64
+            )
+
+            # Average raw FEFF parameters for on-the-fly χ recomputation
+            _param_names = ("amp", "pha", "lam", "rep")
+            _param_avgs: dict[str, np.ndarray] = {}
+            _k_param: np.ndarray = np.array([])
+            for _pname in _param_names:
+                _parrays = [np.asarray(s[_pname], dtype=np.float64) for s in samples if _pname in s]
+                if _parrays:
+                    _param_avgs[_pname] = np.mean(_parrays, axis=0)
+            # k_param is the native coarse FEFF grid; all paths share it
+            if "k_param" in first:
+                _k_param = np.asarray(first["k_param"], dtype=np.float64)
+            elif "k" in first and _param_avgs:
+                _k = np.asarray(first["k"], dtype=np.float64)
+                _first_amp = _param_avgs.get("amp")
+                if _first_amp is not None and len(_k) == len(_first_amp):
+                    _k_param = _k
+
             pc = PathContribution(
                 path_key=key,
                 scatterer=str(first.get("scatterer", "?")),
@@ -792,6 +837,13 @@ class PathAggregator:
                 cw_ratio=float(
                     np.mean([s["cw_ratio"] for s in samples]) if samples else 0.0
                 ),
+                source_frames=source_frames,
+                source_sites=source_sites,
+                amp=_param_avgs.get("amp", np.array([])),
+                pha=_param_avgs.get("pha", np.array([])),
+                lam=_param_avgs.get("lam", np.array([])),
+                rep=_param_avgs.get("rep", np.array([])),
+                k_param=_k_param,
             )
             result[key] = pc
 

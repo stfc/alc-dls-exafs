@@ -609,20 +609,22 @@ class FeffExecutor:
                                     from .feff_utils import get_feff_numbered_files
                                     from .hdf5_store import (
                                         _read_path_contributions_from_dir,
+                                        recompute_path_chi_on_grid,
                                     )
 
                                     n_feff_files = len(
                                         get_feff_numbered_files(feff_dir)
                                     )
-                                    path_contributions = (
-                                        _read_path_contributions_from_dir(feff_dir)
-                                    )
+                                    path_contributions = [
+                                        recompute_path_chi_on_grid(pc, k)
+                                        for pc in _read_path_contributions_from_dir(feff_dir)
+                                    ]
                                     if n_feff_files > 0 and not path_contributions:
                                         self.logger.warning(
                                             f"{task.task_id}: {n_feff_files}"
                                             " feffNNNN.dat files found but 0"
                                             " paths were successfully parsed."
-                                            " Check larch FeffPathGroup"
+                                            " Check larch FeffDatFile"
                                             " compatibility."
                                         )
                                     elif n_feff_files == 0:
@@ -978,10 +980,101 @@ class PipelineProcessor:
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning(f"HDF5 aggregate write failed: {exc}")
 
+            # Second HDF5 file: MD-averaged path contributions
+            if self._hdf5_store.store_paths:
+                try:
+                    self._write_averaged_paths(
+                        overall_average=overall_average,
+                        site_averages=site_averages,
+                        fourier_params=self.config.fourier_params,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.warning(f"Averaged paths write failed: {exc}")
+
         # Collect individual groups for plotting
         individual_groups = list(groups.values())
 
         return overall_average, frame_averages, site_averages, individual_groups
+
+    def _write_averaged_paths(
+        self,
+        overall_average: Group | None,
+        site_averages: dict[int, Group],
+        fourier_params: dict,
+    ) -> None:
+        """Compute MD-averaged path contributions and write to a second HDF5 file."""
+        from .exafs_data import PathAggregator
+        from .hdf5_store import AveragedPathsStore
+
+        if self._hdf5_store is None or self.hdf5_path is None:
+            return
+
+        avg_path = self.hdf5_path.with_name(
+            self.hdf5_path.stem + "_averaged_paths.h5"
+        )
+        store = AveragedPathsStore(avg_path, source_h5_path=self.hdf5_path)
+
+        overall_agg = PathAggregator()
+        site_aggs: dict[int, PathAggregator] = {}
+
+        for (
+            path_key,
+            info,
+            frame_idx,
+            site_idx,
+        ) in self._hdf5_store.iter_path_contributions():
+            info = dict(info)
+            info["frame_index"] = frame_idx
+            info["site_index"] = site_idx
+            overall_agg.add({path_key: info})
+            if site_idx not in site_aggs:
+                site_aggs[site_idx] = PathAggregator()
+            site_aggs[site_idx].add({path_key: info})
+
+        def _add_contribution_pct(contribs, total_group, n_total) -> None:
+            if not contribs or n_total <= 0:
+                return
+            k_ref = np.asarray(total_group.k, dtype=np.float64)
+            total_norm = np.trapezoid(np.abs(total_group.chi), k_ref)
+            if total_norm > 0:
+                for pc in contribs.values():
+                    weight = pc.n_samples / n_total
+                    pc.contribution_pct = float(
+                        np.trapezoid(np.abs(pc.chi * weight), pc.k)
+                        / total_norm
+                        * 100
+                    )
+
+        # Count successful spectra for correct weighting
+        n_total_overall = sum(
+            1 for _ in self._hdf5_store.iter_site_results()
+        )
+
+        if overall_average is not None:
+            overall_paths = overall_agg.finalize(fourier_params)
+            _add_contribution_pct(
+                overall_paths, overall_average, n_total_overall
+            )
+            store.write_average("overall_average", overall_average, overall_paths)
+
+        for site_idx, site_group in site_averages.items():
+            site_paths = (
+                site_aggs[site_idx].finalize(fourier_params)
+                if site_idx in site_aggs
+                else {}
+            )
+            n_total_site = (
+                max((pc.n_samples for pc in site_paths.values()), default=1)
+                if site_paths
+                else 1
+            )
+            _add_contribution_pct(site_paths, site_group, n_total_site)
+            store.write_average(
+                f"site_averages/site_{site_idx:04d}", site_group, site_paths
+            )
+
+        store.close()
+        self.logger.info(f"Wrote averaged paths store: {avg_path}")
 
     def get_cache_info(self) -> dict:
         """Get cache information."""

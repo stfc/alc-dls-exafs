@@ -9,29 +9,44 @@ sequentially (h5py does not support concurrent multi-process writes).
 HDF5 layout
 -----------
 results.h5
-├── meta/           attrs: feff_config (JSON), created_at, version
+├── meta/           attrs: feff_config (JSON), created_at, updated_at,
+│   │                      version, store_paths
+│   ├── k_grid_sites   float64[N]   shared k grid for all per-site chi arrays
+│   │                               (present only when dedup_k=True; individual
+│   │                                site "k" datasets are then omitted)
+│   ├── k_grid_paths   float64[M]   shared k grid for per-path chi arrays
+│   │                               (present only when dedup_k=True and
+│   │                                store_paths=True)
+│   └── k_grid_params  float64[P]   shared native FEFF coarse k grid for raw
+│                                   path parameters amp/pha/lam/rep
 │
 ├── frames/
 │   └── frame_0000/ ... frame_NNNN/
 │       └── sites/
 │           └── site_XXXX/
-│               ├── k          float64[N]   gzip-compressed
+│               ├── k          float64[N]   (omitted when dedup_k=True)
 │               ├── chi        float64[N]   gzip-compressed
 │               │              attrs: site_index, frame_index,
 │               │                     absorber_element, success
 │               └── paths/     (only present when store_paths=True)
 │                   └── path_NNNN/
-│                       ├── k    float64[N]
-│                       ├── chi  float64[N]
-│                       │        attrs: r_eff, nlegs, degeneracy, scatterer
+│                       ├── k      float64[N]   (omitted when dedup_k=True)
+│                       ├── chi    float64[N]   χ(k) on the fine k grid
+│                       ├── amp    float64[P]   FEFF scattering amplitude
+│                       ├── pha    float64[P]   total scattering phase shift
+│                       ├── lam    float64[P]   mean free path
+│                       ├── rep    float64[P]   real part of momentum
+│                       ├── k_param float64[P] (omitted when dedup_k=True)
+│                       └── attrs: r_eff, nlegs, degeneracy, scatterer,
+│                                  cw_ratio
 │
 └── aggregates/
     ├── overall_average/   k, chi, r, chir_mag, chir_re, chir_im
-    │                      attrs: n_components
+    │                      attrs: n_components, average_type
     ├── frame_averages/
-    │   └── frame_XXXX/    same arrays + attrs
+    │   └── frame_XXXX/    same arrays + attrs (frame_index, n_components)
     └── site_averages/
-        └── site_XXXX/     same arrays + attrs
+        └── site_XXXX/     same arrays + attrs (site_index, n_components)
 """
 
 from __future__ import annotations
@@ -47,10 +62,58 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+# ---------------------------------------------------------------------------
+# One-time patch for pyshortcuts / larch encoding issue
+# ---------------------------------------------------------------------------
+# pyshortcuts.str2bytes / bytes2str call bytes(s, sys.stdout.encoding) at
+# *call time*, so the encoding can be None even if it was valid at import.
+# We apply a safe UTF-8 fallback lazily (once, right before FeffPathGroup
+# is first instantiated) to avoid races with larch's own import order.
+def _safe_str2bytes(s: str | bytes) -> bytes:
+    if isinstance(s, bytes):
+        return s
+    return s.encode("utf-8")
+
+
+def _safe_bytes2str(s: bytes | str) -> str:
+    if isinstance(s, str):
+        return s
+    return s.decode("utf-8")
+
+
+_FEFF_ENCODING_PATCHED = False
+
+
+def _ensure_feff_encoding_patch() -> None:
+    """Patch pyshortcuts and larch.utils.strutils with UTF-8-safe str2bytes.
+
+    Applied unconditionally once, right before FeffPathGroup is constructed.
+    Running after larch is imported ensures all module-level references are
+    updated before they are used.
+    """
+    global _FEFF_ENCODING_PATCHED
+    if _FEFF_ENCODING_PATCHED:
+        return
+    _FEFF_ENCODING_PATCHED = True
+    try:
+        import pyshortcuts
+
+        pyshortcuts.str2bytes = _safe_str2bytes
+        pyshortcuts.bytes2str = _safe_bytes2str
+    except ImportError:
+        pass
+    try:
+        import larch.utils.strutils as _strutils
+
+        _strutils.str2bytes = _safe_str2bytes
+        _strutils.bytes2str = _safe_bytes2str
+    except ImportError:
+        pass
+
 if TYPE_CHECKING:
     from larch import Group
 
-    from .exafs_data import EXAFSDataCollection
+    from .exafs_data import EXAFSDataCollection, PathContribution
 
 
 from .feff_utils import FeffConfig
@@ -160,6 +223,7 @@ class ExafsHDF5Store:
                 meta.attrs["feff_config"] = json.dumps(asdict(config), default=str)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"Could not serialise FeffConfig to HDF5 meta: {exc}")
+        meta.attrs["store_paths"] = self.store_paths
 
         # Pre-create top-level groups
         self._h5.require_group("frames")
@@ -241,6 +305,21 @@ class ExafsHDF5Store:
                         "Common k grid for all per-site chi arrays (Å⁻¹). "
                         "Individual site k datasets are omitted."
                     )
+                else:
+                    stored_k = np.array(meta["k_grid_sites"])
+                    if stored_k.shape != arr_k.shape or not np.allclose(
+                        stored_k, arr_k, rtol=1e-6, atol=1e-8
+                    ):
+                        logger.debug(
+                            "k-grid mismatch for frame=%d site=%d "
+                            "(%g…%g, %d pts vs %g…%g, %d pts); "
+                            "interpolating chi onto stored grid.",
+                            frame_index, site_index,
+                            arr_k[0], arr_k[-1], len(arr_k),
+                            stored_k[0], stored_k[-1], len(stored_k),
+                        )
+                        arr_chi = np.interp(stored_k, arr_k, arr_chi)
+                        arr_k = stored_k
             else:
                 grp.create_dataset("k", data=arr_k, **_COMPRESS)
             grp.create_dataset("chi", data=arr_chi, **_COMPRESS)
@@ -254,7 +333,7 @@ class ExafsHDF5Store:
                 for pc in path_contributions:
                     idx = pc["path_index"]
                     p_grp = paths_grp.require_group(f"path_{idx:04d}")
-                    for name in ("k", "chi"):
+                    for name in ("k", "chi", "amp", "pha", "lam", "rep", "k_param"):
                         if name in p_grp:
                             del p_grp[name]
                     if self.dedup_k:
@@ -266,6 +345,38 @@ class ExafsHDF5Store:
                                 "Common k grid for all per-path chi arrays (Å⁻¹). "
                                 "Individual path k datasets are omitted."
                             )
+                        else:
+                            stored_pk = np.array(meta["k_grid_paths"])
+                            if stored_pk.shape != pk.shape or not np.allclose(
+                                stored_pk, pk, rtol=1e-6, atol=1e-8
+                            ):
+                                logger.debug(
+                                    "Path k-grid mismatch for frame=%d site=%d "
+                                    "path=%d (%g…%g, %d pts vs %g…%g, %d pts); "
+                                    "interpolating chi onto stored grid.",
+                                    frame_index, site_index, idx,
+                                    pk[0], pk[-1], len(pk),
+                                    stored_pk[0], stored_pk[-1], len(stored_pk),
+                                )
+                                pc = dict(pc)
+                                pc["chi"] = np.interp(
+                                    stored_pk,
+                                    pk,
+                                    np.asarray(pc["chi"], dtype=np.float64),
+                                )
+                                pk = stored_pk
+                        # FEFF raw params share a common coarse grid across all paths
+                        _pk_param = pc.get("k_param")
+                        if _pk_param is not None and "k_grid_params" not in meta:
+                            meta.create_dataset(
+                                "k_grid_params",
+                                data=np.asarray(_pk_param, dtype=np.float64),
+                                **_COMPRESS,
+                            )
+                            meta["k_grid_params"].attrs["description"] = (
+                                "Common native k grid for FEFF raw path parameters"
+                                " (amp, pha, lam, rep) (Å⁻¹)."
+                            )
                     else:
                         p_grp.create_dataset(
                             "k", data=np.asarray(pc["k"], dtype=np.float64), **_COMPRESS
@@ -273,13 +384,20 @@ class ExafsHDF5Store:
                     p_grp.create_dataset(
                         "chi", data=np.asarray(pc["chi"], dtype=np.float64), **_COMPRESS
                     )
+                    # Store raw FEFF parameters for on-the-fly χ recomputation
+                    for _pname in ("amp", "pha", "lam", "rep", "k_param"):
+                        if _pname in pc:
+                            p_grp.create_dataset(
+                                _pname,
+                                data=np.asarray(pc[_pname], dtype=np.float64),
+                                **_COMPRESS,
+                            )
                     p_grp.attrs["r_eff"] = float(pc["r_eff"])
                     p_grp.attrs["nlegs"] = int(pc["nlegs"])
                     p_grp.attrs["degeneracy"] = float(pc["degeneracy"])
                     p_grp.attrs["scatterer"] = str(pc["scatterer"])
                     p_grp.attrs["cw_ratio"] = float(pc.get("cw_ratio", 0.0))
 
-            self._h5.flush()
 
     # ------------------------------------------------------------------
     # Writing – aggregates
@@ -333,8 +451,6 @@ class ExafsHDF5Store:
                 )
             for k_attr, v_attr in attrs.items():
                 grp.attrs[k_attr] = v_attr
-
-            self._h5.flush()
 
     def write_overall_average(self, group: Group, n_components: int) -> None:
         """Convenience wrapper for the overall average group."""
@@ -426,7 +542,7 @@ class ExafsHDF5Store:
             grp = self._h5[grp_path]
             meta = self._h5.get("meta") or {}
             has_k = "k" in grp or "k_grid_sites" in meta
-            return bool(grp.attrs.get("success", False)) and has_k and "chi" in grp
+            return bool(grp.attrs.get("success", True)) and has_k and "chi" in grp
 
     def load_site_as_group(self, frame_index: int, site_index: int) -> Group:
         """Load a single site result as a Larch Group."""
@@ -447,13 +563,16 @@ class ExafsHDF5Store:
     # Reading – path contributions
     # ------------------------------------------------------------------
 
-    def iter_path_contributions(self) -> Iterator[tuple[str, dict]]:
+    def iter_path_contributions(
+        self,
+    ) -> Iterator[tuple[str, dict, int, int]]:
         """Iterate over all stored path contributions.
 
-        Yields ``(path_key, info)`` tuples where *path_key* is a stable
-        string key (see :func:`~larch_cli_wrapper.exafs_data.make_path_key`)
-        and *info* is a dict with keys: ``k``, ``chi``, ``r_eff``, ``nlegs``,
-        ``degeneracy``, ``scatterer``.
+        Yields ``(path_key, info, frame_index, site_index)`` tuples where
+        *path_key* is a stable string key (see
+        :func:`~larch_cli_wrapper.exafs_data.make_path_key`) and *info* is a
+        dict with keys: ``k``, ``chi``, ``amp``, ``pha``, ``lam``, ``rep``,
+        ``r_eff``, ``nlegs``, ``degeneracy``, ``scatterer``.
         """
         from .exafs_data import make_path_key
 
@@ -470,13 +589,15 @@ class ExafsHDF5Store:
                 paths_grp = s.get("paths")
                 if paths_grp is None:
                     continue
+                frame_index = int(s.attrs["frame_index"])
+                site_index = int(s.attrs["site_index"])
                 for path_name in sorted(paths_grp.keys()):
                     p = paths_grp[path_name]
                     r_eff = float(p.attrs["r_eff"])
                     nlegs = int(p.attrs["nlegs"])
                     scatterer = str(p.attrs["scatterer"])
                     path_key = make_path_key(scatterer, nlegs, r_eff)
-                    info = {
+                    info: dict = {
                         "k": self._get_path_k(p),
                         "chi": np.array(p["chi"]),
                         "r_eff": r_eff,
@@ -485,7 +606,16 @@ class ExafsHDF5Store:
                         "scatterer": scatterer,
                         "cw_ratio": float(p.attrs["cw_ratio"]),
                     }
-                    yield path_key, info
+                    # Yield raw FEFF parameters if stored
+                    for _pname in ("amp", "pha", "lam", "rep", "k_param"):
+                        if _pname in p:
+                            info[_pname] = np.array(p[_pname])
+                    # Fallback: k_param may be deduped in meta/k_grid_params
+                    if "k_param" not in info:
+                        meta = self._h5.get("meta")
+                        if meta is not None and "k_grid_params" in meta:
+                            info["k_param"] = np.array(meta["k_grid_params"])
+                    yield path_key, info, frame_index, site_index
 
     # ------------------------------------------------------------------
     # Reading – aggregates
@@ -538,9 +668,14 @@ class ExafsHDF5Store:
             g.chir_re = np.array(h5grp["chir_re"])
         if "chir_im" in h5grp:
             g.chir_im = np.array(h5grp["chir_im"])
+        _attr_renames = {"frame_index": "frame_idx", "site_index": "site_idx"}
         for attr_name in ("frame_index", "site_index", "n_components", "average_type"):
             if attr_name in h5grp.attrs:
-                setattr(g, attr_name.rstrip("_index"), h5grp.attrs[attr_name])
+                setattr(
+                    g,
+                    _attr_renames.get(attr_name, attr_name),
+                    h5grp.attrs[attr_name],
+                )
         return g
 
     # ------------------------------------------------------------------
@@ -599,10 +734,12 @@ class ExafsHDF5Store:
                     continue
 
                 try:
-                    chi, k = read_feff_output(site_dir)
+                    k, chi = read_feff_output(site_dir)
                     path_contributions = None
                     if store_paths:
-                        path_contributions = _read_path_contributions_from_dir(site_dir)
+                        path_contributions = _read_path_contributions_from_dir(
+                            site_dir, k_grid=k
+                        )
                     store.write_site_result(
                         frame_index=frame_index,
                         site_index=site_index,
@@ -645,13 +782,9 @@ class ExafsHDF5Store:
             "created_at": created_at,
             "n_frames": n_frames,
             "n_sites_total": n_sites,
-            "has_paths": any(
-                "paths" in frames_grp[f].get("sites", {}).get(s, {})
-                for f in (frames_grp or {})
-                for s in frames_grp[f].get("sites", {})
-            )
-            if frames_grp
-            else False,
+            "has_paths": bool(
+                (self._h5.get("meta") or {}).attrs.get("store_paths", self.store_paths)
+            ),
             "has_aggregates": "aggregates" in self._h5,
             "file_size_mb": round(file_size_mb, 2),
         }
@@ -683,30 +816,74 @@ class ExafsHDF5Store:
         return result
 
 
+
+
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
 
+def recompute_path_chi_on_grid(path_dict: dict, k_grid: np.ndarray) -> dict:
+    """Recompute χ(k) for a path contribution on a different k-grid.
+
+    Interpolates the stored raw FEFF parameters (``amp``, ``pha``, ``lam``)
+    from the native coarse grid (``k_param``) onto *k_grid*, then evaluates
+    the standard EXAFS formula.  This avoids interpolating the oscillatory
+    χ(k) signal directly.
+
+    Args:
+        path_dict: A path contribution dict as returned by
+            :func:`_read_path_contributions_from_dir`.  Must contain
+            ``amp``, ``pha``, ``lam``, ``k_param``, ``r_eff``,
+            ``degeneracy``.
+        k_grid: Target k-grid (Å⁻¹).
+
+    Returns:
+        A shallow copy of *path_dict* with ``k`` and ``chi`` replaced by
+        the recomputed arrays evaluated on *k_grid*.
+    """
+    k_src = np.asarray(path_dict["k_param"], dtype=np.float64)
+    amp = np.asarray(path_dict["amp"], dtype=np.float64)
+    pha = np.asarray(path_dict["pha"], dtype=np.float64)
+    lam = np.asarray(path_dict["lam"], dtype=np.float64)
+    reff = float(path_dict["r_eff"])
+    deg = float(path_dict["degeneracy"])
+
+    amp_i = np.interp(k_grid, k_src, amp)
+    pha_i = np.interp(k_grid, k_src, pha)
+    lam_i = np.interp(k_grid, k_src, lam)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        prefactor = np.where(k_grid > 0, deg * amp_i / (k_grid * reff**2), 0.0)
+    damp = np.exp(-2.0 * reff / np.clip(lam_i, 1e-6, None))
+    chi = prefactor * damp * np.sin(2.0 * k_grid * reff + pha_i)
+
+    return {**path_dict, "k": k_grid, "chi": chi}
+
+
 def _read_path_contributions_from_dir(feff_dir: Path) -> list[dict]:
     """Read all feffNNNN.dat path files from a FEFF output directory.
 
-    Returns a list of dicts compatible with ExafsHDF5Store.write_site_result's
-    path_contributions parameter.  Returns an empty list if no path files are
-    found.
+    Uses :class:`larch.xafs.feffdat.FeffDatFile` to outsource the fragile
+    ASCII parsing to larch, then computes χ(k) on FEFF's native coarse grid
+    with the default path-parameter set (S₀²=1, σ²=0, ΔE₀=0).
+
+    To evaluate path χ(k) on a different grid, pass the result through
+    :func:`recompute_path_chi_on_grid`.
+
+    Returns a list of dicts compatible with
+    :meth:`ExafsHDF5Store.write_site_result`'s *path_contributions*
+    parameter.  Returns an empty list if no path files are found.
     """
-    from .feff_utils import get_feff_numbered_files, parse_files_dat, parse_paths_dat
+    from larch.xafs.feffdat import FeffDatFile
+
+    from .feff_utils import get_feff_numbered_files, parse_files_dat
+
+    _ensure_feff_encoding_patch()
 
     path_files = get_feff_numbered_files(feff_dir)
     if not path_files:
         return []
-
-    # Parse paths.dat for metadata (r_eff, nlegs, deg, scatterer)
-    paths_meta = {}
-    try:
-        paths_meta = parse_paths_dat(feff_dir)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(f"Could not parse paths.dat in {feff_dir}: {exc}")
 
     # Parse files.dat for cw_ratio (curved-wave amplitude ratio)
     files_meta: dict[str, dict] = {}
@@ -720,23 +897,57 @@ def _read_path_contributions_from_dir(feff_dir: Path) -> list[dict]:
     first_exc: Exception | None = None
     for path_file in sorted(path_files):
         try:
-            result = _parse_feffdat_file(path_file)
+            fd = FeffDatFile(str(path_file))
 
-            # Supplement with paths.dat metadata where available
-            path_index = result["path_index"]
-            meta = paths_meta.get(path_index, {})
-            if meta:
-                result["r_eff"] = float(meta.get("r_eff", result["r_eff"]))
-                result["nlegs"] = int(meta.get("nlegs", result["nlegs"]))
-                result["degeneracy"] = float(meta.get("deg", result["degeneracy"]))
-                if "scatterer" in meta:
-                    result["scatterer"] = str(meta["scatterer"])
+            reff = float(fd.reff)
+            nleg = int(fd.nleg)
+            deg = float(fd.degen)
 
-            # Add cw_ratio from files.dat
+            if fd.reff < 0.05 or len(fd.k) == 0:
+                continue
+
+            # Raw FEFF path parameters (always on the native coarse grid)
+            _k_coarse = np.asarray(fd.k, dtype=np.float64)
+            _amp = np.asarray(fd.amp, dtype=np.float64)
+            _pha = np.asarray(fd.pha, dtype=np.float64)
+            _lam = np.asarray(fd.lam, dtype=np.float64)
+            _rep = np.asarray(fd.rep, dtype=np.float64)
+
+            k = _k_coarse
+            with np.errstate(divide="ignore", invalid="ignore"):
+                prefactor = np.where(k > 0, deg * _amp / (k * reff**2), 0.0)
+            damp = np.exp(-2.0 * reff / np.clip(_lam, 1e-6, None))
+            chi = prefactor * damp * np.sin(2.0 * k * reff + _pha)
+
+            # Scatterer label from geometry (geom[0] is absorber, geom[1:] scatterers)
+            if len(fd.geom) >= 2:
+                scatterers = [atom[0] for atom in fd.geom[1:]]
+                scatterer = "-".join(scatterers)
+            else:
+                scatterer = "?"
+
+            path_index = int(path_file.stem.removeprefix("feff").lstrip("0") or "0")
+
             file_entry = files_meta.get(path_file.name, {})
-            result["cw_ratio"] = float(file_entry.get("cw_ratio", 0.0))
+            cw_ratio = float(file_entry.get("cw_ratio", 0.0))
 
-            results.append(result)
+            results.append(
+                {
+                    "path_index": path_index,
+                    "k": k,
+                    "chi": chi,
+                    "amp": _amp,
+                    "pha": _pha,
+                    "lam": _lam,
+                    "rep": _rep,
+                    "k_param": _k_coarse,
+                    "r_eff": reff,
+                    "nlegs": nleg,
+                    "degeneracy": deg,
+                    "scatterer": scatterer,
+                    "cw_ratio": cw_ratio,
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"Skipping path file {path_file}: {exc}")
             if first_exc is None:
@@ -756,123 +967,205 @@ def _read_path_contributions_from_dir(feff_dir: Path) -> list[dict]:
     return results
 
 
-def _parse_feffdat_file(path_file: Path) -> dict:
-    """Parse a feffNNNN.dat file directly, without using larch's FeffPathGroup.
+# ---------------------------------------------------------------------------
+# Averaged-paths store (second HDF5 file)
+# ---------------------------------------------------------------------------
 
-    larch's FeffPathGroup has a known bug (bytes(x, encoding=None) → TypeError)
-    that triggers after larch has been used in the same process (e.g. after
-    autobk/xftf calls).  This parser reads the file directly and computes
-    chi(k) from the FEFF scattering amplitudes:
 
-        χ(k) = (S0² · N · |f(k)|) / (k · R²)
-               · exp(−2R / λ(k))
-               · sin(2kR + φ(k) + 2δ_c(k))
+class AveragedPathsStore:
+    """Second HDF5 file that holds MD-averaged total χ and path contributions.
 
-    with σ² = 0 (no Debye-Waller) and ΔE₀ = 0 so that k_eff = k.
-    Columns in the data block are:
-        k  real[2*phc]  mag[feff]  phase[feff]  red_factor  lambda  real[p]
+    Layout::
 
-    Returns a dict with keys: path_index, k, chi, r_eff, nlegs,
-    degeneracy, scatterer.
-    Raises ValueError if the file cannot be parsed.
+        averaged_paths.h5
+        ├── meta/
+        │   └── attrs: version, created_at, source_h5_path
+        ├── overall_average/
+        │   ├── k, chi, r, chir_mag, chir_re, chir_im
+        │   └── paths/
+        │       └── SS_Fe_3.22/
+        │           ├── k, chi, r, chir_mag, chir_re, chir_im
+        │           ├── source_frames  (int[n_samples])
+        │           ├── source_sites   (int[n_samples])
+        │           └── attrs: scatterer, nlegs, r_eff, degeneracy,
+        │                     n_samples, cw_ratio, contribution_pct
+        └── site_averages/
+            └── site_XXXX/
+                ├── k, chi, r, chir_mag, chir_re, chir_im
+                └── paths/
+                    └── ...
     """
-    text = path_file.read_text(errors="replace")
-    lines = text.splitlines()
 
-    nleg: int = 2
-    deg: float = 1.0
-    reff: float = 1.0
-    scatterer: str = "?"
-    data_start_idx: int | None = None
-    geom_start_idx: int | None = None
+    def __enter__(self) -> AveragedPathsStore:
+        """Return self to support use as a context manager."""
+        return self
 
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if "nleg, deg, reff" in stripped:
-            tokens = stripped.split()
-            try:
-                nleg = int(tokens[0])
-                deg = float(tokens[1])
-                reff = float(tokens[2])
-            except (ValueError, IndexError):
-                pass
-            geom_start_idx = i + 1
-        elif stripped.startswith("k ") and "real[2*phc]" in stripped:
-            data_start_idx = i + 1
-            break
+    def __exit__(self, *_) -> None:
+        """Close the HDF5 file on context manager exit."""
+        self.close()
 
-    if data_start_idx is None:
-        raise ValueError(f"Could not locate data block in {path_file}")
+    def __init__(
+        self,
+        path: Path,
+        source_h5_path: Path | None = None,
+        mode: str = "a",
+    ) -> None:
+        """Open or create the averaged-paths HDF5 file."""
+        import h5py
 
-    # Geometry: absorber line first (pot=0), first scatterer line second
-    if geom_start_idx is not None:
-        geom_numeric: list[list[str]] = []
-        for j in range(geom_start_idx, data_start_idx - 1):
-            gl = lines[j].strip()
-            if not gl:
-                continue
-            parts = gl.split()
-            try:
-                float(parts[0])  # numeric geometry lines start with x-coord
-                geom_numeric.append(parts)
-            except (ValueError, IndexError):
-                continue
-        if len(geom_numeric) >= 2 and len(geom_numeric[1]) >= 6:
-            scatterer = geom_numeric[1][5]  # element token: x y z pot iz elem
+        self.path = Path(path)
+        self._lock = threading.Lock()
+        self._h5 = h5py.File(self.path, mode)
+        if mode == "a":
+            self._init_metadata(source_h5_path)
 
-    k_vals: list[float] = []
-    real_phc_vals: list[float] = []
-    mag_feff_vals: list[float] = []
-    phase_feff_vals: list[float] = []
-    red_factor_vals: list[float] = []
-    lambda_vals: list[float] = []
+    def _init_metadata(self, source_h5_path: Path | None) -> None:
+        meta = self._h5.require_group("meta")
+        if "version" not in meta.attrs:
+            meta.attrs["version"] = "1.0"
+        now = datetime.now(timezone.utc).isoformat()
+        if "created_at" not in meta.attrs:
+            meta.attrs["created_at"] = now
+        meta.attrs["updated_at"] = now
+        if source_h5_path is not None:
+            meta.attrs["source_h5_path"] = str(source_h5_path)
 
-    for line in lines[data_start_idx:]:
-        tokens = line.split()
-        if len(tokens) < 6:
-            continue
+    def write_average(
+        self,
+        group_path: str,
+        group: Group,
+        path_contributions: dict[str, PathContribution] | None = None,
+    ) -> None:
+        """Write an averaged group and its path contributions."""
+        with self._lock:
+            grp = self._h5.require_group(group_path)
+            for name in ("k", "chi", "r", "chir_mag", "chir_re", "chir_im"):
+                if name in grp:
+                    del grp[name]
+
+            grp.create_dataset(
+                "k", data=np.asarray(group.k, dtype=np.float64), **_COMPRESS
+            )
+            grp.create_dataset(
+                "chi", data=np.asarray(group.chi, dtype=np.float64), **_COMPRESS
+            )
+            if hasattr(group, "r") and group.r is not None:
+                grp.create_dataset(
+                    "r", data=np.asarray(group.r, dtype=np.float64), **_COMPRESS
+                )
+            if hasattr(group, "chir_mag") and group.chir_mag is not None:
+                grp.create_dataset(
+                    "chir_mag",
+                    data=np.asarray(group.chir_mag, dtype=np.float64),
+                    **_COMPRESS,
+                )
+            if hasattr(group, "chir_re") and group.chir_re is not None:
+                grp.create_dataset(
+                    "chir_re",
+                    data=np.asarray(group.chir_re, dtype=np.float64),
+                    **_COMPRESS,
+                )
+            if hasattr(group, "chir_im") and group.chir_im is not None:
+                grp.create_dataset(
+                    "chir_im",
+                    data=np.asarray(group.chir_im, dtype=np.float64),
+                    **_COMPRESS,
+                )
+
+            if path_contributions:
+                paths_grp = grp.require_group("paths")
+                for path_key, pc in path_contributions.items():
+                    safe_key = path_key.replace("/", "_")
+                    p_grp = paths_grp.require_group(safe_key)
+                    for name in (
+                        "k",
+                        "chi",
+                        "r",
+                        "chir_mag",
+                        "chir_re",
+                        "chir_im",
+                        "source_frames",
+                        "source_sites",
+                    ):
+                        if name in p_grp:
+                            del p_grp[name]
+
+                    p_grp.create_dataset(
+                        "k", data=np.asarray(pc.k, dtype=np.float64), **_COMPRESS
+                    )
+                    p_grp.create_dataset(
+                        "chi",
+                        data=np.asarray(pc.chi, dtype=np.float64),
+                        **_COMPRESS,
+                    )
+                    if pc.r.size:
+                        p_grp.create_dataset(
+                            "r", data=np.asarray(pc.r, dtype=np.float64), **_COMPRESS
+                        )
+                    if pc.chir_mag.size:
+                        p_grp.create_dataset(
+                            "chir_mag",
+                            data=np.asarray(pc.chir_mag, dtype=np.float64),
+                            **_COMPRESS,
+                        )
+                    if pc.chir_re.size:
+                        p_grp.create_dataset(
+                            "chir_re",
+                            data=np.asarray(pc.chir_re, dtype=np.float64),
+                            **_COMPRESS,
+                        )
+                    if pc.chir_im.size:
+                        p_grp.create_dataset(
+                            "chir_im",
+                            data=np.asarray(pc.chir_im, dtype=np.float64),
+                            **_COMPRESS,
+                        )
+                    if pc.source_frames.size:
+                        p_grp.create_dataset(
+                            "source_frames",
+                            data=np.asarray(pc.source_frames, dtype=np.int64),
+                            **_COMPRESS,
+                        )
+                    if pc.source_sites.size:
+                        p_grp.create_dataset(
+                            "source_sites",
+                            data=np.asarray(pc.source_sites, dtype=np.int64),
+                            **_COMPRESS,
+                        )
+
+                    # Store averaged raw FEFF parameters for on-the-fly recomputation
+                    for _pname in ("amp", "pha", "lam", "rep"):
+                        _parr = getattr(pc, _pname, np.array([]))
+                        if _parr.size:
+                            if _pname in p_grp:
+                                del p_grp[_pname]
+                            p_grp.create_dataset(
+                                _pname,
+                                data=np.asarray(_parr, dtype=np.float64),
+                                **_COMPRESS,
+                            )
+                    if pc.k_param.size:
+                        if "k_param" in p_grp:
+                            del p_grp["k_param"]
+                        p_grp.create_dataset(
+                            "k_param",
+                            data=np.asarray(pc.k_param, dtype=np.float64),
+                            **_COMPRESS,
+                        )
+
+                    p_grp.attrs["scatterer"] = pc.scatterer
+                    p_grp.attrs["nlegs"] = pc.nlegs
+                    p_grp.attrs["r_eff"] = float(pc.r_eff)
+                    p_grp.attrs["degeneracy"] = float(pc.degeneracy)
+                    p_grp.attrs["n_samples"] = pc.n_samples
+                    p_grp.attrs["cw_ratio"] = float(pc.cw_ratio)
+                    if hasattr(pc, "contribution_pct"):
+                        p_grp.attrs["contribution_pct"] = float(pc.contribution_pct)
+
+    def close(self) -> None:
+        """Flush and close the HDF5 file."""
         try:
-            k_vals.append(float(tokens[0]))
-            real_phc_vals.append(float(tokens[1]))
-            mag_feff_vals.append(float(tokens[2]))
-            phase_feff_vals.append(float(tokens[3]))
-            red_factor_vals.append(float(tokens[4]))
-            lambda_vals.append(float(tokens[5]))
-        except ValueError:
-            continue
-
-    if not k_vals:
-        raise ValueError(f"No numeric data rows found in {path_file}")
-
-    k = np.asarray(k_vals, dtype=np.float64)
-    real_phc = np.asarray(real_phc_vals, dtype=np.float64)
-    mag_feff = np.asarray(mag_feff_vals, dtype=np.float64)
-    phase_feff = np.asarray(phase_feff_vals, dtype=np.float64)
-    red_factor = np.asarray(red_factor_vals, dtype=np.float64)
-    lam = np.asarray(lambda_vals, dtype=np.float64)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        prefactor = np.where(
-            k > 0,
-            deg * red_factor * mag_feff / (k * reff**2),
-            0.0,
-        )
-    damp = np.exp(-2.0 * reff / np.clip(lam, 1e-6, None))
-    # real_phc is already 2*phc (the total central-atom phase shift)
-    chi = prefactor * damp * np.sin(2.0 * k * reff + phase_feff + real_phc)
-
-    stem = path_file.stem  # "feff0001"
-    try:
-        path_index = int(stem.removeprefix("feff").lstrip("0") or "0")
-    except ValueError:
-        path_index = 0
-
-    return {
-        "path_index": path_index,
-        "k": k,
-        "chi": chi,
-        "r_eff": reff,
-        "nlegs": nleg,
-        "degeneracy": deg,
-        "scatterer": scatterer,
-    }
+            self._h5.flush()
+            self._h5.close()
+        except Exception:  # noqa: BLE001, S110
+            pass

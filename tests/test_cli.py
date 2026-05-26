@@ -890,7 +890,7 @@ class TestSaveGroupsCLI:
 
         fake_k = np.linspace(0, 15, 100)
         fake_chi = np.sin(fake_k) + 1j * np.cos(fake_k)  # Complex chi data
-        mock_read_feff.return_value = (fake_chi, fake_k)
+        mock_read_feff.return_value = (fake_k, fake_chi)
 
         # Mock plot_exafs_matplotlib to return a successful result
         from larch_cli_wrapper.exafs_data import PlotResult

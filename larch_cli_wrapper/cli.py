@@ -944,7 +944,15 @@ def analyze_feff_outputs(
 
                         agg = PathAggregator()
                         n_path_records = 0
-                        for path_key, info in store.iter_path_contributions():
+                        for (
+                            path_key,
+                            info,
+                            frame_idx,
+                            site_idx,
+                        ) in store.iter_path_contributions():
+                            info = dict(info)
+                            info["frame_index"] = frame_idx
+                            info["site_index"] = site_idx
                             agg.add({path_key: info})
                             n_path_records += 1
                         if n_path_records > 0:
@@ -1605,7 +1613,15 @@ def run_full_pipeline(
 
                     store = ExafsHDF5Store(effective_hdf5_path, config=config)
                     agg = PathAggregator()
-                    for path_key, info in store.iter_path_contributions():
+                    for (
+                        path_key,
+                        info,
+                        frame_idx,
+                        site_idx,
+                    ) in store.iter_path_contributions():
+                        info = dict(info)
+                        info["frame_index"] = frame_idx
+                        info["site_index"] = site_idx
                         agg.add({path_key: info})
                     path_contributions = agg.finalize(config.fourier_params)
                     store.close()

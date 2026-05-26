@@ -1,9 +1,6 @@
-"""Tests for feffNNNN.dat path reading via the custom _parse_feffdat_file parser.
+"""Tests for feffNNNN.dat path reading via larch's FeffDatFile.
 
-larch's FeffPathGroup has a known bug (bytes(x, encoding=None) → TypeError) that
-triggers after larch has been used in the same process (e.g. after autobk/xftf).
-We therefore parse feffNNNN.dat files directly without calling FeffPathGroup.
-
+larch.xafs.feffdat.FeffDatFile is used to outsource the fragile ASCII parsing.
 The fixture file tests/feff0001.dat is a real output from a FEFF8L calculation
 on a K-edge site in a KFe2(CN)6 (prussian blue) structure.
 """
@@ -81,10 +78,8 @@ def test_read_path_contributions_values(feff_dir):
 def test_parse_unaffected_by_prior_larch_use(feff_dir):
     """Parsing succeeds even after larch autobk/xftf have been called.
 
-    This is the regression test: larch.xafs.feffdat.FeffPathGroup has a bug
-    (bytes(x, encoding=None) → TypeError) that fires after larch has been used
-    in the same process.  _parse_feffdat_file avoids this by not calling
-    FeffPathGroup at all.
+    This is the regression test: larch.xafs.feffdat.FeffDatFile must remain
+    usable after larch has been used in the same process.
     """
     # Simulate the pipeline: run larch processing before parsing paths
     import numpy as np
@@ -125,3 +120,30 @@ def test_read_path_contributions_concurrent(feff_dir):
     assert all(len(r) == 1 for r in results_list), (
         f"Expected 1 path per call, got {[len(r) for r in results_list]}"
     )
+
+
+def test_recompute_path_chi_on_grid(feff_dir):
+    """recompute_path_chi_on_grid evaluates χ(k) on an arbitrary fine grid."""
+    import numpy as np
+    from larch_cli_wrapper.hdf5_store import (
+        _read_path_contributions_from_dir,
+        recompute_path_chi_on_grid,
+    )
+
+    results_coarse = _read_path_contributions_from_dir(feff_dir)
+    r_coarse = results_coarse[0]
+
+    k_fine = np.arange(0.05, 20.05, 0.05)
+    r_fine = recompute_path_chi_on_grid(r_coarse, k_fine)
+
+    assert r_fine["k"].shape == k_fine.shape
+    assert np.allclose(r_fine["k"], k_fine)
+    assert np.max(np.abs(r_fine["chi"])) > 0.0
+
+    # Fine-grid chi evaluated back at coarse points should match coarse chi
+    # (excluding the k=0 singularity region).
+    mask = r_coarse["k"] > 0.1
+    chi_fine_at_coarse = np.interp(
+        r_coarse["k"][mask], r_fine["k"], r_fine["chi"]
+    )
+    assert np.allclose(chi_fine_at_coarse, r_coarse["chi"][mask], atol=1e-3)

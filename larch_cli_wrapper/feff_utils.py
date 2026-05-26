@@ -1528,7 +1528,7 @@ def read_feff_output(feff_dir: Path) -> tuple[np.ndarray, np.ndarray]:
         feff_dir: Directory containing FEFF output files
 
     Returns:
-        Tuple of (chi, k) where both arrays are real float64.
+        Tuple of (k, chi) where both arrays are real float64.
         chi is the second column of chi.dat: the oscillating EXAFS signal.
 
     Raises:
