@@ -125,6 +125,7 @@ def test_read_path_contributions_concurrent(feff_dir):
 def test_recompute_path_chi_on_grid(feff_dir):
     """recompute_path_chi_on_grid evaluates χ(k) on an arbitrary fine grid."""
     import numpy as np
+
     from larch_cli_wrapper.hdf5_store import (
         _read_path_contributions_from_dir,
         recompute_path_chi_on_grid,
@@ -143,7 +144,5 @@ def test_recompute_path_chi_on_grid(feff_dir):
     # Fine-grid chi evaluated back at coarse points should match coarse chi
     # (excluding the k=0 singularity region).
     mask = r_coarse["k"] > 0.1
-    chi_fine_at_coarse = np.interp(
-        r_coarse["k"][mask], r_fine["k"], r_fine["chi"]
-    )
+    chi_fine_at_coarse = np.interp(r_coarse["k"][mask], r_fine["k"], r_fine["chi"])
     assert np.allclose(chi_fine_at_coarse, r_coarse["chi"][mask], atol=1e-3)

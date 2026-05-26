@@ -803,7 +803,11 @@ class PathAggregator:
             _param_avgs: dict[str, np.ndarray] = {}
             _k_param: np.ndarray = np.array([])
             for _pname in _param_names:
-                _parrays = [np.asarray(s[_pname], dtype=np.float64) for s in samples if _pname in s]
+                _parrays = [
+                    np.asarray(s[_pname], dtype=np.float64)
+                    for s in samples
+                    if _pname in s
+                ]
                 if _parrays:
                     _param_avgs[_pname] = np.mean(_parrays, axis=0)
             # k_param is the native coarse FEFF grid; all paths share it

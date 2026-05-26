@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+
 # ---------------------------------------------------------------------------
 # One-time patch for pyshortcuts / larch encoding issue
 # ---------------------------------------------------------------------------
@@ -110,13 +111,14 @@ def _ensure_feff_encoding_patch() -> None:
     except ImportError:
         pass
 
+
 if TYPE_CHECKING:
     from larch import Group
 
     from .exafs_data import EXAFSDataCollection, PathContribution
 
 
-from .feff_utils import FeffConfig
+from .feff_utils import FeffConfig  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -314,9 +316,14 @@ class ExafsHDF5Store:
                             "k-grid mismatch for frame=%d site=%d "
                             "(%g…%g, %d pts vs %g…%g, %d pts); "
                             "interpolating chi onto stored grid.",
-                            frame_index, site_index,
-                            arr_k[0], arr_k[-1], len(arr_k),
-                            stored_k[0], stored_k[-1], len(stored_k),
+                            frame_index,
+                            site_index,
+                            arr_k[0],
+                            arr_k[-1],
+                            len(arr_k),
+                            stored_k[0],
+                            stored_k[-1],
+                            len(stored_k),
                         )
                         arr_chi = np.interp(stored_k, arr_k, arr_chi)
                         arr_k = stored_k
@@ -354,9 +361,15 @@ class ExafsHDF5Store:
                                     "Path k-grid mismatch for frame=%d site=%d "
                                     "path=%d (%g…%g, %d pts vs %g…%g, %d pts); "
                                     "interpolating chi onto stored grid.",
-                                    frame_index, site_index, idx,
-                                    pk[0], pk[-1], len(pk),
-                                    stored_pk[0], stored_pk[-1], len(stored_pk),
+                                    frame_index,
+                                    site_index,
+                                    idx,
+                                    pk[0],
+                                    pk[-1],
+                                    len(pk),
+                                    stored_pk[0],
+                                    stored_pk[-1],
+                                    len(stored_pk),
                                 )
                                 pc = dict(pc)
                                 pc["chi"] = np.interp(
@@ -397,7 +410,6 @@ class ExafsHDF5Store:
                     p_grp.attrs["degeneracy"] = float(pc["degeneracy"])
                     p_grp.attrs["scatterer"] = str(pc["scatterer"])
                     p_grp.attrs["cw_ratio"] = float(pc.get("cw_ratio", 0.0))
-
 
     # ------------------------------------------------------------------
     # Writing – aggregates
@@ -814,8 +826,6 @@ class ExafsHDF5Store:
         else:
             result["feff_config"] = {}
         return result
-
-
 
 
 # ---------------------------------------------------------------------------

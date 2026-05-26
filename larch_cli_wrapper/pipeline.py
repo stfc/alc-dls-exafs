@@ -617,7 +617,9 @@ class FeffExecutor:
                                     )
                                     path_contributions = [
                                         recompute_path_chi_on_grid(pc, k)
-                                        for pc in _read_path_contributions_from_dir(feff_dir)
+                                        for pc in _read_path_contributions_from_dir(
+                                            feff_dir
+                                        )
                                     ]
                                     if n_feff_files > 0 and not path_contributions:
                                         self.logger.warning(
@@ -1009,9 +1011,7 @@ class PipelineProcessor:
         if self._hdf5_store is None or self.hdf5_path is None:
             return
 
-        avg_path = self.hdf5_path.with_name(
-            self.hdf5_path.stem + "_averaged_paths.h5"
-        )
+        avg_path = self.hdf5_path.with_name(self.hdf5_path.stem + "_averaged_paths.h5")
         store = AveragedPathsStore(avg_path, source_h5_path=self.hdf5_path)
 
         overall_agg = PathAggregator()
@@ -1040,21 +1040,15 @@ class PipelineProcessor:
                 for pc in contribs.values():
                     weight = pc.n_samples / n_total
                     pc.contribution_pct = float(
-                        np.trapezoid(np.abs(pc.chi * weight), pc.k)
-                        / total_norm
-                        * 100
+                        np.trapezoid(np.abs(pc.chi * weight), pc.k) / total_norm * 100
                     )
 
         # Count successful spectra for correct weighting
-        n_total_overall = sum(
-            1 for _ in self._hdf5_store.iter_site_results()
-        )
+        n_total_overall = sum(1 for _ in self._hdf5_store.iter_site_results())
 
         if overall_average is not None:
             overall_paths = overall_agg.finalize(fourier_params)
-            _add_contribution_pct(
-                overall_paths, overall_average, n_total_overall
-            )
+            _add_contribution_pct(overall_paths, overall_average, n_total_overall)
             store.write_average("overall_average", overall_average, overall_paths)
 
         for site_idx, site_group in site_averages.items():
