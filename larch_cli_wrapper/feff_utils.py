@@ -1549,14 +1549,14 @@ def read_feff_output(feff_dir: Path) -> tuple[np.ndarray, np.ndarray]:
         if hasattr(feff_data, "chi"):
             k = np.asarray(feff_data.k, dtype=np.float64)
             chi = np.asarray(feff_data.chi, dtype=np.float64)
-            return chi, k
+            return k, chi
         # Fallback: reconstruct chi = |chi| * sin(phase) where phase is in radians
         if hasattr(feff_data, "mag") and hasattr(feff_data, "phase"):
             k = np.asarray(feff_data.k, dtype=np.float64)
             chi = np.asarray(feff_data.mag, dtype=np.float64) * np.sin(
                 np.asarray(feff_data.phase, dtype=np.float64)
             )
-            return chi, k
+            return k, chi
         raise AttributeError("FEFF data missing 'chi' (and mag/phase) in chi.dat")
 
     except (OSError, ValueError, AttributeError) as err:

@@ -515,7 +515,7 @@ class FeffExecutor:
             if not self.hdf5_store:
                 cached_data = self._load_cached_result(cache_key)
                 if cached_data is not None:
-                    chi, k = cached_data
+                    k, chi = cached_data
                     self.logger.debug(f"Pkl cache hit for {task.task_id}")
                     try:
                         task.feff_dir.mkdir(parents=True, exist_ok=True)
@@ -591,7 +591,7 @@ class FeffExecutor:
                     try:
                         from .feff_utils import read_feff_output
 
-                        chi, k = read_feff_output(feff_dir)
+                        k, chi = read_feff_output(feff_dir)
                         # Persist: pkl when no HDF5, HDF5 is its own persistence
                         if not self.hdf5_store:
                             self._save_to_cache(cache_key, chi, k)
@@ -698,7 +698,7 @@ class ResultProcessor:
         for task in batch.tasks:
             if task_results.get(task.task_id, False):
                 try:
-                    chi, k = read_feff_output(task.feff_dir)
+                    k, chi = read_feff_output(task.feff_dir)
 
                     # Create larch group
                     from larch import Group

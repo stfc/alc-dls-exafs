@@ -27,7 +27,7 @@ def load_from_cache(
         force_recalculate: If True, ignore existing cache and return None
 
     Returns:
-        Tuple of (chi, k) arrays if cache hit, None if cache miss or error
+        Tuple of (k, chi) arrays if cache hit, None if cache miss or error
 
     Note:
         The returned chi array is complex (EXAFS chi(k) data) and k array
@@ -40,7 +40,7 @@ def load_from_cache(
         try:
             with open(cache_file, "rb") as f:
                 cached_data = pickle.load(f)  # noqa: S301 - controlled usage
-            return cached_data["chi"], cached_data["k"]
+            return cached_data["k"], cached_data["chi"]
         except (EOFError, pickle.UnpicklingError, KeyError):
             try:
                 cache_file.unlink()
