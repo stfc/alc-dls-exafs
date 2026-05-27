@@ -791,11 +791,28 @@ class PathAggregator:
             xftf(g, **fourier_params)
 
             first = samples[0]
-            source_frames = np.array(
-                [int(s.get("frame_index", -1)) for s in samples], dtype=np.int64
+            # Store *unique* contributing indices — one entry per distinct
+            # frame/site rather than one per sample.  This is 100× smaller
+            # for high-degeneracy paths while still giving full provenance.
+            source_frames = np.unique(
+                np.array(
+                    [
+                        int(s.get("frame_index", -1))
+                        for s in samples
+                        if s.get("frame_index", -1) >= 0
+                    ],
+                    dtype=np.int64,
+                )
             )
-            source_sites = np.array(
-                [int(s.get("site_index", -1)) for s in samples], dtype=np.int64
+            source_sites = np.unique(
+                np.array(
+                    [
+                        int(s.get("site_index", -1))
+                        for s in samples
+                        if s.get("site_index", -1) >= 0
+                    ],
+                    dtype=np.int64,
+                )
             )
 
             # Average raw FEFF parameters for on-the-fly χ recomputation

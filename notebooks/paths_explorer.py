@@ -55,9 +55,7 @@ def _():
 
 @app.cell
 def _():
-    import sys
     import logging
-    from pathlib import Path
     from collections import defaultdict
 
     import altair as alt
@@ -106,13 +104,25 @@ def _(np):
     RMIN = 0.0
 
     def perform_FT(
-        k, chi,
-        kmin=3.0, kmax=12.0,
-        kweight=2, dk=1.0, k_window="hanning",
+        k,
+        chi,
+        kmin=3.0,
+        kmax=12.0,
+        kweight=2,
+        dk=1.0,
+        k_window="hanning",
         rmax=10.0,
     ):
         g = Group(k=k, chi=chi)
-        xftf(g, kmin=kmin, kmax=kmax, dk=dk, kweight=kweight, window=k_window, rmax_out=rmax)
+        xftf(
+            g,
+            kmin=kmin,
+            kmax=kmax,
+            dk=dk,
+            kweight=kweight,
+            window=k_window,
+            rmax_out=rmax,
+        )
         return g
 
     def compute_chi_from_params(k_grid, amp, pha, lam, rep, reff, degen, k_param):
@@ -192,8 +202,14 @@ def _(defaultdict, find_mic, logger, np):
         }
 
     def calculate_grouped_msrd(
-        structures, unwrapped_positions, central_indices, central_label,
-        cutoff=3.5, tol_dist=0.1, tol_angle=5.0, cutoff_3body=None,
+        structures,
+        unwrapped_positions,
+        central_indices,
+        central_label,
+        cutoff=3.5,
+        tol_dist=0.1,
+        tol_angle=5.0,
+        cutoff_3body=None,
         exclude_hydrogen=True,
     ):
         """Calculate grouped MSRD for 2-body and 3-body EXAFS paths.
@@ -217,44 +233,67 @@ def _(defaultdict, find_mic, logger, np):
 
         pair_list = []
         triplet_list = []
-        logger.info("Analysing MSRD paths for %s (%d sites)...", central_label, len(central_indices))
+        logger.info(
+            "Analysing MSRD paths for %s (%d sites)...",
+            central_label,
+            len(central_indices),
+        )
 
         for c_idx in central_indices:
-            all_indices = [i for i in range(len(symbols)) if i != c_idx and i in neighbor_candidates]
+            all_indices = [
+                i
+                for i in range(len(symbols))
+                if i != c_idx and i in neighbor_candidates
+            ]
             distances = reference_atoms.get_distances(c_idx, all_indices, mic=True)
-            neighbors = [all_indices[i] for i in range(len(all_indices)) if distances[i] < cutoff]
-            logger.info("  %d neighbors within %.2f Å of atom %d", len(neighbors), cutoff, c_idx)
+            neighbors = [
+                all_indices[i] for i in range(len(all_indices)) if distances[i] < cutoff
+            ]
+            logger.info(
+                "  %d neighbors within %.2f Å of atom %d", len(neighbors), cutoff, c_idx
+            )
 
             # Cache MIC vectors — reused for 3-body
             neighbor_vectors_mic = {}
             for n_idx in neighbors:
-                v_raw = unwrapped_positions[:, n_idx, :] - unwrapped_positions[:, c_idx, :]
+                v_raw = (
+                    unwrapped_positions[:, n_idx, :] - unwrapped_positions[:, c_idx, :]
+                )
                 v_mic, dists = find_mic(v_raw, cell, pbc)
                 neighbor_vectors_mic[n_idx] = (v_mic, dists)
 
             for n_idx in neighbors:
                 v_mic, dists = neighbor_vectors_mic[n_idx]
-                pair_list.append({
-                    "element": symbols[n_idx],
-                    "dists": dists,
-                    "mean_d": float(np.mean(dists)),
-                    "label": f"{central_element}-{symbols[n_idx]}",
-                    "c_idx": c_idx,
-                    "n_idx": n_idx,
-                })
+                pair_list.append(
+                    {
+                        "element": symbols[n_idx],
+                        "dists": dists,
+                        "mean_d": float(np.mean(dists)),
+                        "label": f"{central_element}-{symbols[n_idx]}",
+                        "c_idx": c_idx,
+                        "n_idx": n_idx,
+                    }
+                )
 
             if cutoff_3body == 0 or cutoff_3body is None:
                 continue
             neighbors_3body = (
-                [n for n in neighbors if np.mean(neighbor_vectors_mic[n][1]) <= cutoff_3body]
-                if cutoff_3body < cutoff else neighbors
+                [
+                    n
+                    for n in neighbors
+                    if np.mean(neighbor_vectors_mic[n][1]) <= cutoff_3body
+                ]
+                if cutoff_3body < cutoff
+                else neighbors
             )
             for _i in range(len(neighbors_3body)):
                 for _j in range(_i + 1, len(neighbors_3body)):
                     n1, n2 = neighbors_3body[_i], neighbors_3body[_j]
                     v01_mic, d01 = neighbor_vectors_mic[n1]
                     v02_mic, d02 = neighbor_vectors_mic[n2]
-                    v12_raw = unwrapped_positions[:, n2, :] - unwrapped_positions[:, n1, :]
+                    v12_raw = (
+                        unwrapped_positions[:, n2, :] - unwrapped_positions[:, n1, :]
+                    )
                     v12_mic, d12 = find_mic(v12_raw, cell, pbc)
                     L = d01 + d12 + d02
                     v1 = -v01_mic
@@ -266,15 +305,17 @@ def _(defaultdict, find_mic, logger, np):
                     cos_t = np.clip(np.sum(v1_unit * v2_unit, axis=1), -1, 1)
                     angles_deg = np.degrees(np.arccos(cos_t))
                     elem_pair = tuple(sorted([symbols[n1], symbols[n2]]))
-                    triplet_list.append({
-                        "elements": elem_pair,
-                        "reff_series": L / 2.0,
-                        "mean_L": float(np.mean(L / 2.0)),
-                        "angle": float(np.mean(angles_deg)),
-                        "c_idx": c_idx,
-                        "n1_idx": n1,
-                        "n2_idx": n2,
-                    })
+                    triplet_list.append(
+                        {
+                            "elements": elem_pair,
+                            "reff_series": L / 2.0,
+                            "mean_L": float(np.mean(L / 2.0)),
+                            "angle": float(np.mean(angles_deg)),
+                            "c_idx": c_idx,
+                            "n1_idx": n1,
+                            "n2_idx": n2,
+                        }
+                    )
 
         # ── 2-body grouping: by element, then cluster by distance ─────────
         pairs_by_element = defaultdict(list)
@@ -287,7 +328,10 @@ def _(defaultdict, find_mic, logger, np):
             clusters = []
             current = [paths[0]]
             for path in paths[1:]:
-                if abs(path["mean_d"] - float(np.mean([p["mean_d"] for p in current]))) <= tol_dist:
+                if (
+                    abs(path["mean_d"] - float(np.mean([p["mean_d"] for p in current])))
+                    <= tol_dist
+                ):
                     current.append(path)
                 else:
                     clusters.append(current)
@@ -295,13 +339,15 @@ def _(defaultdict, find_mic, logger, np):
             clusters.append(current)
             for cluster in clusters:
                 all_dists = np.concatenate([p["dists"] for p in cluster])
-                res_2b.append({
-                    "type": cluster[0]["label"],
-                    "reff": float(np.mean(all_dists)),
-                    "sigma2": float(np.var(all_dists, ddof=1)),
-                    "count": len(cluster),
-                    "atom_indices": [(p["c_idx"], p["n_idx"]) for p in cluster],
-                })
+                res_2b.append(
+                    {
+                        "type": cluster[0]["label"],
+                        "reff": float(np.mean(all_dists)),
+                        "sigma2": float(np.var(all_dists, ddof=1)),
+                        "count": len(cluster),
+                        "atom_indices": [(p["c_idx"], p["n_idx"]) for p in cluster],
+                    }
+                )
 
         # ── 3-body grouping: by element pair, angle shell, distance shell ─
         triplets_by_elements = defaultdict(list)
@@ -314,7 +360,10 @@ def _(defaultdict, find_mic, logger, np):
             angle_clusters = []
             current = [paths[0]]
             for path in paths[1:]:
-                if abs(path["angle"] - float(np.mean([p["angle"] for p in current]))) <= tol_angle:
+                if (
+                    abs(path["angle"] - float(np.mean([p["angle"] for p in current])))
+                    <= tol_angle
+                ):
                     current.append(path)
                 else:
                     angle_clusters.append(current)
@@ -325,7 +374,13 @@ def _(defaultdict, find_mic, logger, np):
                 dist_clusters = []
                 current = [angle_cluster[0]]
                 for path in angle_cluster[1:]:
-                    if abs(path["mean_L"] - float(np.mean([p["mean_L"] for p in current]))) <= tol_dist:
+                    if (
+                        abs(
+                            path["mean_L"]
+                            - float(np.mean([p["mean_L"] for p in current]))
+                        )
+                        <= tol_dist
+                    ):
                         current.append(path)
                     else:
                         dist_clusters.append(current)
@@ -333,14 +388,18 @@ def _(defaultdict, find_mic, logger, np):
                 dist_clusters.append(current)
                 for cluster in dist_clusters:
                     all_reffs = np.concatenate([p["reff_series"] for p in cluster])
-                    res_3b.append({
-                        "type": f"{central_element}-{elem_pair[0]}-{elem_pair[1]}",
-                        "reff": float(np.mean(all_reffs)),
-                        "sigma2": float(np.var(all_reffs, ddof=1)),
-                        "angle": float(np.mean([p["angle"] for p in cluster])),
-                        "count": len(cluster),
-                        "atom_indices": [(p["c_idx"], p["n1_idx"], p["n2_idx"]) for p in cluster],
-                    })
+                    res_3b.append(
+                        {
+                            "type": f"{central_element}-{elem_pair[0]}-{elem_pair[1]}",
+                            "reff": float(np.mean(all_reffs)),
+                            "sigma2": float(np.var(all_reffs, ddof=1)),
+                            "angle": float(np.mean([p["angle"] for p in cluster])),
+                            "count": len(cluster),
+                            "atom_indices": [
+                                (p["c_idx"], p["n1_idx"], p["n2_idx"]) for p in cluster
+                            ],
+                        }
+                    )
 
         return (
             sorted(res_2b, key=lambda x: x["reff"]),
@@ -376,19 +435,33 @@ def _(mo):
 @app.cell
 def _(mo):
     ft_kmin = mo.ui.slider(
-        start=0.0, stop=6.0, value=3.0, step=0.1,
-        label="k_min (Å⁻¹)", show_value=True,
+        start=0.0,
+        stop=6.0,
+        value=3.0,
+        step=0.1,
+        label="k_min (Å⁻¹)",
+        show_value=True,
     )
     ft_kmax = mo.ui.slider(
-        start=5.0, stop=20.0, value=12.0, step=0.5,
-        label="k_max (Å⁻¹)", show_value=True,
+        start=5.0,
+        stop=20.0,
+        value=12.0,
+        step=0.5,
+        label="k_max (Å⁻¹)",
+        show_value=True,
     )
     ft_kweight = mo.ui.dropdown(
-        options=[1, 2, 3], value=2, label="k-weight",
+        options=[1, 2, 3],
+        value=2,
+        label="k-weight",
     )
     ft_dk = mo.ui.slider(
-        start=0.0, stop=4.0, value=1.0, step=0.1,
-        label="dk (Å⁻¹)", show_value=True,
+        start=0.0,
+        stop=4.0,
+        value=1.0,
+        step=0.1,
+        label="dk (Å⁻¹)",
+        show_value=True,
     )
     ft_window = mo.ui.dropdown(
         options=["hanning", "kaiser", "parzen", "welch", "sine"],
@@ -396,20 +469,28 @@ def _(mo):
         label="Window",
     )
     ft_rmax = mo.ui.slider(
-        start=2.0, stop=20.0, value=10.0, step=0.5,
-        label="R_max (Å)", show_value=True,
+        start=2.0,
+        stop=20.0,
+        value=10.0,
+        step=0.5,
+        label="R_max (Å)",
+        show_value=True,
     )
     residual_mode_box = mo.ui.switch(
         value=False,
         label="Residual = total − selected paths (off: total − all stored paths)",
     )
-    show_paths_box = mo.ui.switch(value=True, label="Show individual path contributions")
-    mo.vstack([
-        mo.md("### Fourier Transform"),
-        mo.hstack([ft_kmin, ft_kmax, ft_dk], gap=2),
-        mo.hstack([ft_kweight, ft_window, ft_rmax], gap=2),
-        mo.hstack([residual_mode_box, show_paths_box], gap=4),
-    ])
+    show_paths_box = mo.ui.switch(
+        value=True, label="Show individual path contributions"
+    )
+    mo.vstack(
+        [
+            mo.md("### Fourier Transform"),
+            mo.hstack([ft_kmin, ft_kmax, ft_dk], gap=2),
+            mo.hstack([ft_kweight, ft_window, ft_rmax], gap=2),
+            mo.hstack([residual_mode_box, show_paths_box], gap=4),
+        ]
+    )
     return (
         ft_dk,
         ft_kmax,
@@ -424,41 +505,60 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    equil_box = mo.ui.number(value=0, start=0, stop=10_000, step=1,
-                              label="Equilibration frames to skip")
-    n_paths_box = mo.ui.number(value=50, start=1, stop=100, step=1,
-                                label="Max paths per site per frame")
-    r_tol_box = mo.ui.number(value=0.25, start=0.01, stop=2.0, step=0.01,
-                              label="r_eff tolerance Å")
-    skip_frames_box = mo.ui.number(value=0, start=0, stop=100_000, step=1,
-                                    label="Traj skip frames (DW)")
-    cutoff_box = mo.ui.number(value=7.0, start=0.5, stop=20.0, step=0.1,
-                               label="Neighbor cutoff Å (DW)")
-    dw_tol_box = mo.ui.number(value=0.1, start=0.02, stop=1.0, step=0.01,
-                               label="DW shell grouping tol Å")
-    tol_angle_box = mo.ui.number(value=5.0, start=0.1, stop=45.0, step=0.5,
-                                  label="Angle grouping tol (°)")
-    cutoff_3body_box = mo.ui.number(value=0.0, start=0.0, stop=20.0, step=0.1,
-                                     label="3-body cutoff Å (0=skip)")
+    equil_box = mo.ui.number(
+        value=0, start=0, stop=10_000, step=1, label="Equilibration frames to skip"
+    )
+    n_paths_box = mo.ui.number(
+        value=50, start=1, stop=100, step=1, label="Max paths per site per frame"
+    )
+    r_tol_box = mo.ui.number(
+        value=0.25, start=0.01, stop=2.0, step=0.01, label="r_eff tolerance Å"
+    )
+    skip_frames_box = mo.ui.number(
+        value=0, start=0, stop=100_000, step=1, label="Traj skip frames (DW)"
+    )
+    cutoff_box = mo.ui.number(
+        value=7.0, start=0.5, stop=20.0, step=0.1, label="Neighbor cutoff Å (DW)"
+    )
+    dw_tol_box = mo.ui.number(
+        value=0.1, start=0.02, stop=1.0, step=0.01, label="DW shell grouping tol Å"
+    )
+    tol_angle_box = mo.ui.number(
+        value=5.0, start=0.1, stop=45.0, step=0.5, label="Angle grouping tol (°)"
+    )
+    cutoff_3body_box = mo.ui.number(
+        value=0.0, start=0.0, stop=20.0, step=0.1, label="3-body cutoff Å (0=skip)"
+    )
     site_indices_box = mo.ui.text(
         value="",
         label="Site indices override (comma-separated, e.g. 125,126; blank=auto)",
         full_width=True,
     )
     k_step_box = mo.ui.number(
-        value=0.05, start=0.01, stop=0.5, step=0.01,
+        value=0.05,
+        start=0.01,
+        stop=0.5,
+        step=0.01,
         label="k-grid step Å⁻¹ (path recomputation)",
     )
     recompute_paths_box = mo.ui.checkbox(
         value=False,
         label="Recompute path χ from raw FEFF params",
     )
-    mo.vstack([mo.hstack(
-        [mo.vstack([equil_box, n_paths_box, r_tol_box]),
-         mo.vstack([skip_frames_box, cutoff_box, dw_tol_box]),
-         mo.vstack([tol_angle_box, cutoff_3body_box])],
-        gap=2
-    ), site_indices_box, mo.hstack([k_step_box, recompute_paths_box], gap=2)])
+    mo.vstack(
+        [
+            mo.hstack(
+                [
+                    mo.vstack([equil_box, n_paths_box, r_tol_box]),
+                    mo.vstack([skip_frames_box, cutoff_box, dw_tol_box]),
+                    mo.vstack([tol_angle_box, cutoff_3body_box]),
+                ],
+                gap=2,
+            ),
+            site_indices_box,
+            mo.hstack([k_step_box, recompute_paths_box], gap=2),
+        ]
+    )
     return (
         cutoff_3body_box,
         cutoff_box,
@@ -488,7 +588,10 @@ def _(btn_load, h5py, hdf5_file, logger, mo, np):
 
     mo.stop(
         not btn_load.value,
-        mo.callout(mo.md("Select files above then click **▶ Load & compute** to start."), kind="info"),
+        mo.callout(
+            mo.md("Select files above then click **▶ Load & compute** to start."),
+            kind="info",
+        ),
     )
     mo.stop(
         not hdf5_file.value,
@@ -506,21 +609,12 @@ def _(btn_load, h5py, hdf5_file, logger, mo, np):
             kref_hdf5 = np.array(oa["k"])
             total_chi_hdf5 = np.array(oa["chi"])
 
-            # Count total successful spectra from source HDF5
-            total_spectra = 0
+            # Count total successful spectra.
+            # Priority: (1) n_total attr on overall_average (written by pipeline
+            # v1.1+), (2) max(n_samples) across paths — the most prevalent path
+            # appears in every frame, so max == n_total_overall.
+            total_spectra = int(oa.attrs.get("n_total", 0))
             n_sites = 0
-            if source_h5_path:
-                try:
-                    with h5py.File(source_h5_path, "r") as src:
-                        frames = src.get("frames", {})
-                        total_spectra = sum(
-                            len(f.get("sites", {})) for f in frames.values()
-                        )
-                except Exception as exc:
-                    logger.warning("Could not count spectra from source HDF5: %s", exc)
-
-            if total_spectra == 0:
-                total_spectra = 1
 
             site_avg_grp = fh.get("site_averages", {})
             n_sites = len(site_avg_grp)
@@ -536,8 +630,12 @@ def _(btn_load, h5py, hdf5_file, logger, mo, np):
 
                     _k_path = np.array(p["k"])
                     _chi_path = np.array(p["chi"])
-                    if len(_k_path) != len(kref_hdf5) or not np.allclose(_k_path, kref_hdf5):
-                        _chi_path = np.interp(kref_hdf5, _k_path, _chi_path)
+                    if len(_k_path) != len(kref_hdf5) or not np.allclose(
+                        _k_path, kref_hdf5
+                    ):
+                        _chi_path = np.interp(
+                            kref_hdf5, _k_path, _chi_path, left=0.0, right=0.0
+                        )
 
                     # Read averaged raw FEFF parameters for on-the-fly recomputation
                     _raw_params = {}
@@ -565,6 +663,14 @@ def _(btn_load, h5py, hdf5_file, logger, mo, np):
                         **_raw_params,
                     }
                     path_groups.append(pg)
+
+            # Resolve total_spectra now that n_samples values are available.
+            if total_spectra == 0 and path_groups:
+                # Fallback: the most prevalent path appears in every frame,
+                # so max(n_samples) == n_total_overall.
+                total_spectra = max(pg["n_samples"] for pg in path_groups)
+            if total_spectra == 0:
+                total_spectra = 1
 
             # Compute residual (missing path contributions dropped by FEFF criteria).
             # Each path's chi is averaged over the frames where it exists, so we
@@ -594,10 +700,13 @@ def _(btn_load, h5py, hdf5_file, logger, mo, np):
                         for _fn in sorted(frames_grp.keys())[:1]:
                             _sites_grp = frames_grp[_fn].get("sites", {})
                             for _sn in sorted(_sites_grp.keys())[:1]:
-                                _raw_el = _sites_grp[_sn].attrs.get("absorber_element", b"")
+                                _raw_el = _sites_grp[_sn].attrs.get(
+                                    "absorber_element", b""
+                                )
                                 absorber_el_h5 = (
                                     _raw_el.decode("utf-8", errors="ignore")
-                                    if isinstance(_raw_el, bytes) else str(_raw_el)
+                                    if isinstance(_raw_el, bytes)
+                                    else str(_raw_el)
                                 ).strip()
                 except Exception:
                     pass
@@ -626,7 +735,8 @@ def _(btn_load, h5py, hdf5_file, logger, mo, np):
     _site_idx_str = (
         ", ".join(str(s) for s in feff_site_indices[:5])
         + ("…" if len(feff_site_indices) > 5 else "")
-        if feff_site_indices else "(unknown)"
+        if feff_site_indices
+        else "(unknown)"
     )
     mo.callout(
         mo.md(
@@ -662,10 +772,14 @@ def _(
     g_total_hdf5 = None
     mo.stop(kref_hdf5 is None)
     g_total_hdf5 = perform_FT(
-        kref_hdf5, total_chi_hdf5,
-        kmin=ft_kmin.value, kmax=ft_kmax.value,
-        kweight=ft_kweight.value, dk=ft_dk.value,
-        k_window=ft_window.value, rmax=ft_rmax.value,
+        kref_hdf5,
+        total_chi_hdf5,
+        kmin=ft_kmin.value,
+        kmax=ft_kmax.value,
+        kweight=ft_kweight.value,
+        dk=ft_dk.value,
+        k_window=ft_window.value,
+        rmax=ft_rmax.value,
     )
     return (g_total_hdf5,)
 
@@ -740,10 +854,14 @@ def _(
         display_kref = _k_new
         display_total_chi = np.interp(_k_new, kref_hdf5, total_chi_hdf5)
         display_g_total = perform_FT(
-            display_kref, display_total_chi,
-            kmin=ft_kmin.value, kmax=ft_kmax.value,
-            dk=ft_dk.value, kweight=ft_kweight.value,
-            k_window=ft_window.value, rmax=ft_rmax.value,
+            display_kref,
+            display_total_chi,
+            kmin=ft_kmin.value,
+            kmax=ft_kmax.value,
+            dk=ft_dk.value,
+            kweight=ft_kweight.value,
+            k_window=ft_window.value,
+            rmax=ft_rmax.value,
         )
     return (
         display_g_total,
@@ -818,7 +936,9 @@ def _(
         except ValueError:
             _central_indices = []
             mo.callout(
-                mo.md("Invalid site indices override — must be comma-separated integers."),
+                mo.md(
+                    "Invalid site indices override — must be comma-separated integers."
+                ),
                 kind="alert",
             )
     elif feff_site_indices:
@@ -844,7 +964,10 @@ def _(
 
     with mo.status.spinner(f"Computing MSRD paths for absorber={_absorber_el}..."):
         msrd_2b, msrd_3b = calculate_grouped_msrd(
-            _raw, _unwrapped, _central_indices, _absorber_el,
+            _raw,
+            _unwrapped,
+            _central_indices,
+            _absorber_el,
             cutoff=cutoff_box.value,
             tol_dist=dw_tol_box.value,
             tol_angle=tol_angle_box.value,
@@ -910,7 +1033,9 @@ def _(display_merged_data, mo, msrd_2b, msrd_3b, np, pd, r_tol_box):
             )
         ]
         if _ss_matches:
-            _group_idx, _reff_exafs = min(_ss_matches, key=lambda x: abs(x[1] - _reff_dw))
+            _group_idx, _reff_exafs = min(
+                _ss_matches, key=lambda x: abs(x[1] - _reff_dw)
+            )
             _feff_nlegs = 2
             _feff_note = "direct ss"
 
@@ -926,31 +1051,39 @@ def _(display_merged_data, mo, msrd_2b, msrd_3b, np, pd, r_tol_box):
                 )
             ]
             if _rattle_matches:
-                _group_idx, _reff_exafs = min(_rattle_matches, key=lambda x: abs(x[1] / 2.0 - _reff_dw))
+                _group_idx, _reff_exafs = min(
+                    _rattle_matches, key=lambda x: abs(x[1] / 2.0 - _reff_dw)
+                )
                 _feff_nlegs = 4
                 _feff_note = "rattle (4×σ²)"
 
-        _contrib = _pgs[_group_idx]["contribution_pct"] if _group_idx is not None else 0.0
-        _rows.append({
-            "dw_body": "2b",
-            "dw_idx": _dw_i,
-            "Body": "2-body",
-            "Type": _m["type"],
-            "Scatterer": _scatterer,
-            "Reff_DW (Å)": round(_reff_dw, 4),
-            "σ² (Å²)": round(_m["sigma2"], 6),
-            "N_pairs": _m["count"],
-            "Angle (°)": None,
-            "Reff_EXAFS (Å)": round(_reff_exafs, 4) if _reff_exafs is not None else None,
-            "Nlegs_FEFF": _feff_nlegs,
-            "group_idx": _group_idx,
-            "FEFF match": _feff_note,
-            "contribution_pct": _contrib,
-        })
+        _contrib = (
+            _pgs[_group_idx]["contribution_pct"] if _group_idx is not None else 0.0
+        )
+        _rows.append(
+            {
+                "dw_body": "2b",
+                "dw_idx": _dw_i,
+                "Body": "2-body",
+                "Type": _m["type"],
+                "Scatterer": _scatterer,
+                "Reff_DW (Å)": round(_reff_dw, 4),
+                "σ² (Å²)": round(_m["sigma2"], 6),
+                "N_pairs": _m["count"],
+                "Angle (°)": None,
+                "Reff_EXAFS (Å)": round(_reff_exafs, 4)
+                if _reff_exafs is not None
+                else None,
+                "Nlegs_FEFF": _feff_nlegs,
+                "group_idx": _group_idx,
+                "FEFF match": _feff_note,
+                "contribution_pct": _contrib,
+            }
+        )
 
     # ── 3-body DW groups (master) ─────────────────────────────────────────
     for _dw_i, _m in enumerate(msrd_3b or []):
-        _parts = _m["type"].split("-")   # e.g. "K-N-C"
+        _parts = _m["type"].split("-")  # e.g. "K-N-C"
         _scatterer = "-".join(_parts[1:])  # "N-C"
         _reff_dw = _m["reff"]
         _group_idx = None
@@ -966,26 +1099,34 @@ def _(display_merged_data, mo, msrd_2b, msrd_3b, np, pd, r_tol_box):
             )
         ]
         if _tri_matches:
-            _group_idx, _reff_exafs = min(_tri_matches, key=lambda x: abs(x[1] - _reff_dw))
+            _group_idx, _reff_exafs = min(
+                _tri_matches, key=lambda x: abs(x[1] - _reff_dw)
+            )
             _feff_note = "direct triangular"
 
-        _contrib = _pgs[_group_idx]["contribution_pct"] if _group_idx is not None else 0.0
-        _rows.append({
-            "dw_body": "3b",
-            "dw_idx": _dw_i,
-            "Body": "3-body",
-            "Type": _m["type"],
-            "Scatterer": _scatterer,
-            "Reff_DW (Å)": round(_reff_dw, 4),
-            "σ² (Å²)": round(_m["sigma2"], 6),
-            "N_pairs": _m["count"],
-            "Angle (°)": round(_m["angle"], 1),
-            "Reff_EXAFS (Å)": round(_reff_exafs, 4) if _reff_exafs is not None else None,
-            "Nlegs_FEFF": 3 if _group_idx is not None else None,
-            "group_idx": _group_idx,
-            "FEFF match": _feff_note,
-            "contribution_pct": _contrib,
-        })
+        _contrib = (
+            _pgs[_group_idx]["contribution_pct"] if _group_idx is not None else 0.0
+        )
+        _rows.append(
+            {
+                "dw_body": "3b",
+                "dw_idx": _dw_i,
+                "Body": "3-body",
+                "Type": _m["type"],
+                "Scatterer": _scatterer,
+                "Reff_DW (Å)": round(_reff_dw, 4),
+                "σ² (Å²)": round(_m["sigma2"], 6),
+                "N_pairs": _m["count"],
+                "Angle (°)": round(_m["angle"], 1),
+                "Reff_EXAFS (Å)": round(_reff_exafs, 4)
+                if _reff_exafs is not None
+                else None,
+                "Nlegs_FEFF": 3 if _group_idx is not None else None,
+                "group_idx": _group_idx,
+                "FEFF match": _feff_note,
+                "contribution_pct": _contrib,
+            }
+        )
 
     path_table_df = pd.DataFrame(_rows)
     # path_table_df
@@ -998,8 +1139,15 @@ def _(mo, path_table_df):
     mo.stop(path_table_df is None)
 
     _display_cols = [
-        "Body", "Type", "Reff_DW (Å)", "σ² (Å²)", "Angle (°)",
-        "N_pairs", "Reff_EXAFS (Å)", "Nlegs_FEFF", "FEFF match",
+        "Body",
+        "Type",
+        "Reff_DW (Å)",
+        "σ² (Å²)",
+        "Angle (°)",
+        "N_pairs",
+        "Reff_EXAFS (Å)",
+        "Nlegs_FEFF",
+        "FEFF match",
         "contribution_pct",
     ]
     path_selector = mo.ui.table(
@@ -1063,11 +1211,14 @@ def _(
 ):
     mo.stop(not selected_pgs)
 
-    _ft_kw = dict(
-        kmin=ft_kmin.value, kmax=ft_kmax.value,
-        kweight=ft_kweight.value, dk=ft_dk.value,
-        k_window=ft_window.value, rmax=ft_rmax.value,
-    )
+    _ft_kw = {
+        "kmin": ft_kmin.value,
+        "kmax": ft_kmax.value,
+        "kweight": ft_kweight.value,
+        "dk": ft_dk.value,
+        "k_window": ft_window.value,
+        "rmax": ft_rmax.value,
+    }
     _kref = display_merged_data["merged_sites"]["kref"]
     _total_sites = display_merged_data["merged_sites"]["total_frames"]
     _k_mask = (_kref >= KMIN) & (_kref <= KMAX)
@@ -1075,19 +1226,24 @@ def _(
     def _jmol_hex(sym):
         _z = atomic_numbers.get(sym.split("-")[0], 0)
         _r, _g, _b = jmol_colors[_z]
-        return f"#{int(_r*255):02x}{int(_g*255):02x}{int(_b*255):02x}"
+        return f"#{int(_r * 255):02x}{int(_g * 255):02x}{int(_b * 255):02x}"
 
     # dash patterns for differentiating same-element paths
     _DASHES = [[1, 0], [8, 3], [4, 3], [2, 3], [6, 2, 2, 2]]
 
     # ── Build per-path labels, chi arrays, and Jmol colors ───────────────
     # DW groups without a matching FEFF path (selected_pgs entry is None) are skipped.
+    # Multiple DW rows can map to the same FEFF path group (group_idx).  For the
+    # chi sum we count each unique FEFF group once; the per-panel plot still shows
+    # one curve per DW row so users can inspect individual DW entries.
     _path_labels = []
     _path_chis = []
     _path_colors = []
     _path_dashes = []
     _color_count: dict = {}  # jmol_hex → count (for dash cycling)
-    for _pg, _row in zip(selected_pgs, selected_rows):
+    _seen_group_indices: set[int] = set()  # FEFF groups already added to sum
+    _chi_sum_sel = np.zeros_like(_kref)
+    for _pg, _row in zip(selected_pgs, selected_rows, strict=False):
         if _pg is None:
             continue  # DW group with no FEFF match — skip chi
         _angle_str = (
@@ -1109,80 +1265,151 @@ def _(
         if _w:
             _chi_p = np.dot(np.array(_w), np.array(_pg["chi_list"])) / _total_sites
         else:
-            _chi_p = np.mean(_pg["chi_list"], axis=0) * (len(_pg["frame_set"]) / _total_sites)
+            _chi_p = np.mean(_pg["chi_list"], axis=0) * (
+                len(_pg["frame_set"]) / _total_sites
+            )
         _path_chis.append(_chi_p)
+        # Only add to the sum once per unique FEFF path group.
+        _gi_val = _row.get("group_idx")
+        if pd.notna(_gi_val):
+            _gi_int = int(_gi_val)
+            if _gi_int not in _seen_group_indices:
+                _seen_group_indices.add(_gi_int)
+                _chi_sum_sel += _chi_p
 
     mo.stop(
         not _path_labels,
-        mo.callout(mo.md("No selected DW groups have matching FEFF paths."), kind="info"),
+        mo.callout(
+            mo.md("No selected DW groups have matching FEFF paths."), kind="info"
+        ),
     )
-    _chi_sum_sel = np.sum(_path_chis, axis=0)
 
     # ── Color / dash scales (Jmol, dash-differentiated per element) ───────
     _n = len(_path_labels)
-    _SUM_COL  = "#cc3300"
+    _SUM_COL = "#cc3300"
     _HDF5_COL = "#111111"
     _RESID_COL = "#888888"
 
     _COMBINED = "── Combined"
     _panel_order = [_COMBINED] + _path_labels
-    _trace_domain = _path_labels + ["Sum of selected", "HDF5 total", "FEFF residual", "Selection residual"]
-    _color_scale = alt.Scale(domain=_trace_domain, range=_path_colors + [_SUM_COL, _HDF5_COL, _RESID_COL, _RESID_COL])
-    _dash_scale  = alt.Scale(domain=_trace_domain, range=_path_dashes + [[6, 3], [1, 0], [3, 3], [2, 2]])
-    _sw_scale    = alt.Scale(domain=_trace_domain, range=[1.8] * _n + [2.5, 2.0, 1.5, 1.5])
+    _trace_domain = _path_labels + [
+        "Sum of selected",
+        "HDF5 total",
+        "FEFF residual",
+        "Selection residual",
+    ]
+    _color_scale = alt.Scale(
+        domain=_trace_domain,
+        range=_path_colors + [_SUM_COL, _HDF5_COL, _RESID_COL, _RESID_COL],
+    )
+    _dash_scale = alt.Scale(
+        domain=_trace_domain, range=_path_dashes + [[6, 3], [1, 0], [3, 3], [2, 2]]
+    )
+    _sw_scale = alt.Scale(domain=_trace_domain, range=[1.8] * _n + [2.5, 2.0, 1.5, 1.5])
 
     # ── k-space long-form table ───────────────────────────────────────────
     _rows_k = []
-    for _lbl, _chi_p in zip(_path_labels, _path_chis):
-        for _k_val, _y_val in zip(_kref[_k_mask], (_chi_p * _kref**2)[_k_mask]):
-            _rows_k.append({"k": _k_val, "k²χ(k)": _y_val, "panel": _lbl, "trace": _lbl})
+    for _lbl, _chi_p in zip(_path_labels, _path_chis, strict=False):
+        for _k_val, _y_val in zip(
+            _kref[_k_mask], (_chi_p * _kref**2)[_k_mask], strict=False
+        ):
+            _rows_k.append(
+                {"k": _k_val, "k²χ(k)": _y_val, "panel": _lbl, "trace": _lbl}
+            )
 
     _g_sum = perform_FT(_kref, _chi_sum_sel, **_ft_kw)
     # Sum of selected: native path k-grid
-    for _k_val, _y_s in zip(_kref[_k_mask], (_chi_sum_sel * _kref**2)[_k_mask]):
-        _rows_k.append({"k": _k_val, "k²χ(k)": _y_s, "panel": _COMBINED, "trace": "Sum of selected"})
+    for _k_val, _y_s in zip(
+        _kref[_k_mask], (_chi_sum_sel * _kref**2)[_k_mask], strict=False
+    ):
+        _rows_k.append(
+            {
+                "k": _k_val,
+                "k²χ(k)": _y_s,
+                "panel": _COMBINED,
+                "trace": "Sum of selected",
+            }
+        )
     # HDF5 total: its own native k-grid, already k²-weighted correctly
     _k_mask_h5 = (display_kref >= KMIN) & (display_kref <= KMAX)
-    for _k_val, _y_h in zip(display_kref[_k_mask_h5], (display_total_chi * display_kref**2)[_k_mask_h5]):
-        _rows_k.append({"k": _k_val, "k²χ(k)": _y_h, "panel": _COMBINED, "trace": "HDF5 total"})
+    for _k_val, _y_h in zip(
+        display_kref[_k_mask_h5],
+        (display_total_chi * display_kref**2)[_k_mask_h5],
+        strict=False,
+    ):
+        _rows_k.append(
+            {"k": _k_val, "k²χ(k)": _y_h, "panel": _COMBINED, "trace": "HDF5 total"}
+        )
 
     # Residual k-space in Combined panel
     _use_sel_residual = residual_mode_box.value
     _resid_label = "Selection residual" if _use_sel_residual else "FEFF residual"
     if _use_sel_residual:
         # total − sum of selected paths; interpolate path sum onto display_kref grid
-        _chi_residual_k = display_total_chi - np.interp(display_kref, _kref, _chi_sum_sel)
+        _chi_residual_k = display_total_chi - np.interp(
+            display_kref, _kref, _chi_sum_sel
+        )
         _resid_kref = display_kref
     else:
         _chi_residual_k = display_merged_data["merged_sites"].get("chi_residual")
         _resid_kref = display_kref
     if _chi_residual_k is not None:
         _k_mask_res_k = (_resid_kref >= KMIN) & (_resid_kref <= KMAX)
-        for _k_val, _y_r in zip(_resid_kref[_k_mask_res_k], (_chi_residual_k * _resid_kref**2)[_k_mask_res_k]):
-            _rows_k.append({"k": _k_val, "k²χ(k)": _y_r, "panel": _COMBINED, "trace": _resid_label})
+        for _k_val, _y_r in zip(
+            _resid_kref[_k_mask_res_k],
+            (_chi_residual_k * _resid_kref**2)[_k_mask_res_k],
+            strict=False,
+        ):
+            _rows_k.append(
+                {"k": _k_val, "k²χ(k)": _y_r, "panel": _COMBINED, "trace": _resid_label}
+            )
 
     # ── R-space long-form table ───────────────────────────────────────────
     _rows_r = []
-    for _i, (_lbl, _chi_p, _pg) in enumerate(zip(_path_labels, _path_chis, selected_pgs)):
+    for _i, (_lbl, _chi_p, _pg) in enumerate(
+        zip(_path_labels, _path_chis, selected_pgs, strict=False)
+    ):
         _g_p = perform_FT(_kref, _chi_p, **_ft_kw)
         _r_mask = (_g_p.r >= RMIN) & (_g_p.r <= ft_rmax.value)
-        for _r_val, _mag in zip(_g_p.r[_r_mask], _g_p.chir_mag[_r_mask]):
+        for _r_val, _mag in zip(_g_p.r[_r_mask], _g_p.chir_mag[_r_mask], strict=False):
             _rows_r.append({"R": _r_val, "|χ(R)|": _mag, "panel": _lbl, "trace": _lbl})
 
     _r_mask_g = (display_g_total.r >= RMIN) & (display_g_total.r <= ft_rmax.value)
     _r_mask_s = (_g_sum.r >= RMIN) & (_g_sum.r <= ft_rmax.value)
     # Each trace uses its own R-grid as x
-    for _r_val, _mag_s in zip(_g_sum.r[_r_mask_s], _g_sum.chir_mag[_r_mask_s]):
-        _rows_r.append({"R": _r_val, "|χ(R)|": _mag_s, "panel": _COMBINED, "trace": "Sum of selected"})
-    for _r_val, _mag_h in zip(display_g_total.r[_r_mask_g], display_g_total.chir_mag[_r_mask_g]):
-        _rows_r.append({"R": _r_val, "|χ(R)|": _mag_h, "panel": _COMBINED, "trace": "HDF5 total"})
+    for _r_val, _mag_s in zip(
+        _g_sum.r[_r_mask_s], _g_sum.chir_mag[_r_mask_s], strict=False
+    ):
+        _rows_r.append(
+            {
+                "R": _r_val,
+                "|χ(R)|": _mag_s,
+                "panel": _COMBINED,
+                "trace": "Sum of selected",
+            }
+        )
+    for _r_val, _mag_h in zip(
+        display_g_total.r[_r_mask_g], display_g_total.chir_mag[_r_mask_g], strict=False
+    ):
+        _rows_r.append(
+            {"R": _r_val, "|χ(R)|": _mag_h, "panel": _COMBINED, "trace": "HDF5 total"}
+        )
 
     # Residual R-space in Combined panel
     if _chi_residual_k is not None:
         _g_res = perform_FT(_resid_kref, _chi_residual_k, **_ft_kw)
         _r_mask_res = (_g_res.r >= RMIN) & (_g_res.r <= ft_rmax.value)
-        for _r_val, _mag_r in zip(_g_res.r[_r_mask_res], _g_res.chir_mag[_r_mask_res]):
-            _rows_r.append({"R": _r_val, "|χ(R)|": _mag_r, "panel": _COMBINED, "trace": _resid_label})
+        for _r_val, _mag_r in zip(
+            _g_res.r[_r_mask_res], _g_res.chir_mag[_r_mask_res], strict=False
+        ):
+            _rows_r.append(
+                {
+                    "R": _r_val,
+                    "|χ(R)|": _mag_r,
+                    "panel": _COMBINED,
+                    "trace": _resid_label,
+                }
+            )
 
     _df_k = pd.DataFrame(_rows_k)
     _df_r = pd.DataFrame(_rows_r)
@@ -1196,7 +1423,9 @@ def _(
     _row_enc = alt.Row(
         "panel:N",
         sort=_panel_order,
-        header=alt.Header(labelFontSize=10, labelLimit=450, labelOrient="left", title=None),
+        header=alt.Header(
+            labelFontSize=10, labelLimit=450, labelOrient="left", title=None
+        ),
     )
 
     # param-bound interval controls scale domain only — no mark greying.
@@ -1209,8 +1438,11 @@ def _(
             .encode(
                 x=alt.X(f"{x_col}:Q", title=x_title),
                 y=alt.Y(f"{y_col}:Q", title=y_title),
-                color=alt.Color("trace:N", scale=_color_scale,
-                                legend=alt.Legend(title="Trace", orient="right")),
+                color=alt.Color(
+                    "trace:N",
+                    scale=_color_scale,
+                    legend=alt.Legend(title="Trace", orient="right"),
+                ),
                 strokeDash=alt.StrokeDash("trace:N", scale=_dash_scale, legend=None),
                 strokeWidth=alt.StrokeWidth("trace:N", scale=_sw_scale, legend=None),
                 row=_row_enc,
@@ -1241,7 +1473,9 @@ def _(alt, atomic_numbers, jmol_colors, mo, path_table_df, pd):
     _df_dw = path_table_df.copy()
     mo.stop(
         len(_df_dw) == 0,
-        mo.callout(mo.md("No DW groups found — load a trajectory file above."), kind="info"),
+        mo.callout(
+            mo.md("No DW groups found — load a trajectory file above."), kind="info"
+        ),
     )
 
     _df_dw["label"] = (
@@ -1255,7 +1489,7 @@ def _(alt, atomic_numbers, jmol_colors, mo, path_table_df, pd):
     def _jmol_hex(sym):
         _z = atomic_numbers.get(sym.split("-")[0], 0)
         _r, _g, _b = jmol_colors[_z]
-        return f"#{int(_r*255):02x}{int(_g*255):02x}{int(_b*255):02x}"
+        return f"#{int(_r * 255):02x}{int(_g * 255):02x}{int(_b * 255):02x}"
 
     _scat_els = sorted(_df_dw["Scatterer"].unique())
     _jmol_scale = alt.Scale(
@@ -1278,7 +1512,9 @@ def _(alt, atomic_numbers, jmol_colors, mo, path_table_df, pd):
             ),
             shape=alt.Shape(
                 "Body:N",
-                scale=alt.Scale(domain=["2-body", "3-body"], range=["circle", "triangle-up"]),
+                scale=alt.Scale(
+                    domain=["2-body", "3-body"], range=["circle", "triangle-up"]
+                ),
             ),
             tooltip=[
                 alt.Tooltip("label:N", title="Path"),
@@ -1289,7 +1525,9 @@ def _(alt, atomic_numbers, jmol_colors, mo, path_table_df, pd):
                 alt.Tooltip("contribution_pct:Q", format=".2f", title="Contrib. %"),
             ],
         )
-        .properties(height=320, width="container", title="σ² vs Reff_DW — click to select")
+        .properties(
+            height=320, width="container", title="σ² vs Reff_DW — click to select"
+        )
         .interactive()
     )
 
@@ -1299,7 +1537,11 @@ def _(alt, atomic_numbers, jmol_colors, mo, path_table_df, pd):
 
 @app.cell
 def _(dw_scatter, mo, viewer):
-    _display = mo.hstack([viewer, dw_scatter], widths=[30, 70]) if dw_scatter is not None else viewer
+    _display = (
+        mo.hstack([viewer, dw_scatter], widths=[30, 70])
+        if dw_scatter is not None
+        else viewer
+    )
     _display
     return
 
@@ -1307,7 +1549,8 @@ def _(dw_scatter, mo, viewer):
 @app.cell
 def _(mo, selected_rows):
     show_all_instances_cb = mo.ui.checkbox(
-        label="Show all equivalent site instances", value=True,
+        label="Show all equivalent site instances",
+        value=True,
     )
     _n = len(selected_rows) if selected_rows else 0
     mo.vstack([mo.md(f"_{_n} path group(s) selected._"), show_all_instances_cb])
@@ -1338,7 +1581,9 @@ def _(
     selected_rows,
     show_all_instances_cb,
 ):
-    viewer = mo.callout(mo.md("Load a trajectory to enable 3-D visualisation."), kind="info")
+    viewer = mo.callout(
+        mo.md("Load a trajectory to enable 3-D visualisation."), kind="info"
+    )
     mo.stop(avg_atoms is None)
 
     _pos = dw_results["avg_positions"]
@@ -1348,7 +1593,7 @@ def _(
     def _jmol_hex3d(sym):
         _z = atomic_numbers.get(sym.split("-")[0], 0)
         _r, _g, _b = jmol_colors[_z]
-        return f"#{int(_r*255):02x}{int(_g*255):02x}{int(_b*255):02x}"
+        return f"#{int(_r * 255):02x}{int(_g * 255):02x}{int(_b * 255):02x}"
 
     _vf_groups = {}
     _highlight = set()
@@ -1372,7 +1617,9 @@ def _(
                 _arrow_colors.append("#{:02x}{:02x}{:02x}".format(*_rv))
             _color_use[_scat_sym] = _cnt + 1
 
-        for _pi, (_row3d, _color3d) in enumerate(zip(selected_rows, _arrow_colors)):
+        for _pi, (_row3d, _color3d) in enumerate(
+            zip(selected_rows, _arrow_colors, strict=False)
+        ):
             _body = _row3d["dw_body"]
             _dw_i = int(_row3d["dw_idx"])
             _m = msrd_2b[_dw_i] if _body == "2b" else (msrd_3b or [])[_dw_i]
@@ -1393,8 +1640,18 @@ def _(
                     _vec_ret.append((-_v).tolist())
                     _highlight.add(_abs_i)
                     _highlight.add(_scat_i)
-                _vf_groups[f"go_{_pi}"]  = {"origins": _orig_go,  "vectors": _vec_go,  "color": _color3d, "radius": 0.12}
-                _vf_groups[f"ret_{_pi}"] = {"origins": _orig_ret, "vectors": _vec_ret, "color": _color3d, "radius": 0.07}
+                _vf_groups[f"go_{_pi}"] = {
+                    "origins": _orig_go,
+                    "vectors": _vec_go,
+                    "color": _color3d,
+                    "radius": 0.12,
+                }
+                _vf_groups[f"ret_{_pi}"] = {
+                    "origins": _orig_ret,
+                    "vectors": _vec_ret,
+                    "color": _color3d,
+                    "radius": 0.07,
+                }
 
             else:
                 # 3-body: draw triangular path c→n1→n2→c using chained MIC origins
@@ -1421,14 +1678,29 @@ def _(
                     _leg3_origs.append(_orig_n2.tolist())
                     _leg3_vecs.append(_v_ret.tolist())
                     _highlight.update([_c, _n1, _n2])
-                _vf_groups[f"leg1_{_pi}"] = {"origins": _leg1_origs, "vectors": _leg1_vecs, "color": _color3d, "radius": 0.12}
-                _vf_groups[f"leg2_{_pi}"] = {"origins": _leg2_origs, "vectors": _leg2_vecs, "color": _color3d, "radius": 0.09}
-                _vf_groups[f"leg3_{_pi}"] = {"origins": _leg3_origs, "vectors": _leg3_vecs, "color": _color3d, "radius": 0.07}
+                _vf_groups[f"leg1_{_pi}"] = {
+                    "origins": _leg1_origs,
+                    "vectors": _leg1_vecs,
+                    "color": _color3d,
+                    "radius": 0.12,
+                }
+                _vf_groups[f"leg2_{_pi}"] = {
+                    "origins": _leg2_origs,
+                    "vectors": _leg2_vecs,
+                    "color": _color3d,
+                    "radius": 0.09,
+                }
+                _vf_groups[f"leg3_{_pi}"] = {
+                    "origins": _leg3_origs,
+                    "vectors": _leg3_vecs,
+                    "color": _color3d,
+                    "radius": 0.07,
+                }
 
     _viewer = AtomsViewer(BaseWidget(guiConfig=guiConfig))
     _viewer.atoms = ASEAdapter.to_weas(avg_atoms)
     _viewer.model_style = 0
-    _viewer.atom_scales = [0.333]*len(avg_atoms)
+    _viewer.atom_scales = [0.333] * len(avg_atoms)
     _viewer.boundary = [[-0.2, 1.2], [-0.2, 1.2], [-0.2, 1.2]]
     _viewer.show_bonded_atoms = True
     if _highlight:

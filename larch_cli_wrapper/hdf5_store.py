@@ -995,8 +995,8 @@ class AveragedPathsStore:
         │   └── paths/
         │       └── SS_Fe_3.22/
         │           ├── k, chi, r, chir_mag, chir_re, chir_im
-        │           ├── source_frames  (int[n_samples])
-        │           ├── source_sites   (int[n_samples])
+        │           ├── source_frames  (int[n_unique_frames])
+        │           ├── source_sites   (int[n_unique_sites])
         │           └── attrs: scatterer, nlegs, r_eff, degeneracy,
         │                     n_samples, cw_ratio, contribution_pct
         └── site_averages/
@@ -1045,6 +1045,7 @@ class AveragedPathsStore:
         group_path: str,
         group: Group,
         path_contributions: dict[str, PathContribution] | None = None,
+        n_total: int | None = None,
     ) -> None:
         """Write an averaged group and its path contributions."""
         with self._lock:
@@ -1053,6 +1054,8 @@ class AveragedPathsStore:
                 if name in grp:
                     del grp[name]
 
+            if n_total is not None:
+                grp.attrs["n_total"] = int(n_total)
             grp.create_dataset(
                 "k", data=np.asarray(group.k, dtype=np.float64), **_COMPRESS
             )
@@ -1130,6 +1133,9 @@ class AveragedPathsStore:
                             data=np.asarray(pc.chir_im, dtype=np.float64),
                             **_COMPRESS,
                         )
+                    # source_frames / source_sites store *unique* frame and
+                    # site indices (not one entry per sample), so they remain
+                    # compact even for high-degeneracy paths.
                     if pc.source_frames.size:
                         p_grp.create_dataset(
                             "source_frames",

@@ -1049,7 +1049,12 @@ class PipelineProcessor:
         if overall_average is not None:
             overall_paths = overall_agg.finalize(fourier_params)
             _add_contribution_pct(overall_paths, overall_average, n_total_overall)
-            store.write_average("overall_average", overall_average, overall_paths)
+            store.write_average(
+                "overall_average",
+                overall_average,
+                overall_paths,
+                n_total=n_total_overall,
+            )
 
         for site_idx, site_group in site_averages.items():
             site_paths = (

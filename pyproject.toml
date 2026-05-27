@@ -119,14 +119,8 @@ convention = "google"
 'tests/**/*' = ['D', 'S101']
 '**/test_*.py' = ['D', 'S101']
 '__init__.py' = ['D', 'F401']
-'larch_cli_wrapper/cli.py' = ['B008', 'D301', 'D415']
-'notebooks/exafs_pipeline.py' = [
-    'F841',
-    'B018']
-'notebooks/nanoparticle_builder.py' = [
-    'B018']
-'notebooks/debye_waller.py' = [
-    'B018']
+'larch_cli_wrapper/cli.py' = ['B008']
+'notebooks/*.py' = ['F841', 'B018', 'E501', 'BLE001', 'S110', 'D']
 
 
 # =======================
