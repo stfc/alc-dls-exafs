@@ -510,8 +510,8 @@ class TestFeffExecutor:
         # Setup mocks - return the actual directory from the sample batch
         mock_run_feff.return_value = [(feff_dir, True)]
         mock_read_output.return_value = (
-            np.array([1.0 + 2.0j, 3.0 + 4.0j, 5.0 + 6.0j]),
             np.array([1.0, 2.0, 3.0]),
+            np.array([1.0 + 2.0j, 3.0 + 4.0j, 5.0 + 6.0j]),
         )
 
         # Create executor with no cache (forces all tasks to run)
@@ -558,8 +558,8 @@ class TestFeffExecutor:
         # Setup mocks
         mock_run_feff.return_value = [(feff_dir, True)]
         mock_read_output.return_value = (
-            np.array([1.0 + 2.0j, 3.0 + 4.0j, 5.0 + 6.0j]),
             np.array([1.0, 2.0, 3.0]),
+            np.array([1.0 + 2.0j, 3.0 + 4.0j, 5.0 + 6.0j]),
         )
 
         # Create executor with caching enabled
@@ -641,7 +641,7 @@ class TestResultProcessor:
         # Setup mocks
         chi = np.array([1, 2, 3])
         k = np.array([4, 5, 6])
-        mock_read_output.return_value = (chi, k)
+        mock_read_output.return_value = (k, chi)
 
         processor = ResultProcessor(test_config)
         task_results = {sample_batch.tasks[0].task_id: True}
@@ -1061,7 +1061,7 @@ class TestPipelineIntegration:
         # Create realistic EXAFS data
         k = np.linspace(0, 15, 100)
         chi = np.sin(k) * np.exp(-k / 10)
-        mock_read_output.return_value = (chi, k)
+        mock_read_output.return_value = (k, chi)
 
         # Run pipeline
         processor = PipelineProcessor(test_config, cache_dir=None)
@@ -1131,7 +1131,7 @@ class TestPipelineIntegration:
         # Create realistic EXAFS data
         k = np.linspace(0, 15, 100)
         chi = np.sin(k) * np.exp(-k / 10)
-        mock_read_output.return_value = (chi, k)
+        mock_read_output.return_value = (k, chi)
 
         # Mock averaging
         mock_avg_group = Group()

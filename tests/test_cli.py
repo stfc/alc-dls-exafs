@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 import typer
 from ase import Atoms
@@ -23,6 +24,7 @@ from larch_cli_wrapper.cli import (
     update_config_from_cli_options,
 )
 from larch_cli_wrapper.feff_utils import FeffConfig, WindowType
+from larch_cli_wrapper.hdf5_store import ExafsHDF5Store
 
 # ============================================================================
 # Test Fixtures
@@ -449,6 +451,48 @@ class TestCLICommands:
                 )
 
                 assert result.exit_code == 0
+
+    def test_analyze_command_hdf5_flat_site_results(self, cli_runner):
+        """Test analyze command with pipeline-generated HDF5 (flat site_results)."""
+        config = FeffConfig()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hdf5_path = Path(tmpdir) / "results.h5"
+            store = ExafsHDF5Store(hdf5_path, config=config, mode="w")
+            k = np.array([1.0, 2.0, 3.0])
+            store.write_site_results_batch(
+                [
+                    {
+                        "frame_index": 0,
+                        "site_index": 0,
+                        "k": k,
+                        "chi": np.array([0.1, 0.2, 0.3]),
+                        "absorber_element": "Fe",
+                        "success": True,
+                        "path_contributions": None,
+                    }
+                ]
+            )
+            store.close()
+
+            with (
+                patch("larch_cli_wrapper.cli.ResultProcessor") as mock_processor_class,
+                patch("larch_cli_wrapper.cli.plot_exafs_matplotlib"),
+            ):
+                mock_processor = Mock()
+                mock_processor.load_successful_results.return_value = {
+                    "frame_0000_site_0000": Mock()
+                }
+                mock_processor.create_frame_averages.return_value = {}
+                mock_processor.create_site_averages.return_value = {}
+                mock_processor.create_overall_average.return_value = Mock()
+                mock_processor_class.return_value = mock_processor
+
+                result = cli_runner.invoke(
+                    app, ["analyze", str(hdf5_path), "--plot-include", "average"]
+                )
+
+                assert result.exit_code == 0
+                assert "Loaded 1 site spectra from HDF5" in result.stdout
 
     def test_pipeline_command_basic(self, cli_runner, temp_structure_file):
         """Test basic pipeline command."""
@@ -890,7 +934,7 @@ class TestSaveGroupsCLI:
 
         fake_k = np.linspace(0, 15, 100)
         fake_chi = np.sin(fake_k) + 1j * np.cos(fake_k)  # Complex chi data
-        mock_read_feff.return_value = (fake_chi, fake_k)
+        mock_read_feff.return_value = (fake_k, fake_chi)
 
         # Mock plot_exafs_matplotlib to return a successful result
         from larch_cli_wrapper.exafs_data import PlotResult

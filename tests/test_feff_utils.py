@@ -433,15 +433,27 @@ class TestSpectraAveraging:
         np.testing.assert_array_almost_equal(chi_avg, expected)
 
     def test_average_chi_spectra_complex_data(self):
-        """Test averaging with complex chi data."""
+        """Test that complex chi data is cast to real (imaginary part discarded).
+
+        chi(k) is always real float64 in this codebase.  If complex data is
+        accidentally passed (e.g. from external code), numpy will discard the
+        imaginary part and issue a ComplexWarning.  This test verifies the
+        behaviour is non-crashing and returns the real part only.
+        """
+        import warnings
+
         k = np.linspace(2, 14, 50)
         chi1 = np.sin(k) + 1j * np.cos(k)
         chi2 = np.cos(k) + 1j * np.sin(k)
 
-        chi_avg, k_avg = average_chi_spectra([k, k], [chi1, chi2])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # suppress ComplexWarning
+            chi_avg, k_avg = average_chi_spectra([k, k], [chi1, chi2])
 
-        expected_avg = (chi1 + chi2) / 2
+        # Complex imaginary part is discarded; only real parts are averaged
+        expected_avg = (np.real(chi1) + np.real(chi2)) / 2
         np.testing.assert_array_almost_equal(chi_avg, expected_avg)
+        assert not np.iscomplexobj(chi_avg)
 
     def test_average_chi_spectra_empty_input(self):
         """Test averaging with empty inputs."""
@@ -485,7 +497,7 @@ class TestFeffInputGeneration:
         mock_mpexafs.return_value = mock_feff_set
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            output_dir = Path(tmpdir)
+            output_dir = Path(tmpdir).resolve()
 
             result = generate_pymatgen_input(sample_atoms, 0, output_dir, sample_config)
 
@@ -631,7 +643,13 @@ class TestFeffOutput:
 
     @patch("larch_cli_wrapper.feff_utils.read_ascii")
     def test_read_feff_output_larch_success(self, mock_read_ascii):
-        """Test successful read_feff_output with larch."""
+        """Test successful read_feff_output with larch.
+
+        chi(k) is always returned as real float64 (imaginary part of the complex
+        FEFF amplitude).  If a mock provides complex chi, only the real part
+        is returned.
+        """
+        import warnings
 
         # Create a simple object with only the attributes we want
         class MockData:
@@ -647,10 +665,14 @@ class TestFeffOutput:
             chi_file = feff_dir / "chi.dat"
             chi_file.write_text("# Mock chi.dat\n3.0 0.1 0.2\n4.0 0.3 0.4\n")
 
-            chi, k = read_feff_output(feff_dir)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")  # suppress ComplexWarning
+                k, chi = read_feff_output(feff_dir)
 
-            np.testing.assert_array_equal(chi, mock_data.chi)
+            # chi is always real float64 - imaginary part discarded
+            np.testing.assert_array_equal(chi, np.real(mock_data.chi))
             np.testing.assert_array_equal(k, mock_data.k)
+            assert chi.dtype == np.float64
 
     @patch("larch_cli_wrapper.feff_utils.read_ascii")
     def test_read_feff_output_mag_phase_format(self, mock_read_ascii):
@@ -670,7 +692,7 @@ class TestFeffOutput:
             (feff_dir / "chi.dat").write_text(
                 "# FEFF format\n3.0 0.1 0.1118 0.4636\n4.0 0.2 0.2236 0.4636\n"
             )
-            chi, k = read_feff_output(feff_dir)
+            k, chi = read_feff_output(feff_dir)
             expected_chi = mock_data.mag * np.sin(mock_data.phase)
             np.testing.assert_array_equal(k, mock_data.k)
             np.testing.assert_allclose(chi, expected_chi)
@@ -692,7 +714,7 @@ class TestFeffOutput:
         with tempfile.TemporaryDirectory() as tmpdir:
             feff_dir = Path(tmpdir)
             (feff_dir / "chi.dat").write_text("# FEFF format\n")
-            chi, k = read_feff_output(feff_dir)
+            k, chi = read_feff_output(feff_dir)
             np.testing.assert_array_equal(k, mock_data.k)
             np.testing.assert_array_equal(chi, mock_data.chi)
 
@@ -715,6 +737,132 @@ class TestFeffOutput:
             assert not (feff_dir / "feff0002.dat").exists()
             assert (feff_dir / "chi.dat").exists()
             assert (feff_dir / "feff.inp").exists()
+
+
+# ---------------------------------------------------------------------------
+# Tests for parse_files_dat
+# ---------------------------------------------------------------------------
+
+TESTS_DIR = Path(__file__).parent
+
+
+class TestParseFilesDat:
+    def test_parses_all_rows(self):
+        from larch_cli_wrapper.feff_utils import parse_files_dat
+
+        result = parse_files_dat(TESTS_DIR)
+        assert len(result) == 4
+
+    def test_strongest_path(self):
+        from larch_cli_wrapper.feff_utils import parse_files_dat
+
+        result = parse_files_dat(TESTS_DIR)
+        assert result["feff0001.dat"]["cw_ratio"] == pytest.approx(100.0)
+
+    def test_ms_path_ratio(self):
+        from larch_cli_wrapper.feff_utils import parse_files_dat
+
+        result = parse_files_dat(TESTS_DIR)
+        assert result["feff0017.dat"]["cw_ratio"] == pytest.approx(6.691)
+
+    def test_metadata_fields(self):
+        from larch_cli_wrapper.feff_utils import parse_files_dat
+
+        result = parse_files_dat(TESTS_DIR)
+        entry = result["feff0001.dat"]
+        assert entry["nlegs"] == 2
+        assert entry["deg"] == pytest.approx(1.0)
+        assert entry["r_eff"] == pytest.approx(2.4283)
+        assert entry["sig2"] == pytest.approx(0.0)
+
+    def test_ms_nlegs(self):
+        from larch_cli_wrapper.feff_utils import parse_files_dat
+
+        result = parse_files_dat(TESTS_DIR)
+        assert result["feff0017.dat"]["nlegs"] == 3
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        from larch_cli_wrapper.feff_utils import parse_files_dat
+
+        result = parse_files_dat(tmp_path)
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Tests for filter_path_contributions
+# ---------------------------------------------------------------------------
+
+
+def _make_path_contribution(path_key, r_eff, cw_ratio):
+    """Build a minimal PathContribution for testing."""
+    from larch_cli_wrapper.exafs_data import PathContribution
+
+    k = np.linspace(2, 14, 50)
+    chi = np.zeros(50)
+    return PathContribution(
+        path_key=path_key,
+        scatterer="Cu",
+        nlegs=2,
+        r_eff=r_eff,
+        degeneracy=1.0,
+        n_samples=1,
+        k=k,
+        chi=chi,
+        cw_ratio=cw_ratio,
+    )
+
+
+class TestFilterPathContributions:
+    @pytest.fixture
+    def sample_contribs(self):
+        return {
+            "SS_Cu_2.43": _make_path_contribution("SS_Cu_2.43", 2.43, 100.0),
+            "SS_Cu_2.47": _make_path_contribution("SS_Cu_2.47", 2.47, 96.4),
+            "MS3_Cu_3.65": _make_path_contribution("MS3_Cu_3.65", 3.65, 6.7),
+            "MS3_Cu_3.78": _make_path_contribution("MS3_Cu_3.78", 3.78, 5.1),
+        }
+
+    def test_no_filter_returns_all(self, sample_contribs):
+        from larch_cli_wrapper.exafs_data import filter_path_contributions
+
+        result = filter_path_contributions(sample_contribs)
+        assert len(result) == 4
+
+    def test_min_cw_ratio_excludes_weak_paths(self, sample_contribs):
+        from larch_cli_wrapper.exafs_data import filter_path_contributions
+
+        result = filter_path_contributions(sample_contribs, min_cw_ratio=10.0)
+        assert len(result) == 2
+        assert "SS_Cu_2.43" in result
+        assert "SS_Cu_2.47" in result
+        assert "MS3_Cu_3.65" not in result
+        assert "MS3_Cu_3.78" not in result
+
+    def test_top_n(self, sample_contribs):
+        from larch_cli_wrapper.exafs_data import filter_path_contributions
+
+        result = filter_path_contributions(sample_contribs, top_n=2)
+        assert len(result) == 2
+        assert "SS_Cu_2.43" in result
+        assert "SS_Cu_2.47" in result
+
+    def test_combined_top_n_and_min_ratio(self, sample_contribs):
+        from larch_cli_wrapper.exafs_data import filter_path_contributions
+
+        result = filter_path_contributions(sample_contribs, top_n=3, min_cw_ratio=10.0)
+        assert len(result) == 2  # only 2 pass the ratio threshold
+
+    def test_r_eff_order_preserved(self, sample_contribs):
+        from larch_cli_wrapper.exafs_data import filter_path_contributions
+
+        result = filter_path_contributions(sample_contribs, min_cw_ratio=5.0)
+        r_effs = [pc.r_eff for pc in result.values()]
+        assert r_effs == sorted(r_effs)
+
+    def test_empty_input(self):
+        from larch_cli_wrapper.exafs_data import filter_path_contributions
+
+        assert filter_path_contributions({}) == {}
 
 
 if __name__ == "__main__":

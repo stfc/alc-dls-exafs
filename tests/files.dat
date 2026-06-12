@@ -1,0 +1,9 @@
+ comment: None given                            Feff8L (EXAFS)       0.1
+ Source:
+ PATH  Rmax= 4.500,  Keep_limit= 0.00, Heap_limit 0.00  Pwcrit= 2.50%
+ -----------------------------------------------------------------------
+    file        sig2   amp ratio    deg    nlegs  r effective
+ feff0001.dat 0.00000   100.000     1.000     2   2.4283
+ feff0002.dat 0.00000    96.430     1.000     2   2.4710
+ feff0017.dat 0.00000     6.691     2.000     3   3.6494
+ feff0020.dat 0.00000     5.075     2.000     3   3.7789

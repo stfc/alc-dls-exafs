@@ -17,6 +17,7 @@ from larch import Group
 from larch.xafs import xftf
 
 if TYPE_CHECKING:
+    import matplotlib.pyplot as plt
     import plotly.graph_objects as go
 
 __all__ = [
@@ -25,6 +26,11 @@ __all__ = [
     "add_metadata_to_group",
     "create_averaged_group",
     "prepare_exafs_data_collection",
+    "PathContribution",
+    "PathAggregator",
+    "filter_path_contributions",
+    "make_path_key",
+    "PlotConfig",
 ]
 
 
@@ -43,6 +49,10 @@ class EXAFSDataCollection:
     site_averages: dict[int, Group] = field(default_factory=dict)
     frame_averages: dict[int, Group] = field(default_factory=dict)
     overall_average: Group | None = None
+
+    # Path contributions (populated when FEFF path files are kept)
+    # Maps path_key (e.g. "SS_Cl_2.86") -> PathContribution
+    path_contributions: dict[str, PathContribution] = field(default_factory=dict)
 
     # Processing metadata
     kweight_used: int = 2  # The kweight used for all FTs
@@ -631,6 +641,287 @@ class EXAFSDataCollection:
             raise ValueError(f"Failed to load Athena project {prj_file}: {e}") from e
 
 
+# ---------------------------------------------------------------------------
+# Path contribution data structures
+# ---------------------------------------------------------------------------
+
+
+def make_path_key(scatterer: str, nlegs: int, r_eff: float, r_bin: float = 0.15) -> str:
+    """Create a stable string key that groups FEFF paths across MD frames.
+
+    Paths with the same scatterer element chain, number of legs, and
+    ``r_eff`` within the same 0.15 Å bin are considered equivalent.
+
+    Examples::
+
+        make_path_key("Cl",  2, 2.84)  -> "SS_Cl_2.85"
+        make_path_key("K",   2, 4.03)  -> "SS_K_3.90"
+        make_path_key("Cl-K", 3, 6.12) -> "MS3_Cl-K_6.15"
+
+    Args:
+        scatterer: Scatterer element string (e.g. ``"Cl"`` or ``"Cl-K"``)
+        nlegs: Number of scattering legs (2 = single-scattering)
+        r_eff: Effective path length in ångströms
+        r_bin: Bin width for R binning (default 0.15 Å)
+
+    Returns:
+        Key string suitable for dict lookup
+    """
+    prefix = "SS" if nlegs == 2 else f"MS{nlegs}"
+    r_binned = round(round(r_eff / r_bin) * r_bin, 3)
+    return f"{prefix}_{scatterer}_{r_binned:.2f}"
+
+
+@dataclass
+class PathContribution:
+    """Averaged chi(k) and chi(R) for a single FEFF scattering path type.
+
+    Produced by :class:`PathAggregator` after accumulating individual path
+    results from multiple FEFF calculations and averaging them.
+    """
+
+    path_key: str
+    """Stable identifier, e.g. ``"SS_Cl_2.85"``."""
+    scatterer: str
+    """Element label(s) of the scattering atom(s), e.g. ``"Cl"``."""
+    nlegs: int
+    """Number of scattering legs (2 = single-scattering)."""
+    r_eff: float
+    """Mean effective path length across all samples (Å)."""
+    degeneracy: float
+    """Mean degeneracy across all samples."""
+    n_samples: int
+    """Number of individual path calculations averaged."""
+    # Averaged k-space data
+    k: np.ndarray
+    chi: np.ndarray
+    # Fourier-transformed data (set after finalize)
+    r: np.ndarray = field(default_factory=lambda: np.array([]))
+    chir_mag: np.ndarray = field(default_factory=lambda: np.array([]))
+    chir_re: np.ndarray = field(default_factory=lambda: np.array([]))
+    chir_im: np.ndarray = field(default_factory=lambda: np.array([]))
+    cw_ratio: float = 0.0
+    """Mean curved-wave chi amplitude ratio (0–100, relative to strongest path)."""
+    source_frames: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=np.int64)
+    )
+    """Frame indices that contributed to this averaged path."""
+    source_sites: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=np.int64)
+    )
+    """Site indices that contributed to this averaged path."""
+    contribution_pct: float = 0.0
+    """Percentage contribution to the total MD-averaged χ(k) amplitude."""
+    # Averaged raw FEFF parameters for on-the-fly χ recomputation
+    amp: np.ndarray = field(default_factory=lambda: np.array([]))
+    """Averaged scattering amplitude on FEFF's native coarse k-grid."""
+    pha: np.ndarray = field(default_factory=lambda: np.array([]))
+    """Averaged total phase on FEFF's native coarse k-grid."""
+    lam: np.ndarray = field(default_factory=lambda: np.array([]))
+    """Averaged mean free path on FEFF's native coarse k-grid."""
+    rep: np.ndarray = field(default_factory=lambda: np.array([]))
+    """Averaged real part of complex momentum on FEFF's native coarse k-grid."""
+    k_param: np.ndarray = field(default_factory=lambda: np.array([]))
+    """Native coarse k-grid that amp/pha/lam/rep live on (Å⁻¹)."""
+
+
+class PathAggregator:
+    """Accumulate per-path chi(k) contributions then average them.
+
+    Usage::
+
+        agg = PathAggregator()
+        # For each FEFF run that kept its per-path files:
+        agg.add(paths_dict)   # {path_key: {"k": ..., "chi": ..., "r_eff": ...,
+        #                                   "nlegs": ..., "degeneracy": ...,
+        #                                   "scatterer": ...}}
+        path_contribs = agg.finalize(fourier_params)
+    """
+
+    def __init__(self, r_bin: float = 0.15) -> None:
+        """Initialize the PathAggregator with a given r_bin width."""
+        self._r_bin = r_bin
+        # key -> list of sample dicts
+        self._samples: dict[str, list[dict]] = {}
+
+    def add(self, paths_dict: dict[str, dict]) -> None:
+        """Accumulate path samples from one FEFF calculation.
+
+        Args:
+            paths_dict: Maps path_key to a dict with keys:
+                ``k``, ``chi`` (arrays) and ``r_eff``, ``nlegs``,
+                ``degeneracy``, ``scatterer`` (scalars).
+        """
+        for key, info in paths_dict.items():
+            self._samples.setdefault(key, []).append(info)
+
+    def finalize(self, fourier_params: dict) -> dict[str, PathContribution]:
+        """Average accumulated path samples and compute Fourier transforms.
+
+        The chi(R) data is derived from ``xftf`` applied to the *averaged*
+        chi(k), not from averaging individual chi(R) arrays.
+
+        Args:
+            fourier_params: Parameters forwarded to :func:`larch.xafs.xftf`.
+
+        Returns:
+            ``{path_key: PathContribution}`` sorted by mean ``r_eff``.
+        """
+        from .feff_utils import average_chi_spectra
+
+        result: dict[str, PathContribution] = {}
+
+        for key, samples in self._samples.items():
+            if not samples:
+                continue
+
+            k_arrays = [np.asarray(s["k"], dtype=np.float64) for s in samples]
+            chi_arrays = [np.asarray(s["chi"], dtype=np.float64) for s in samples]
+            r_effs = [float(s["r_eff"]) for s in samples]
+            degs = [float(s["degeneracy"]) for s in samples]
+
+            chi_avg, k_common = average_chi_spectra(
+                k_arrays,
+                chi_arrays,
+                restrict_to_common_range=True,
+            )
+
+            # Apply xftf once to the averaged chi(k)
+            g = Group(k=k_common, chi=chi_avg)
+            xftf(g, **fourier_params)
+
+            first = samples[0]
+            # Store *unique* contributing indices — one entry per distinct
+            # frame/site rather than one per sample.  This is 100× smaller
+            # for high-degeneracy paths while still giving full provenance.
+            source_frames = np.unique(
+                np.array(
+                    [
+                        int(s.get("frame_index", -1))
+                        for s in samples
+                        if s.get("frame_index", -1) >= 0
+                    ],
+                    dtype=np.int64,
+                )
+            )
+            source_sites = np.unique(
+                np.array(
+                    [
+                        int(s.get("site_index", -1))
+                        for s in samples
+                        if s.get("site_index", -1) >= 0
+                    ],
+                    dtype=np.int64,
+                )
+            )
+
+            # Average raw FEFF parameters for on-the-fly χ recomputation
+            _param_names = ("amp", "pha", "lam", "rep")
+            _param_avgs: dict[str, np.ndarray] = {}
+            _k_param: np.ndarray = np.array([])
+            for _pname in _param_names:
+                _parrays = [
+                    np.asarray(s[_pname], dtype=np.float64)
+                    for s in samples
+                    if _pname in s
+                ]
+                if _parrays:
+                    _param_avgs[_pname] = np.mean(_parrays, axis=0)
+            # k_param is the native coarse FEFF grid; all paths share it
+            if "k_param" in first:
+                _k_param = np.asarray(first["k_param"], dtype=np.float64)
+            elif "k" in first and _param_avgs:
+                _k = np.asarray(first["k"], dtype=np.float64)
+                _first_amp = _param_avgs.get("amp")
+                if _first_amp is not None and len(_k) == len(_first_amp):
+                    _k_param = _k
+
+            pc = PathContribution(
+                path_key=key,
+                scatterer=str(first.get("scatterer", "?")),
+                nlegs=int(first.get("nlegs", 2)),
+                r_eff=float(np.mean(r_effs)),
+                degeneracy=float(np.mean(degs)),
+                n_samples=len(samples),
+                k=k_common,
+                chi=chi_avg,
+                r=np.asarray(g.r) if hasattr(g, "r") else np.array([]),
+                chir_mag=np.asarray(g.chir_mag)
+                if hasattr(g, "chir_mag")
+                else np.array([]),
+                chir_re=np.asarray(g.chir_re)
+                if hasattr(g, "chir_re")
+                else np.array([]),
+                chir_im=np.asarray(g.chir_im)
+                if hasattr(g, "chir_im")
+                else np.array([]),
+                cw_ratio=float(
+                    np.mean([s["cw_ratio"] for s in samples]) if samples else 0.0
+                ),
+                source_frames=source_frames,
+                source_sites=source_sites,
+                amp=_param_avgs.get("amp", np.array([])),
+                pha=_param_avgs.get("pha", np.array([])),
+                lam=_param_avgs.get("lam", np.array([])),
+                rep=_param_avgs.get("rep", np.array([])),
+                k_param=_k_param,
+            )
+            result[key] = pc
+
+        # Sort by mean r_eff
+        return dict(sorted(result.items(), key=lambda kv: kv[1].r_eff))
+
+
+def filter_path_contributions(
+    contribs: dict[str, PathContribution],
+    top_n: int | None = None,
+    min_cw_ratio: float | None = None,
+) -> dict[str, PathContribution]:
+    """Filter path contributions by curved-wave amplitude ratio.
+
+    Paths are ranked by ``cw_ratio`` (the FEFF curved-wave chi amplitude ratio,
+    relative to the strongest path = 100).  Two independent filters can be
+    applied in combination:
+
+    - ``min_cw_ratio`` keeps only paths whose mean ``cw_ratio`` is at or above
+      the threshold (e.g. ``5.0`` retains paths with ≥5% of the peak amplitude).
+    - ``top_n`` keeps at most the N strongest paths after the ratio filter.
+
+    The relative ordering among surviving paths (by ``r_eff``) is preserved.
+
+    Args:
+        contribs: Mapping of path_key → :class:`PathContribution` as returned
+            by :meth:`PathAggregator.finalize`.
+        top_n: Maximum number of paths to keep (strongest first).  ``None``
+            means no cap.
+        min_cw_ratio: Minimum curved-wave ratio threshold (0–100).  Paths
+            below this value are excluded.  ``None`` means no threshold.
+
+    Returns:
+        Filtered dict with the same key type, ordered by ``r_eff``.
+    """
+    if not contribs:
+        return {}
+
+    # Rank all paths by cw_ratio descending to apply top_n / threshold
+    ranked = sorted(contribs.values(), key=lambda pc: pc.cw_ratio, reverse=True)
+
+    if min_cw_ratio is not None:
+        ranked = [pc for pc in ranked if pc.cw_ratio >= min_cw_ratio]
+
+    if top_n is not None:
+        ranked = ranked[:top_n]
+
+    # Restore r_eff ordering among survivors
+    surviving_keys = {pc.path_key for pc in ranked}
+    return {k: v for k, v in contribs.items() if k in surviving_keys}
+
+
+# ---------------------------------------------------------------------------
+# Plot results
+# ---------------------------------------------------------------------------
+
+
 @dataclass
 class PlotResult:
     """Results of plotting operations."""
@@ -783,6 +1074,15 @@ class PlotConfig:
     plot_overall_avg: bool = True
     plot_frame_avg: bool = False
     plot_site_avg: bool = False
+
+    # Path contributions panel
+    plot_paths: bool = False
+    """Add a 2×2 paths panel showing individual path k-space and R-space."""
+    max_paths: int | None = None
+    """Maximum number of path contributions to show (ranked by max chir_mag).
+
+    ``None`` means all paths are shown.
+    """
 
     # Metadata
     absorber: str = "X"
@@ -960,6 +1260,245 @@ def prepare_plot_data(
 # ============================================================================
 
 
+def _plot_paths_panel(
+    axk: plt.Axes,
+    axr: plt.Axes,
+    path_contributions: dict[str, PathContribution],
+    max_paths: int | None,
+    kweight: int,
+    overall_average: Group | None = None,
+    fourier_params: dict | None = None,
+    n_sites_total: int | None = None,
+) -> None:
+    """Populate an existing pair of axes with per-path contributions.
+
+    Paths are ranked by ``max(chir_mag)`` and the top ``max_paths`` are drawn.
+    Single-scattering paths are solid; 3-leg MS paths are dashed; 4+-leg MS
+    paths are dotted.  Line colour is taken from the ``plasma`` colormap and
+    scales with the path's peak |chi(R)| amplitude relative to the strongest
+    path — the dominant contribution is bright yellow, weaker paths fade toward
+    deep purple.
+
+    A sanity-check overlay is added at the end: the weighted sum of *all* path
+    chi(k) contributions (``Σ (n_j / n_sites) * chi_j``) is plotted as a thick
+    dashed black line.  The ``overall_average`` (if supplied) is plotted as a
+    thick solid red line so the two can be visually compared.
+
+    The weighted formula is required because multiple FEFF paths from the same
+    calculation can share the same path key (e.g. many Cu–Cu single-scattering
+    paths at slightly different distances in a bulk crystal).  Each
+    :class:`PathContribution` averages *all* samples of that path type, so its
+    chi must be weighted by ``n_samples / n_sites_total`` before summing.
+
+    Args:
+        axk: Matplotlib Axes for chi(k) (k-space panel)
+        axr: Matplotlib Axes for chi(R) (R-space panel)
+        path_contributions: Mapping of path_key → :class:`PathContribution`
+        max_paths: Maximum number of paths to draw
+        kweight: k-weighting to apply when displaying chi(k)
+        overall_average: Optional overall-average Larch Group for comparison.
+        fourier_params: Fourier-transform parameters forwarded to
+            :func:`larch.xafs.xftf` when computing chi(R) for the path sum.
+        n_sites_total: Total number of individual FEFF calculations that
+            contributed to the path statistics.  Used to correctly weight the
+            per-path-type averages when computing the sum::
+
+                chi_sum = sum_j(n_samples_j / n_sites_total * chi_j)
+
+            Defaults to ``max(n_samples)`` over all path types (valid when at
+            least one path type is present in every calculation).
+    """
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt  # noqa: F401 – needed for type hints
+
+    if not path_contributions:
+        axk.text(
+            0.5, 0.5, "No path data", ha="center", va="center", transform=axk.transAxes
+        )
+        axr.text(
+            0.5, 0.5, "No path data", ha="center", va="center", transform=axr.transAxes
+        )
+        return
+
+    # Rank by peak chi(R)
+    def _rank_key(pc: PathContribution) -> float:
+        return float(np.max(pc.chir_mag)) if len(pc.chir_mag) else 0.0
+
+    ranked = sorted(path_contributions.values(), key=_rank_key, reverse=True)[
+        :max_paths
+    ]
+
+    # Map peak chi(R) amplitude → colour on the plasma colormap.
+    # Normalise so the strongest path = 1.0; clamp lower end at 0.15 so even
+    # the weakest plotted path remains visible (not pure black).
+    strengths = np.array([_rank_key(pc) for pc in ranked])
+    max_strength = strengths[0] if strengths[0] > 0 else 1.0
+    norm_strengths = np.clip(strengths / max_strength, 0.0, 1.0)
+
+    cmap = plt.colormaps.get_cmap("viridis")  # "plasma" is another good option
+    cmap_lo, cmap_hi = 0.15, 1.0  # usable range within the colormap
+    path_colors = {
+        pc.path_key: cmap(cmap_lo + (cmap_hi - cmap_lo) * ns)
+        for pc, ns in zip(ranked, norm_strengths, strict=False)
+    }
+
+    # Add a colorbar to show the amplitude scale
+    scalar_mappable = cm.ScalarMappable(
+        norm=mcolors.Normalize(vmin=0.0, vmax=max_strength),
+        cmap=mcolors.LinearSegmentedColormap.from_list(
+            "plasma_clipped",
+            [cmap(cmap_lo + (cmap_hi - cmap_lo) * x) for x in np.linspace(0, 1, 256)],
+        ),
+    )
+    scalar_mappable.set_array([])
+    fig = axr.get_figure()
+    if fig is not None:
+        fig.colorbar(scalar_mappable, ax=axr, label="|χ(R)| peak amplitude", pad=0.02)
+
+    # Linestyle by scattering type
+    def _linestyle(nlegs: int) -> str:
+        if nlegs == 2:
+            return "solid"
+        if nlegs == 3:
+            return "dashed"
+        return "dotted"
+
+    for pc in ranked:
+        color = path_colors[pc.path_key]
+        ls = _linestyle(pc.nlegs)
+        lw = 1.5
+        label = f"{pc.path_key} (n={pc.n_samples})"
+
+        if len(pc.k) and len(pc.chi):
+            kw_chi = pc.chi * pc.k**kweight
+            axk.plot(pc.k, kw_chi, color=color, linestyle=ls, linewidth=lw, label=label)
+
+        if len(pc.r) and len(pc.chir_mag):
+            axr.plot(
+                pc.r, pc.chir_mag, color=color, linestyle=ls, linewidth=lw, label=label
+            )
+
+    # ------------------------------------------------------------------
+    # Sanity-check overlay: sum of ALL paths vs overall average
+    # ------------------------------------------------------------------
+    _plot_paths_sum_vs_average(
+        axk,
+        axr,
+        path_contributions,
+        kweight,
+        overall_average,
+        fourier_params,
+        n_sites_total,
+    )
+
+
+def _plot_paths_sum_vs_average(
+    axk: plt.Axes,
+    axr: plt.Axes,
+    path_contributions: dict[str, PathContribution],
+    kweight: int,
+    overall_average: Group | None,
+    fourier_params: dict | None,
+    n_sites_total: int | None,
+) -> None:
+    """Overlay the weighted sum of all path chi(k) vs the overall average.
+
+    The correct formula accounting for multiple paths per FEFF calculation
+    mapping to the same path key is::
+
+        chi_sum = sum_j( n_samples_j / n_sites_total * chi_j )
+
+    This equals the overall average when every path key appears the same
+    number of times per FEFF calculation (which is true for dilute/molecular
+    systems, but not for bulk crystals where many bond-length-equivalent
+    paths share a key).
+    """
+    if not path_contributions:
+        return
+
+    # Use n_sites_total to correctly weight per-path-type averaged chi.
+    # Multiple FEFF paths from the same calculation can share a path key;
+    # PathContribution.chi is their mean, so we must weight by n_samples.
+    # If n_sites_total is not provided, fall back to max(n_samples), which is
+    # exact when at least one path type is present in every calculation.
+    n_total = (
+        n_sites_total
+        if n_sites_total and n_sites_total > 0
+        else max(pc.n_samples for pc in path_contributions.values())
+    )
+
+    k_min = max(float(pc.k[0]) for pc in path_contributions.values() if len(pc.k))
+    k_max = min(float(pc.k[-1]) for pc in path_contributions.values() if len(pc.k))
+    if k_min >= k_max:
+        return
+    n_pts = int(round((k_max - k_min) / 0.05)) + 1
+    k_common = np.linspace(k_min, k_max, max(n_pts, 50))
+
+    # Weighted sum: chi_j is scaled by n_samples_j / n_total before summing.
+    chi_sum = np.zeros_like(k_common)
+    for pc in path_contributions.values():
+        if len(pc.k) < 2 or len(pc.chi) < 2:
+            continue
+        weight = pc.n_samples / n_total
+        chi_sum += weight * np.interp(k_common, pc.k, pc.chi, left=0.0, right=0.0)
+
+    axk.plot(
+        k_common,
+        chi_sum * k_common**kweight,
+        color="black",
+        linewidth=2.5,
+        linestyle="--",
+        label="paths sum",
+        zorder=5,
+    )
+
+    # chi(R) of the summed chi(k) — FT must be applied to the sum, not summed
+    # from individual chi(R) because |FT(a+b)| ≠ |FT(a)| + |FT(b)|.
+    try:
+        g_sum = Group(k=k_common, chi=chi_sum)
+        xftf(g_sum, **(fourier_params or {}))
+        if hasattr(g_sum, "r") and hasattr(g_sum, "chir_mag"):
+            axr.plot(
+                np.asarray(g_sum.r),
+                np.asarray(g_sum.chir_mag),
+                color="black",
+                linewidth=2.5,
+                linestyle="--",
+                label="paths sum",
+                zorder=5,
+            )
+    except Exception:  # noqa: BLE001, S110
+        pass  # FT failure is non-fatal; k-space comparison is still shown
+
+    # Overlay the overall average for direct comparison.
+    if overall_average is not None:
+        avg_k = np.asarray(getattr(overall_average, "k", []))
+        avg_chi = np.asarray(getattr(overall_average, "chi", []))
+        if len(avg_k) and len(avg_chi):
+            axk.plot(
+                avg_k,
+                avg_chi * avg_k**kweight,
+                color="red",
+                linewidth=2.5,
+                linestyle="-",
+                label="average",
+                zorder=6,
+            )
+        avg_r = np.asarray(getattr(overall_average, "r", []))
+        avg_chir_mag = np.asarray(getattr(overall_average, "chir_mag", []))
+        if len(avg_r) and len(avg_chir_mag):
+            axr.plot(
+                avg_r,
+                avg_chir_mag,
+                color="red",
+                linewidth=2.5,
+                linestyle="-",
+                label="average",
+                zorder=6,
+            )
+
+
 def plot_exafs_matplotlib(
     collection: EXAFSDataCollection,
     config: PlotConfig,
@@ -968,6 +1507,13 @@ def plot_exafs_matplotlib(
     show_plot: bool = False,
 ) -> PlotResult:
     """Plot EXAFS data using matplotlib.
+
+    When ``config.plot_paths`` is ``True`` **and** the collection has path
+    contributions, a 2×2 figure is produced:
+
+    * Row 1: full-spectrum chi(k) and chi(R) (same as the default 1×2 layout)
+    * Row 2: per-path chi(k) and chi(R) contributions (top ``max_paths`` paths
+      ranked by peak |chi(R)|)
 
     Args:
         collection: EXAFSDataCollection with spectra to plot
@@ -984,14 +1530,23 @@ def plot_exafs_matplotlib(
     # Get prepared data
     data = prepare_plot_data(collection, config)
     styles = PlotStyles()
+    kweight = data["kweight"]
+
+    # Determine whether to add path contributions panel
+    show_paths = config.plot_paths and bool(collection.path_contributions)
 
     # Apply style
     style_path = _get_style_path(config.style)
 
     with plt.style.context(style_path):
-        fig, (ax1, ax2) = plt.subplots(1, 2)
+        if show_paths:
+            fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+            ax1, ax2 = axes[0]
+            ax3, ax4 = axes[1]
+        else:
+            fig, (ax1, ax2) = plt.subplots(1, 2)
 
-        legends_shown = set()
+        legends_shown: set[str] = set()
 
         def add_trace(ax, x, y, label, style_dict):
             """Add a trace to the axis."""
@@ -1032,7 +1587,7 @@ def plot_exafs_matplotlib(
             add_trace(ax1, spec["k"], spec["chi"], spec["label"], style)
             add_trace(ax2, spec["r"], spec["chir_mag"], spec["label"], style)
 
-        # Format axes
+        # Format top-row axes
         ax1.set_xlabel("k (Å⁻¹)")
         ax1.set_ylabel(data["chi_label"])
         ax1.set_title(f"{config.absorber} {config.edge}-edge EXAFS")
@@ -1044,6 +1599,28 @@ def plot_exafs_matplotlib(
         ax2.set_title(f"{config.absorber} {config.edge}-edge Fourier Transform")
         if config.show_legend:
             ax2.legend()
+
+        # Path contributions panel (bottom row)
+        if show_paths:
+            _plot_paths_panel(
+                ax3,
+                ax4,
+                collection.path_contributions,
+                config.max_paths,
+                kweight,
+                overall_average=collection.overall_average,
+                fourier_params=collection.fourier_params,
+                n_sites_total=len(collection.individual_spectra) or None,
+            )
+            ax3.set_xlabel("k (Å⁻¹)")
+            ax3.set_ylabel(data["chi_label"])
+            ax3.set_title("Path contributions – k-space")
+            ax3.legend(fontsize="x-small", ncol=2)
+
+            ax4.set_xlabel("R (Å)")
+            ax4.set_ylabel("|χ(R)| (Å⁻³)")
+            ax4.set_title("Path contributions – R-space")
+            ax4.legend(fontsize="x-small", ncol=2)
 
         plt.tight_layout()
 
@@ -1067,8 +1644,9 @@ def plot_exafs_matplotlib(
             plot_metadata={
                 "absorber": config.absorber,
                 "edge": config.edge,
-                "kweight": data["kweight"],
+                "kweight": kweight,
                 "style": config.style,
+                "paths_plotted": show_paths,
             },
         )
 
