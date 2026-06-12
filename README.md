@@ -183,6 +183,10 @@ s02: 1.0
 scf: "4.5 0 30 .2 1"  # or null to disable SCF
 exchange: 0
 
+# Arbitrary FEFF cards such as CORRECTIONS are supported too.
+# These are added verbatim to the FEFF input.
+CORRECTIONS: 3.0 1.0
+
 # Fourier Transform
 kmin: 3
 kmax: 18
