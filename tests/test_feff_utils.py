@@ -497,7 +497,7 @@ class TestFeffInputGeneration:
         mock_mpexafs.return_value = mock_feff_set
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            output_dir = Path(tmpdir)
+            output_dir = Path(tmpdir).resolve()
 
             result = generate_pymatgen_input(sample_atoms, 0, output_dir, sample_config)
 
@@ -667,7 +667,7 @@ class TestFeffOutput:
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")  # suppress ComplexWarning
-                chi, k = read_feff_output(feff_dir)
+                k, chi = read_feff_output(feff_dir)
 
             # chi is always real float64 - imaginary part discarded
             np.testing.assert_array_equal(chi, np.real(mock_data.chi))
@@ -692,7 +692,7 @@ class TestFeffOutput:
             (feff_dir / "chi.dat").write_text(
                 "# FEFF format\n3.0 0.1 0.1118 0.4636\n4.0 0.2 0.2236 0.4636\n"
             )
-            chi, k = read_feff_output(feff_dir)
+            k, chi = read_feff_output(feff_dir)
             expected_chi = mock_data.mag * np.sin(mock_data.phase)
             np.testing.assert_array_equal(k, mock_data.k)
             np.testing.assert_allclose(chi, expected_chi)
@@ -714,7 +714,7 @@ class TestFeffOutput:
         with tempfile.TemporaryDirectory() as tmpdir:
             feff_dir = Path(tmpdir)
             (feff_dir / "chi.dat").write_text("# FEFF format\n")
-            chi, k = read_feff_output(feff_dir)
+            k, chi = read_feff_output(feff_dir)
             np.testing.assert_array_equal(k, mock_data.k)
             np.testing.assert_array_equal(chi, mock_data.chi)
 
