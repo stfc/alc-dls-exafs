@@ -4,6 +4,7 @@
 from enum import Enum
 from pathlib import Path
 
+import numpy as np
 import typer
 from ase import Atoms
 from ase.io import read as ase_read
@@ -904,43 +905,30 @@ def analyze_feff_outputs(
             path_contributions: dict = {}
 
             with ExafsHDF5Store(hdf5_path, mode="r") as store:
-                # Load per-site k/chi and reapply FTs with current params
-                frames_grp = store._h5.get("frames")
-                if frames_grp is not None:
-                    for frame_name in sorted(frames_grp.keys()):
-                        fidx = int(frame_name.split("_")[1])
-                        sites_grp = frames_grp[frame_name].get("sites")
-                        if sites_grp is None:
-                            continue
-                        for site_name in sorted(sites_grp.keys()):
-                            sidx = int(site_name.split("_")[1])
-                            s = sites_grp[site_name]
-                            if "k" not in s or "chi" not in s:
-                                continue
+                # Load per-site k/chi from flat site_results and reapply FTs
+                for site_result in store.iter_site_results():
+                    fidx = site_result.frame_index
+                    sidx = site_result.site_index
 
-                            import numpy as _np
-
-                            g = Group()
-                            g.k = _np.array(s["k"])
-                            g.chi = _np.array(s["chi"])
-                            # (Re)apply Fourier transform with active params
-                            xftf(g, **config.fourier_params)
-                            g.frame_idx = fidx
-                            g.site_idx = sidx
-                            g.absorber_element = str(
-                                s.attrs.get("absorber_element", "")
-                            )
-                            task_id = f"frame_{fidx:04d}_site_{sidx:04d}"
-                            g.task_id = task_id
-                            groups[task_id] = g
-                            tasks.append(
-                                FeffTask(
-                                    input_file=Path("/dev/null"),
-                                    site_index=sidx,
-                                    frame_index=fidx,
-                                    absorber_element=g.absorber_element,
-                                )
-                            )
+                    g = Group()
+                    g.k = np.array(site_result.k)
+                    g.chi = np.array(site_result.chi)
+                    # (Re)apply Fourier transform with active params
+                    xftf(g, **config.fourier_params)
+                    g.frame_idx = fidx
+                    g.site_idx = sidx
+                    g.absorber_element = site_result.absorber_element
+                    task_id = f"frame_{fidx:04d}_site_{sidx:04d}"
+                    g.task_id = task_id
+                    groups[task_id] = g
+                    tasks.append(
+                        FeffTask(
+                            input_file=Path("/dev/null"),
+                            site_index=sidx,
+                            frame_index=fidx,
+                            absorber_element=g.absorber_element,
+                        )
+                    )
 
                 # Load path contributions if requested
                 if want_paths:
