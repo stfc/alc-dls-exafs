@@ -100,7 +100,7 @@ larch-cli generate structure.cif Fe --output feff_inputs/
 larch-cli run-feff feff_inputs/ --parallel --workers 4
 
 # Analyze existing FEFF outputs and create plots
-larch-cli analyze outputs/ --plot-mode frames --show
+larch-cli analyze outputs/ --plot-include frames --show
 
 # Run complete pipeline (generate + run + analyze)
 larch-cli pipeline structure.cif Fe --output results/
@@ -141,7 +141,7 @@ larch-cli generate structure.cif Fe --output feff_inputs/ --radius 6.0 --edge K
 larch-cli run-feff feff_inputs/ --parallel --workers 2
 
 # Step 3: Analyze results and create plots
-larch-cli analyze feff_inputs/ --output plots/ --plot-mode sites --show
+larch-cli analyze feff_inputs/ --output plots/ --plot-include sites --show
 ```
 
 ##### Storing Results in HDF5
@@ -171,10 +171,22 @@ python scripts/pack_output_to_hdf5.py pipeline_output/
 # Also include per-path contributions (needed for --plot-include paths)
 python scripts/pack_output_to_hdf5.py pipeline_output/ --keep-paths
 
+# Limit the number of paths stored per site (None = all paths, default)
+python scripts/pack_output_to_hdf5.py pipeline_output/ --keep-paths --max-paths 50
+
 # The HDF5 file is written to pipeline_output/results.h5 by default
 # Analyze with path contributions and filter weak paths
 larch-cli analyze pipeline_output/results.h5 \
     --plot-include average,paths \
+    --min-cw-ratio 5.0
+```
+
+You can also limit how many path contributions are displayed when plotting:
+
+```bash
+larch-cli analyze pipeline_output/results.h5 \
+    --plot-include average,paths \
+    --max-paths 20 \
     --min-cw-ratio 5.0
 ```
 
@@ -198,10 +210,10 @@ larch-cli pipeline structure.cif Fe --config my_config.yaml
 # Force recalculation and keep intermediate files
 larch-cli pipeline structure.cif Fe --force --no-cleanup
 
-# Different plot modes and styles
-larch-cli analyze outputs/ --plot-mode overall --style presentation
-larch-cli analyze outputs/ --plot-mode frames --with-phase
-larch-cli analyze outputs/ --plot-mode sites --kweight 3
+# Different plot components and styles
+larch-cli analyze outputs/ --plot-include average --style presentation
+larch-cli analyze outputs/ --plot-include frames --with-phase
+larch-cli analyze outputs/ --plot-include sites --kweight 3
 ```
 
 ### Configuration Files
