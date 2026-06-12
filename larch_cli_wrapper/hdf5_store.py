@@ -181,7 +181,11 @@ class ExafsHDF5Store:
         self.path = Path(path)
         self.store_paths = store_paths
         self.dedup_k = dedup_k
-        self.max_paths = max_paths if max_paths is not None else (config.max_paths if config is not None else None)
+        self.max_paths = (
+            max_paths
+            if max_paths is not None
+            else (config.max_paths if config is not None else None)
+        )
         self._lock = threading.Lock()
         self._h5 = h5py.File(self.path, mode)
 
@@ -361,7 +365,10 @@ class ExafsHDF5Store:
         k = np.array(site_res["k_grid"])
         frame_indices = np.array(site_res["frame_index"])
         site_indices = np.array(site_res["site_index"])
-        absorber_elements = [s.decode('utf-8') if isinstance(s, bytes) else s for s in site_res["absorber_element"]]
+        absorber_elements = [
+            s.decode("utf-8") if isinstance(s, bytes) else s
+            for s in site_res["absorber_element"]
+        ]
         successes = np.array(site_res["success"])
         chis = site_res["chi"]
         for i in range(len(frame_indices)):
@@ -400,16 +407,20 @@ class ExafsHDF5Store:
         site_indices = np.array(site_res["site_index"])
         matches = (frame_indices == frame_index) & (site_indices == site_index)
         if not np.any(matches):
-            raise KeyError(f"site result for frame={frame_index}, site={site_index} not found")
+            raise KeyError(
+                f"site result for frame={frame_index}, site={site_index} not found"
+            )
         idx = np.where(matches)[0][0]
-        
+
         g = Group()
         g.k = np.array(site_res["k_grid"])
         g.chi = np.array(site_res["chi"][idx])
         g.frame_idx = frame_index
         g.site_idx = site_index
         absorber = site_res["absorber_element"][idx]
-        g.absorber_element = absorber.decode('utf-8') if isinstance(absorber, bytes) else absorber
+        g.absorber_element = (
+            absorber.decode("utf-8") if isinstance(absorber, bytes) else absorber
+        )
         g.task_id = f"frame_{frame_index:04d}_site_{site_index:04d}"
         return g
 
@@ -426,15 +437,20 @@ class ExafsHDF5Store:
             return
 
         pk = np.array(path_res["k_grid_paths"])
-        pk_param = np.array(path_res["k_grid_params"]) if "k_grid_params" in path_res else None
+        pk_param = (
+            np.array(path_res["k_grid_params"]) if "k_grid_params" in path_res else None
+        )
 
         frame_indices = np.array(path_res["frame_index"])
         site_indices = np.array(path_res["site_index"])
-        path_indices = np.array(path_res["path_index"])
+        _path_indices = np.array(path_res["path_index"])
         r_effs = np.array(path_res["r_eff"])
         nlegs_arr = np.array(path_res["nlegs"])
         degeneracies = np.array(path_res["degeneracy"])
-        scatterers = [s.decode('utf-8') if isinstance(s, bytes) else s for s in path_res["scatterer"]]
+        scatterers = [
+            s.decode("utf-8") if isinstance(s, bytes) else s
+            for s in path_res["scatterer"]
+        ]
         cw_ratios = np.array(path_res["cw_ratio"])
 
         chis = path_res["chi"]
@@ -542,16 +558,17 @@ class ExafsHDF5Store:
         self,
         results_list: list[dict],
     ) -> None:
-        """Write a batch of site results and path contributions in a single HDF5 write operation.
+        """Write a batch of site results and path contributions in one HDF5 write.
 
-        This avoids the massive performance penalties of resizing datasets one-by-one.
+        This avoids the massive performance penalties of resizing datasets
+        one-by-one.
         """
         if not results_list:
             return
 
         with self._lock:
             grp_site = self._h5.require_group("site_results")
-            
+
             # 1. Determine common k_grid from the first result
             ref_k = np.asarray(results_list[0]["k"], dtype=np.float64)
             if "k_grid" not in grp_site:
@@ -559,7 +576,7 @@ class ExafsHDF5Store:
                 stored_k = ref_k
             else:
                 stored_k = np.array(grp_site["k_grid"])
-            
+
             # 2. Extract and reconcile all site arrays
             n_new = len(results_list)
             chi_batch = np.zeros((n_new, len(stored_k)), dtype=np.float64)
@@ -567,9 +584,9 @@ class ExafsHDF5Store:
             site_indices = np.zeros(n_new, dtype=np.int32)
             absorber_elements = []
             successes = np.zeros(n_new, dtype=np.bool_)
-            
+
             all_path_contributions = []
-            
+
             for i, res in enumerate(results_list):
                 f_idx = res["frame_index"]
                 s_idx = res["site_index"]
@@ -577,37 +594,76 @@ class ExafsHDF5Store:
                 site_indices[i] = s_idx
                 absorber_elements.append(res["absorber_element"])
                 successes[i] = res["success"]
-                
+
                 # Reconcile k
                 k_res = np.asarray(res["k"], dtype=np.float64)
                 chi_res = np.asarray(res["chi"], dtype=np.float64)
-                if k_res.shape != stored_k.shape or not np.allclose(k_res, stored_k, rtol=1e-6, atol=1e-8):
+                if k_res.shape != stored_k.shape or not np.allclose(
+                    k_res, stored_k, rtol=1e-6, atol=1e-8
+                ):
                     chi_res = np.interp(stored_k, k_res, chi_res)
                 chi_batch[i] = chi_res
-                
+
                 # Paths
                 if self.store_paths and res.get("path_contributions"):
-                    # Add frame_index and site_index to each path contribution for flat writing
+                    # Add frame_index and site_index to each path contribution
+                    # for flat writing
                     for pc in res["path_contributions"]:
                         pc_copy = dict(pc)
                         pc_copy["frame_index"] = f_idx
                         pc_copy["site_index"] = s_idx
                         all_path_contributions.append(pc_copy)
-            
+
             # 3. Overwrite existing rows or append to site_results
             if "chi" not in grp_site:
-                grp_site.create_dataset("chi", data=chi_batch, maxshape=(None, len(stored_k)), chunks=(128, len(stored_k)), **_COMPRESS)
-                grp_site.create_dataset("frame_index", data=frame_indices, maxshape=(None,), chunks=(1024,), **_COMPRESS)
-                grp_site.create_dataset("site_index", data=site_indices, maxshape=(None,), chunks=(1024,), **_COMPRESS)
+                grp_site.create_dataset(
+                    "chi",
+                    data=chi_batch,
+                    maxshape=(None, len(stored_k)),
+                    chunks=(128, len(stored_k)),
+                    **_COMPRESS,
+                )
+                grp_site.create_dataset(
+                    "frame_index",
+                    data=frame_indices,
+                    maxshape=(None,),
+                    chunks=(1024,),
+                    **_COMPRESS,
+                )
+                grp_site.create_dataset(
+                    "site_index",
+                    data=site_indices,
+                    maxshape=(None,),
+                    chunks=(1024,),
+                    **_COMPRESS,
+                )
                 import h5py
-                dt_str = h5py.string_dtype(encoding='utf-8')
-                grp_site.create_dataset("absorber_element", data=np.array(absorber_elements, dtype=dt_str), maxshape=(None,), chunks=(1024,), **_COMPRESS)
-                grp_site.create_dataset("success", data=successes, maxshape=(None,), chunks=(1024,), **_COMPRESS)
+
+                dt_str = h5py.string_dtype(encoding="utf-8")
+                grp_site.create_dataset(
+                    "absorber_element",
+                    data=np.array(absorber_elements, dtype=dt_str),
+                    maxshape=(None,),
+                    chunks=(1024,),
+                    **_COMPRESS,
+                )
+                grp_site.create_dataset(
+                    "success",
+                    data=successes,
+                    maxshape=(None,),
+                    chunks=(1024,),
+                    **_COMPRESS,
+                )
             else:
                 existing_frames = np.array(grp_site["frame_index"])
                 existing_sites = np.array(grp_site["site_index"])
-                existing_map = {(f, s): idx for idx, (f, s) in enumerate(zip(existing_frames, existing_sites))}
-                
+                existing_map = {
+                    (f, s): idx
+                    for idx, (f, s) in enumerate(
+                        zip(existing_frames, existing_sites, strict=False)
+                    )
+                }
+
                 overwrite_indices_src = []
                 overwrite_indices_dst = []
                 append_indices = []
@@ -618,76 +674,184 @@ class ExafsHDF5Store:
                         overwrite_indices_dst.append(existing_map[key])
                     else:
                         append_indices.append(i)
-                
+
                 if overwrite_indices_src:
-                    grp_site["chi"][overwrite_indices_dst] = chi_batch[overwrite_indices_src]
+                    grp_site["chi"][overwrite_indices_dst] = chi_batch[
+                        overwrite_indices_src
+                    ]
                     import h5py as _h5py
-                    _dt_str = _h5py.string_dtype(encoding='utf-8')
-                    _ae_arr = np.array([absorber_elements[i] for i in overwrite_indices_src], dtype=_dt_str)
+
+                    _dt_str = _h5py.string_dtype(encoding="utf-8")
+                    _ae_arr = np.array(
+                        [absorber_elements[i] for i in overwrite_indices_src],
+                        dtype=_dt_str,
+                    )
                     grp_site["absorber_element"][overwrite_indices_dst] = _ae_arr
-                    grp_site["success"][overwrite_indices_dst] = successes[overwrite_indices_src]
-                
+                    grp_site["success"][overwrite_indices_dst] = successes[
+                        overwrite_indices_src
+                    ]
+
                 if append_indices:
                     n_old = len(existing_frames)
                     n_append = len(append_indices)
                     n_new_total = n_old + n_append
-                    
+
                     grp_site["chi"].resize((n_new_total, len(stored_k)))
                     grp_site["frame_index"].resize((n_new_total,))
                     grp_site["site_index"].resize((n_new_total,))
                     grp_site["absorber_element"].resize((n_new_total,))
                     grp_site["success"].resize((n_new_total,))
-                    
+
                     grp_site["chi"][n_old:] = chi_batch[append_indices]
                     grp_site["frame_index"][n_old:] = frame_indices[append_indices]
                     grp_site["site_index"][n_old:] = site_indices[append_indices]
                     for idx_arr, orig_idx in enumerate(append_indices):
-                        grp_site["absorber_element"][n_old + idx_arr] = absorber_elements[orig_idx]
+                        grp_site["absorber_element"][n_old + idx_arr] = (
+                            absorber_elements[orig_idx]
+                        )
                     grp_site["success"][n_old:] = successes[append_indices]
 
             # 4. Batch write for paths
             if self.store_paths and all_path_contributions:
                 grp_paths = self._h5.require_group("path_results")
                 import h5py
-                dt_str = h5py.string_dtype(encoding='utf-8')
-                
+
+                dt_str = h5py.string_dtype(encoding="utf-8")
+
                 if "chi" not in grp_paths:
                     pk = np.asarray(all_path_contributions[0]["k"], dtype=np.float64)
                     grp_paths.create_dataset("k_grid_paths", data=pk, **_COMPRESS)
-                    
+
                     _pk_param = all_path_contributions[0].get("k_param")
                     if _pk_param is not None:
-                        grp_paths.create_dataset("k_grid_params", data=np.asarray(_pk_param, dtype=np.float64), **_COMPRESS)
+                        grp_paths.create_dataset(
+                            "k_grid_params",
+                            data=np.asarray(_pk_param, dtype=np.float64),
+                            **_COMPRESS,
+                        )
                         p_len = len(_pk_param)
                     else:
                         p_len = 0
-                    
+
                     n_path_points = len(pk)
-                    grp_paths.create_dataset("chi", shape=(0, n_path_points), maxshape=(None, n_path_points), dtype=np.float64, chunks=(1024, n_path_points), **_COMPRESS)
+                    grp_paths.create_dataset(
+                        "chi",
+                        shape=(0, n_path_points),
+                        maxshape=(None, n_path_points),
+                        dtype=np.float64,
+                        chunks=(1024, n_path_points),
+                        **_COMPRESS,
+                    )
                     if p_len > 0:
-                        grp_paths.create_dataset("amp", shape=(0, p_len), maxshape=(None, p_len), dtype=np.float64, chunks=(1024, p_len), **_COMPRESS)
-                        grp_paths.create_dataset("pha", shape=(0, p_len), maxshape=(None, p_len), dtype=np.float64, chunks=(1024, p_len), **_COMPRESS)
-                        grp_paths.create_dataset("lam", shape=(0, p_len), maxshape=(None, p_len), dtype=np.float64, chunks=(1024, p_len), **_COMPRESS)
-                        grp_paths.create_dataset("rep", shape=(0, p_len), maxshape=(None, p_len), dtype=np.float64, chunks=(1024, p_len), **_COMPRESS)
-                        
-                    grp_paths.create_dataset("frame_index", shape=(0,), maxshape=(None,), dtype=np.int32, chunks=(4096,), **_COMPRESS)
-                    grp_paths.create_dataset("site_index", shape=(0,), maxshape=(None,), dtype=np.int32, chunks=(4096,), **_COMPRESS)
-                    grp_paths.create_dataset("path_index", shape=(0,), maxshape=(None,), dtype=np.int32, chunks=(4096,), **_COMPRESS)
-                    grp_paths.create_dataset("r_eff", shape=(0,), maxshape=(None,), dtype=np.float64, chunks=(4096,), **_COMPRESS)
-                    grp_paths.create_dataset("nlegs", shape=(0,), maxshape=(None,), dtype=np.int32, chunks=(4096,), **_COMPRESS)
-                    grp_paths.create_dataset("degeneracy", shape=(0,), maxshape=(None,), dtype=np.float64, chunks=(4096,), **_COMPRESS)
-                    grp_paths.create_dataset("scatterer", shape=(0,), maxshape=(None,), dtype=dt_str, chunks=(4096,), **_COMPRESS)
-                    grp_paths.create_dataset("cw_ratio", shape=(0,), maxshape=(None,), dtype=np.float64, chunks=(4096,), **_COMPRESS)
-                
-                unique_keys = set((res["frame_index"], res["site_index"]) for res in results_list)
+                        grp_paths.create_dataset(
+                            "amp",
+                            shape=(0, p_len),
+                            maxshape=(None, p_len),
+                            dtype=np.float64,
+                            chunks=(1024, p_len),
+                            **_COMPRESS,
+                        )
+                        grp_paths.create_dataset(
+                            "pha",
+                            shape=(0, p_len),
+                            maxshape=(None, p_len),
+                            dtype=np.float64,
+                            chunks=(1024, p_len),
+                            **_COMPRESS,
+                        )
+                        grp_paths.create_dataset(
+                            "lam",
+                            shape=(0, p_len),
+                            maxshape=(None, p_len),
+                            dtype=np.float64,
+                            chunks=(1024, p_len),
+                            **_COMPRESS,
+                        )
+                        grp_paths.create_dataset(
+                            "rep",
+                            shape=(0, p_len),
+                            maxshape=(None, p_len),
+                            dtype=np.float64,
+                            chunks=(1024, p_len),
+                            **_COMPRESS,
+                        )
+
+                    grp_paths.create_dataset(
+                        "frame_index",
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=np.int32,
+                        chunks=(4096,),
+                        **_COMPRESS,
+                    )
+                    grp_paths.create_dataset(
+                        "site_index",
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=np.int32,
+                        chunks=(4096,),
+                        **_COMPRESS,
+                    )
+                    grp_paths.create_dataset(
+                        "path_index",
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=np.int32,
+                        chunks=(4096,),
+                        **_COMPRESS,
+                    )
+                    grp_paths.create_dataset(
+                        "r_eff",
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=np.float64,
+                        chunks=(4096,),
+                        **_COMPRESS,
+                    )
+                    grp_paths.create_dataset(
+                        "nlegs",
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=np.int32,
+                        chunks=(4096,),
+                        **_COMPRESS,
+                    )
+                    grp_paths.create_dataset(
+                        "degeneracy",
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=np.float64,
+                        chunks=(4096,),
+                        **_COMPRESS,
+                    )
+                    grp_paths.create_dataset(
+                        "scatterer",
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=dt_str,
+                        chunks=(4096,),
+                        **_COMPRESS,
+                    )
+                    grp_paths.create_dataset(
+                        "cw_ratio",
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=np.float64,
+                        chunks=(4096,),
+                        **_COMPRESS,
+                    )
+
+                unique_keys = {
+                    (res["frame_index"], res["site_index"]) for res in results_list
+                }
                 if "frame_index" in grp_paths and len(grp_paths["frame_index"]) > 0:
                     p_frames = np.array(grp_paths["frame_index"])
                     p_sites = np.array(grp_paths["site_index"])
-                    
+
                     mask_keep = np.ones(len(p_frames), dtype=np.bool_)
                     for f, s in unique_keys:
                         mask_keep &= ~((p_frames == f) & (p_sites == s))
-                    
+
                     if not np.all(mask_keep):
                         keep_indices = np.where(mask_keep)[0]
                         for name in list(grp_paths.keys()):
@@ -697,29 +861,61 @@ class ExafsHDF5Store:
                             old_data = np.array(dset)[keep_indices]
                             del grp_paths[name]
                             if name == "scatterer":
-                                grp_paths.create_dataset(name, data=old_data, maxshape=(None,), dtype=dt_str, chunks=(4096,), **_COMPRESS)
+                                grp_paths.create_dataset(
+                                    name,
+                                    data=old_data,
+                                    maxshape=(None,),
+                                    dtype=dt_str,
+                                    chunks=(4096,),
+                                    **_COMPRESS,
+                                )
                             elif dset.ndim == 1:
-                                grp_paths.create_dataset(name, data=old_data, maxshape=(None,), dtype=dset.dtype, chunks=(4096,), **_COMPRESS)
+                                grp_paths.create_dataset(
+                                    name,
+                                    data=old_data,
+                                    maxshape=(None,),
+                                    dtype=dset.dtype,
+                                    chunks=(4096,),
+                                    **_COMPRESS,
+                                )
                             elif dset.ndim == 2:
-                                grp_paths.create_dataset(name, data=old_data, maxshape=(None, dset.shape[1]), dtype=dset.dtype, chunks=(1024, dset.shape[1]), **_COMPRESS)
+                                grp_paths.create_dataset(
+                                    name,
+                                    data=old_data,
+                                    maxshape=(None, dset.shape[1]),
+                                    dtype=dset.dtype,
+                                    chunks=(1024, dset.shape[1]),
+                                    **_COMPRESS,
+                                )
 
                 n_new_paths = len(all_path_contributions)
                 n_existing_paths = len(grp_paths["frame_index"])
                 new_paths_size = n_existing_paths + n_new_paths
-                
-                grp_paths["chi"].resize((new_paths_size, len(grp_paths["k_grid_paths"])))
+
+                grp_paths["chi"].resize(
+                    (new_paths_size, len(grp_paths["k_grid_paths"]))
+                )
                 if "amp" in grp_paths:
                     p_len = grp_paths["amp"].shape[1]
                     grp_paths["amp"].resize((new_paths_size, p_len))
                     grp_paths["pha"].resize((new_paths_size, p_len))
                     grp_paths["lam"].resize((new_paths_size, p_len))
                     grp_paths["rep"].resize((new_paths_size, p_len))
-                
-                for k_attr in ("frame_index", "site_index", "path_index", "r_eff", "nlegs", "degeneracy", "scatterer", "cw_ratio"):
+
+                for k_attr in (
+                    "frame_index",
+                    "site_index",
+                    "path_index",
+                    "r_eff",
+                    "nlegs",
+                    "degeneracy",
+                    "scatterer",
+                    "cw_ratio",
+                ):
                     grp_paths[k_attr].resize((new_paths_size,))
-                
+
                 stored_pk = np.array(grp_paths["k_grid_paths"])
-                
+
                 p_chi_batch = np.zeros((n_new_paths, len(stored_pk)), dtype=np.float64)
                 p_frame_indices = np.zeros(n_new_paths, dtype=np.int32)
                 p_site_indices = np.zeros(n_new_paths, dtype=np.int32)
@@ -729,7 +925,7 @@ class ExafsHDF5Store:
                 p_degeneracies = np.zeros(n_new_paths, dtype=np.float64)
                 p_scatterers = []
                 p_cw_ratios = np.zeros(n_new_paths, dtype=np.float64)
-                
+
                 has_params = "amp" in grp_paths
                 if has_params:
                     p_len = grp_paths["amp"].shape[1]
@@ -737,13 +933,15 @@ class ExafsHDF5Store:
                     p_phas = np.zeros((n_new_paths, p_len), dtype=np.float64)
                     p_lams = np.zeros((n_new_paths, p_len), dtype=np.float64)
                     p_reps = np.zeros((n_new_paths, p_len), dtype=np.float64)
-                
+
                 for j, pc in enumerate(all_path_contributions):
                     pk_pc = np.asarray(pc["k"], dtype=np.float64)
                     chi_pc = np.asarray(pc["chi"], dtype=np.float64)
-                    if pk_pc.shape != stored_pk.shape or not np.allclose(pk_pc, stored_pk, rtol=1e-6, atol=1e-8):
+                    if pk_pc.shape != stored_pk.shape or not np.allclose(
+                        pk_pc, stored_pk, rtol=1e-6, atol=1e-8
+                    ):
                         chi_pc = np.interp(stored_pk, pk_pc, chi_pc)
-                    
+
                     p_chi_batch[j] = chi_pc
                     p_frame_indices[j] = pc["frame_index"]
                     p_site_indices[j] = pc["site_index"]
@@ -753,13 +951,13 @@ class ExafsHDF5Store:
                     p_degeneracies[j] = pc["degeneracy"]
                     p_scatterers.append(pc["scatterer"])
                     p_cw_ratios[j] = pc["cw_ratio"]
-                    
+
                     if has_params:
                         p_amps[j] = pc["amp"]
                         p_phas[j] = pc["pha"]
                         p_lams[j] = pc["lam"]
                         p_reps[j] = pc["rep"]
-                
+
                 grp_paths["chi"][n_existing_paths:] = p_chi_batch
                 grp_paths["frame_index"][n_existing_paths:] = p_frame_indices
                 grp_paths["site_index"][n_existing_paths:] = p_site_indices
@@ -769,7 +967,7 @@ class ExafsHDF5Store:
                 grp_paths["degeneracy"][n_existing_paths:] = p_degeneracies
                 grp_paths["scatterer"][n_existing_paths:] = np.array(p_scatterers)
                 grp_paths["cw_ratio"][n_existing_paths:] = p_cw_ratios
-                
+
                 if has_params:
                     grp_paths["amp"][n_existing_paths:] = p_amps
                     grp_paths["pha"][n_existing_paths:] = p_phas
@@ -807,7 +1005,13 @@ class ExafsHDF5Store:
         from .feff_utils import read_feff_output
 
         hdf5_path = hdf5_path or (output_dir / "results.h5")
-        store = cls(hdf5_path, config=None, store_paths=store_paths, mode="a", max_paths=max_paths)
+        store = cls(
+            hdf5_path,
+            config=None,
+            store_paths=store_paths,
+            mode="a",
+            max_paths=max_paths,
+        )
 
         imported = 0
         failed = 0
@@ -842,22 +1046,27 @@ class ExafsHDF5Store:
                         path_contributions = _read_path_contributions_from_dir(
                             site_dir, k_grid=k, max_paths=store.max_paths
                         )
-                    results_list.append({
-                        "frame_index": frame_index,
-                        "site_index": site_index,
-                        "k": k,
-                        "chi": chi,
-                        "absorber_element": "",
-                        "success": True,
-                        "path_contributions": path_contributions,
-                    })
+                    results_list.append(
+                        {
+                            "frame_index": frame_index,
+                            "site_index": site_index,
+                            "k": k,
+                            "chi": chi,
+                            "absorber_element": "",
+                            "success": True,
+                            "path_contributions": path_contributions,
+                        }
+                    )
                     imported += 1
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"Failed to import {site_dir}: {exc}")
                     failed += 1
 
         if results_list:
-            logger.info(f"Writing {len(results_list)} site results (with paths) to HDF5 in batch...")
+            logger.info(
+                f"Writing {len(results_list)} site results "
+                "(with paths) to HDF5 in batch..."
+            )
             store.write_site_results_batch(results_list)
 
         logger.info(f"Migration complete: {imported} sites imported, {failed} failed")

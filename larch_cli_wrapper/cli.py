@@ -1963,7 +1963,7 @@ def debye_waller(
         ),
     ),
 ) -> None:
-    """Compute Debye-Waller factors and MSRD from an MD trajectory.
+    r"""Compute Debye-Waller factors and MSRD from an MD trajectory.
 
     Always writes:
 

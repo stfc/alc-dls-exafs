@@ -640,15 +640,17 @@ class FeffExecutor:
                                 if batch.config.cleanup_feff_files:
                                     cleanup_feff_output(feff_dir)
 
-                            pending_hdf5_writes.append({
-                                "frame_index": task.frame_index,
-                                "site_index": task.site_index,
-                                "k": np.asarray(k),
-                                "chi": np.asarray(chi),
-                                "absorber_element": task.absorber_element,
-                                "success": True,
-                                "path_contributions": path_contributions,
-                            })
+                            pending_hdf5_writes.append(
+                                {
+                                    "frame_index": task.frame_index,
+                                    "site_index": task.site_index,
+                                    "k": np.asarray(k),
+                                    "chi": np.asarray(chi),
+                                    "absorber_element": task.absorber_element,
+                                    "success": True,
+                                    "path_contributions": path_contributions,
+                                }
+                            )
                     except (OSError, ValueError, TypeError) as e:
                         self.logger.warning(
                             f"Failed to read result for {task.task_id}: {e}"
@@ -664,6 +666,7 @@ class FeffExecutor:
                     self.hdf5_store.write_site_results_batch(pending_hdf5_writes)
                 except Exception as exc:  # noqa: BLE001
                     import traceback
+
                     self.logger.warning(
                         f"HDF5 batch write failed: {exc}\n" + traceback.format_exc()
                     )
@@ -932,6 +935,7 @@ class PipelineProcessor:
             output_dir: Base output directory
             parallel: Whether to use parallel execution
             progress_callback: Optional callback function
+            hdf5_progress_callback: Optional callback function for HDF5 path writes
             precompute_potentials: Whether to precompute potentials once and reuse
             precompute_potentials_structure: Structure to use for
                                              precompute (defaults to average)
@@ -954,7 +958,9 @@ class PipelineProcessor:
             batch,
             parallel=parallel,
             progress_callback=progress_callback,
-            hdf5_progress_callback=hdf5_progress_callback if not self._hdf5_store or not self._hdf5_store.store_paths else None,
+            hdf5_progress_callback=hdf5_progress_callback
+            if not self._hdf5_store or not self._hdf5_store.store_paths
+            else None,
         )
 
         # Stage C: Process results
