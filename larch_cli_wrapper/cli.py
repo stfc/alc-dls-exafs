@@ -883,7 +883,7 @@ def analyze_feff_outputs(
 
         plot_components = parse_plot_components(plot_include)
         want_paths = PlotComponent.PATHS in plot_components
-        max_paths_val = max_paths if max_paths is not None else 10
+        max_paths_val = max_paths
 
         # ── HDF5 mode ────────────────────────────────────────────────────────
         if hdf5_mode:
@@ -1438,7 +1438,7 @@ def run_full_pipeline(
         plot_include = _resolve_cli_arg(plot_include, _c.get("plot_include"), "all")
         use_hdf5 = _resolve_cli_arg(use_hdf5, _c.get("hdf5"), False)
         keep_path_files = _resolve_cli_arg(keep_path_files, _c.get("keep_paths"), False)
-        max_paths = _resolve_cli_arg(max_paths, _c.get("max_paths"), 10)
+        max_paths = _resolve_cli_arg(max_paths, _c.get("max_paths"), None)
         min_cw_ratio = _resolve_cli_arg(min_cw_ratio, _c.get("min_cw_ratio"), None)
         ase_read_kwargs = _resolve_cli_arg(ase_read_kwargs, _c.get("ase_kwargs"), None)
         precompute_potentials = _resolve_cli_arg(
@@ -1565,7 +1565,9 @@ def run_full_pipeline(
 
         with create_progress() as progress:
             feff_task_id = progress.add_task("FEFF calculations...", total=None)
-            hdf5_task_id = progress.add_task("Averaging paths & writing HDF5...", total=None, visible=False)
+            hdf5_task_id = progress.add_task(
+                "Averaging paths & writing HDF5...", total=None, visible=False
+            )
 
             def progress_callback(completed: int, total: int):
                 """Update progress bar with FEFF calculation progress."""

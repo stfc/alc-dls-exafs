@@ -1078,8 +1078,11 @@ class PlotConfig:
     # Path contributions panel
     plot_paths: bool = False
     """Add a 2×2 paths panel showing individual path k-space and R-space."""
-    max_paths: int = 10
-    """Maximum number of path contributions to show (ranked by max chir_mag)."""
+    max_paths: int | None = None
+    """Maximum number of path contributions to show (ranked by max chir_mag).
+
+    ``None`` means all paths are shown.
+    """
 
     # Metadata
     absorber: str = "X"
@@ -1261,7 +1264,7 @@ def _plot_paths_panel(
     axk: plt.Axes,
     axr: plt.Axes,
     path_contributions: dict[str, PathContribution],
-    max_paths: int,
+    max_paths: int | None,
     kweight: int,
     overall_average: Group | None = None,
     fourier_params: dict | None = None,
