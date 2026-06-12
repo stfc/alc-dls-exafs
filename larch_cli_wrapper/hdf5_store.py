@@ -123,7 +123,7 @@ from .feff_utils import FeffConfig  # noqa: E402
 logger = logging.getLogger(__name__)
 
 _STORE_VERSION = "1.0"
-_COMPRESS = {"compression": "gzip", "compression_opts": 6}
+_COMPRESS = {"compression": "gzip", "compression_opts": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +173,7 @@ class ExafsHDF5Store:
         store_paths: bool = False,
         dedup_k: bool = True,
         mode: str = "a",
+        max_paths: int | None = None,
     ) -> None:
         """Open or create the HDF5 file at *path*."""
         import h5py
@@ -180,11 +181,16 @@ class ExafsHDF5Store:
         self.path = Path(path)
         self.store_paths = store_paths
         self.dedup_k = dedup_k
+        self.max_paths = max_paths if max_paths is not None else (config.max_paths if config is not None else None)
         self._lock = threading.Lock()
         self._h5 = h5py.File(self.path, mode)
 
         if mode == "a":
             self._init_metadata(config)
+        else:
+            meta = self._h5.get("meta")
+            if meta is not None and "max_paths" in meta.attrs:
+                self.max_paths = int(meta.attrs["max_paths"])
 
     # ------------------------------------------------------------------
     # Context manager
@@ -226,190 +232,16 @@ class ExafsHDF5Store:
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"Could not serialise FeffConfig to HDF5 meta: {exc}")
         meta.attrs["store_paths"] = self.store_paths
+        if self.max_paths is not None:
+            meta.attrs["max_paths"] = self.max_paths
 
         # Pre-create top-level groups
         self._h5.require_group("frames")
         self._h5.require_group("aggregates")
 
     # ------------------------------------------------------------------
-    # k-grid helpers (support both deduped and per-dataset layouts)
-    # ------------------------------------------------------------------
-
-    def _get_site_k(self, site_grp) -> np.ndarray:
-        """Return the k grid for a site group, falling back to meta/k_grid_sites."""
-        if "k" in site_grp:
-            return np.array(site_grp["k"])
-        meta = self._h5.get("meta")
-        if meta is not None and "k_grid_sites" in meta:
-            return np.array(meta["k_grid_sites"])
-        raise KeyError(
-            f"k not found in site group '{site_grp.name}' or meta/k_grid_sites"
-        )
-
-    def _get_path_k(self, path_grp) -> np.ndarray:
-        """Return the k grid for a path group, falling back to meta/k_grid_paths."""
-        if "k" in path_grp:
-            return np.array(path_grp["k"])
-        meta = self._h5.get("meta")
-        if meta is not None and "k_grid_paths" in meta:
-            return np.array(meta["k_grid_paths"])
-        raise KeyError(
-            f"k not found in path group '{path_grp.name}' or meta/k_grid_paths"
-        )
-
-    # ------------------------------------------------------------------
     # Writing – per-site results
     # ------------------------------------------------------------------
-
-    def write_site_result(
-        self,
-        frame_index: int,
-        site_index: int,
-        k: np.ndarray,
-        chi: np.ndarray,
-        absorber_element: str = "",
-        success: bool = True,
-        path_contributions: list[dict] | None = None,
-    ) -> None:
-        """Write chi(k) for one site.
-
-        Parameters
-        ----------
-        frame_index, site_index:
-            Indices identifying the site.
-        k, chi:
-            Wavenumber and EXAFS signal arrays (real float64).
-        absorber_element:
-            Chemical symbol of the absorbing atom.
-        success:
-            Whether the FEFF calculation succeeded.
-        path_contributions:
-            List of dicts, each with keys:
-            ``path_index``, ``k``, ``chi``, ``r_eff``, ``nlegs``,
-            ``degeneracy``, ``scatterer``.
-            Only stored when ``self.store_paths`` is True.
-        """
-        grp_path = f"frames/frame_{frame_index:04d}/sites/site_{site_index:04d}"
-        with self._lock:
-            grp = self._h5.require_group(grp_path)
-            # Overwrite arrays if re-running
-            for name in ("k", "chi"):
-                if name in grp:
-                    del grp[name]
-
-            arr_k = np.asarray(k, dtype=np.float64)
-            arr_chi = np.asarray(chi, dtype=np.float64)
-            if self.dedup_k:
-                meta = self._h5.require_group("meta")
-                if "k_grid_sites" not in meta:
-                    meta.create_dataset("k_grid_sites", data=arr_k, **_COMPRESS)
-                    meta["k_grid_sites"].attrs["description"] = (
-                        "Common k grid for all per-site chi arrays (Å⁻¹). "
-                        "Individual site k datasets are omitted."
-                    )
-                else:
-                    stored_k = np.array(meta["k_grid_sites"])
-                    if stored_k.shape != arr_k.shape or not np.allclose(
-                        stored_k, arr_k, rtol=1e-6, atol=1e-8
-                    ):
-                        logger.debug(
-                            "k-grid mismatch for frame=%d site=%d "
-                            "(%g…%g, %d pts vs %g…%g, %d pts); "
-                            "interpolating chi onto stored grid.",
-                            frame_index,
-                            site_index,
-                            arr_k[0],
-                            arr_k[-1],
-                            len(arr_k),
-                            stored_k[0],
-                            stored_k[-1],
-                            len(stored_k),
-                        )
-                        arr_chi = np.interp(stored_k, arr_k, arr_chi)
-                        arr_k = stored_k
-            else:
-                grp.create_dataset("k", data=arr_k, **_COMPRESS)
-            grp.create_dataset("chi", data=arr_chi, **_COMPRESS)
-            grp.attrs["site_index"] = site_index
-            grp.attrs["frame_index"] = frame_index
-            grp.attrs["absorber_element"] = absorber_element
-            grp.attrs["success"] = success
-
-            if self.store_paths and path_contributions:
-                paths_grp = grp.require_group("paths")
-                for pc in path_contributions:
-                    idx = pc["path_index"]
-                    p_grp = paths_grp.require_group(f"path_{idx:04d}")
-                    for name in ("k", "chi", "amp", "pha", "lam", "rep", "k_param"):
-                        if name in p_grp:
-                            del p_grp[name]
-                    if self.dedup_k:
-                        pk = np.asarray(pc["k"], dtype=np.float64)
-                        meta = self._h5.require_group("meta")
-                        if "k_grid_paths" not in meta:
-                            meta.create_dataset("k_grid_paths", data=pk, **_COMPRESS)
-                            meta["k_grid_paths"].attrs["description"] = (
-                                "Common k grid for all per-path chi arrays (Å⁻¹). "
-                                "Individual path k datasets are omitted."
-                            )
-                        else:
-                            stored_pk = np.array(meta["k_grid_paths"])
-                            if stored_pk.shape != pk.shape or not np.allclose(
-                                stored_pk, pk, rtol=1e-6, atol=1e-8
-                            ):
-                                logger.debug(
-                                    "Path k-grid mismatch for frame=%d site=%d "
-                                    "path=%d (%g…%g, %d pts vs %g…%g, %d pts); "
-                                    "interpolating chi onto stored grid.",
-                                    frame_index,
-                                    site_index,
-                                    idx,
-                                    pk[0],
-                                    pk[-1],
-                                    len(pk),
-                                    stored_pk[0],
-                                    stored_pk[-1],
-                                    len(stored_pk),
-                                )
-                                pc = dict(pc)
-                                pc["chi"] = np.interp(
-                                    stored_pk,
-                                    pk,
-                                    np.asarray(pc["chi"], dtype=np.float64),
-                                )
-                                pk = stored_pk
-                        # FEFF raw params share a common coarse grid across all paths
-                        _pk_param = pc.get("k_param")
-                        if _pk_param is not None and "k_grid_params" not in meta:
-                            meta.create_dataset(
-                                "k_grid_params",
-                                data=np.asarray(_pk_param, dtype=np.float64),
-                                **_COMPRESS,
-                            )
-                            meta["k_grid_params"].attrs["description"] = (
-                                "Common native k grid for FEFF raw path parameters"
-                                " (amp, pha, lam, rep) (Å⁻¹)."
-                            )
-                    else:
-                        p_grp.create_dataset(
-                            "k", data=np.asarray(pc["k"], dtype=np.float64), **_COMPRESS
-                        )
-                    p_grp.create_dataset(
-                        "chi", data=np.asarray(pc["chi"], dtype=np.float64), **_COMPRESS
-                    )
-                    # Store raw FEFF parameters for on-the-fly χ recomputation
-                    for _pname in ("amp", "pha", "lam", "rep", "k_param"):
-                        if _pname in pc:
-                            p_grp.create_dataset(
-                                _pname,
-                                data=np.asarray(pc[_pname], dtype=np.float64),
-                                **_COMPRESS,
-                            )
-                    p_grp.attrs["r_eff"] = float(pc["r_eff"])
-                    p_grp.attrs["nlegs"] = int(pc["nlegs"])
-                    p_grp.attrs["degeneracy"] = float(pc["degeneracy"])
-                    p_grp.attrs["scatterer"] = str(pc["scatterer"])
-                    p_grp.attrs["cw_ratio"] = float(pc.get("cw_ratio", 0.0))
 
     # ------------------------------------------------------------------
     # Writing – aggregates
@@ -523,51 +355,61 @@ class ExafsHDF5Store:
 
     def iter_site_results(self) -> Iterator[SiteResult]:
         """Iterate over all successfully written site results."""
-        frames_grp = self._h5.get("frames")
-        if frames_grp is None:
+        site_res = self._h5.get("site_results")
+        if site_res is None or "chi" not in site_res:
             return
-        for frame_name in sorted(frames_grp.keys()):
-            frame_grp = frames_grp[frame_name]
-            sites_grp = frame_grp.get("sites")
-            if sites_grp is None:
-                continue
-            for site_name in sorted(sites_grp.keys()):
-                s = sites_grp[site_name]
-                success = bool(s.attrs.get("success", True))
-                if not success:
-                    continue
+        k = np.array(site_res["k_grid"])
+        frame_indices = np.array(site_res["frame_index"])
+        site_indices = np.array(site_res["site_index"])
+        absorber_elements = [s.decode('utf-8') if isinstance(s, bytes) else s for s in site_res["absorber_element"]]
+        successes = np.array(site_res["success"])
+        chis = site_res["chi"]
+        for i in range(len(frame_indices)):
+            if successes[i]:
                 yield SiteResult(
-                    frame_index=int(s.attrs["frame_index"]),
-                    site_index=int(s.attrs["site_index"]),
-                    absorber_element=str(s.attrs.get("absorber_element", "")),
-                    success=success,
-                    k=self._get_site_k(s),
-                    chi=np.array(s["chi"]),
+                    frame_index=int(frame_indices[i]),
+                    site_index=int(site_indices[i]),
+                    absorber_element=absorber_elements[i],
+                    success=True,
+                    k=k,
+                    chi=np.array(chis[i]),
                 )
 
     def has_site_result(self, frame_index: int, site_index: int) -> bool:
         """Return True if a successful result for this site is already stored."""
-        grp_path = f"frames/frame_{frame_index:04d}/sites/site_{site_index:04d}"
-        with self._lock:
-            if grp_path not in self._h5:
-                return False
-            grp = self._h5[grp_path]
-            meta = self._h5.get("meta") or {}
-            has_k = "k" in grp or "k_grid_sites" in meta
-            return bool(grp.attrs.get("success", True)) and has_k and "chi" in grp
+        site_res = self._h5.get("site_results")
+        if site_res is None or "chi" not in site_res:
+            return False
+        frame_indices = np.array(site_res["frame_index"])
+        site_indices = np.array(site_res["site_index"])
+        successes = np.array(site_res["success"])
+        matches = (frame_indices == frame_index) & (site_indices == site_index)
+        if not np.any(matches):
+            return False
+        idx = np.where(matches)[0][0]
+        return bool(successes[idx])
 
     def load_site_as_group(self, frame_index: int, site_index: int) -> Group:
         """Load a single site result as a Larch Group."""
         from larch import Group
 
-        grp_path = f"frames/frame_{frame_index:04d}/sites/site_{site_index:04d}"
-        s = self._h5[grp_path]
+        site_res = self._h5.get("site_results")
+        if site_res is None or "chi" not in site_res:
+            raise KeyError("No results found in site_results")
+        frame_indices = np.array(site_res["frame_index"])
+        site_indices = np.array(site_res["site_index"])
+        matches = (frame_indices == frame_index) & (site_indices == site_index)
+        if not np.any(matches):
+            raise KeyError(f"site result for frame={frame_index}, site={site_index} not found")
+        idx = np.where(matches)[0][0]
+        
         g = Group()
-        g.k = self._get_site_k(s)
-        g.chi = np.array(s["chi"])
-        g.frame_idx = int(s.attrs["frame_index"])
-        g.site_idx = int(s.attrs["site_index"])
-        g.absorber_element = str(s.attrs.get("absorber_element", ""))
+        g.k = np.array(site_res["k_grid"])
+        g.chi = np.array(site_res["chi"][idx])
+        g.frame_idx = frame_index
+        g.site_idx = site_index
+        absorber = site_res["absorber_element"][idx]
+        g.absorber_element = absorber.decode('utf-8') if isinstance(absorber, bytes) else absorber
         g.task_id = f"frame_{frame_index:04d}_site_{site_index:04d}"
         return g
 
@@ -575,59 +417,61 @@ class ExafsHDF5Store:
     # Reading – path contributions
     # ------------------------------------------------------------------
 
-    def iter_path_contributions(
-        self,
-    ) -> Iterator[tuple[str, dict, int, int]]:
-        """Iterate over all stored path contributions.
-
-        Yields ``(path_key, info, frame_index, site_index)`` tuples where
-        *path_key* is a stable string key (see
-        :func:`~larch_cli_wrapper.exafs_data.make_path_key`) and *info* is a
-        dict with keys: ``k``, ``chi``, ``amp``, ``pha``, ``lam``, ``rep``,
-        ``r_eff``, ``nlegs``, ``degeneracy``, ``scatterer``.
-        """
+    def iter_path_contributions(self) -> Iterator[tuple[str, dict, int, int]]:
+        """Iterate over all stored path contributions."""
         from .exafs_data import make_path_key
 
-        frames_grp = self._h5.get("frames")
-        if frames_grp is None:
+        path_res = self._h5.get("path_results")
+        if path_res is None or "chi" not in path_res:
             return
-        for frame_name in sorted(frames_grp.keys()):
-            frame_grp = frames_grp[frame_name]
-            sites_grp = frame_grp.get("sites")
-            if sites_grp is None:
-                continue
-            for site_name in sorted(sites_grp.keys()):
-                s = sites_grp[site_name]
-                paths_grp = s.get("paths")
-                if paths_grp is None:
-                    continue
-                frame_index = int(s.attrs["frame_index"])
-                site_index = int(s.attrs["site_index"])
-                for path_name in sorted(paths_grp.keys()):
-                    p = paths_grp[path_name]
-                    r_eff = float(p.attrs["r_eff"])
-                    nlegs = int(p.attrs["nlegs"])
-                    scatterer = str(p.attrs["scatterer"])
-                    path_key = make_path_key(scatterer, nlegs, r_eff)
-                    info: dict = {
-                        "k": self._get_path_k(p),
-                        "chi": np.array(p["chi"]),
-                        "r_eff": r_eff,
-                        "nlegs": nlegs,
-                        "degeneracy": float(p.attrs["degeneracy"]),
-                        "scatterer": scatterer,
-                        "cw_ratio": float(p.attrs["cw_ratio"]),
-                    }
-                    # Yield raw FEFF parameters if stored
-                    for _pname in ("amp", "pha", "lam", "rep", "k_param"):
-                        if _pname in p:
-                            info[_pname] = np.array(p[_pname])
-                    # Fallback: k_param may be deduped in meta/k_grid_params
-                    if "k_param" not in info:
-                        meta = self._h5.get("meta")
-                        if meta is not None and "k_grid_params" in meta:
-                            info["k_param"] = np.array(meta["k_grid_params"])
-                    yield path_key, info, frame_index, site_index
+
+        pk = np.array(path_res["k_grid_paths"])
+        pk_param = np.array(path_res["k_grid_params"]) if "k_grid_params" in path_res else None
+
+        frame_indices = np.array(path_res["frame_index"])
+        site_indices = np.array(path_res["site_index"])
+        path_indices = np.array(path_res["path_index"])
+        r_effs = np.array(path_res["r_eff"])
+        nlegs_arr = np.array(path_res["nlegs"])
+        degeneracies = np.array(path_res["degeneracy"])
+        scatterers = [s.decode('utf-8') if isinstance(s, bytes) else s for s in path_res["scatterer"]]
+        cw_ratios = np.array(path_res["cw_ratio"])
+
+        chis = path_res["chi"]
+        amps = path_res.get("amp")
+        phas = path_res.get("pha")
+        lams = path_res.get("lam")
+        reps = path_res.get("rep")
+
+        for i in range(len(frame_indices)):
+            frame_index = int(frame_indices[i])
+            site_index = int(site_indices[i])
+            r_eff = float(r_effs[i])
+            nlegs = int(nlegs_arr[i])
+            scatterer = scatterers[i]
+            path_key = make_path_key(scatterer, nlegs, r_eff)
+
+            info = {
+                "k": pk,
+                "chi": np.array(chis[i]),
+                "r_eff": r_eff,
+                "nlegs": nlegs,
+                "degeneracy": float(degeneracies[i]),
+                "scatterer": scatterer,
+                "cw_ratio": float(cw_ratios[i]),
+            }
+            if amps is not None:
+                info["amp"] = np.array(amps[i])
+            if phas is not None:
+                info["pha"] = np.array(phas[i])
+            if lams is not None:
+                info["lam"] = np.array(lams[i])
+            if reps is not None:
+                info["rep"] = np.array(reps[i])
+            if pk_param is not None:
+                info["k_param"] = pk_param
+
+            yield path_key, info, frame_index, site_index
 
     # ------------------------------------------------------------------
     # Reading – aggregates
@@ -691,6 +535,248 @@ class ExafsHDF5Store:
         return g
 
     # ------------------------------------------------------------------
+    # Batch writing per-site and path results (extremely fast)
+    # ------------------------------------------------------------------
+
+    def write_site_results_batch(
+        self,
+        results_list: list[dict],
+    ) -> None:
+        """Write a batch of site results and path contributions in a single HDF5 write operation.
+
+        This avoids the massive performance penalties of resizing datasets one-by-one.
+        """
+        if not results_list:
+            return
+
+        with self._lock:
+            grp_site = self._h5.require_group("site_results")
+            
+            # 1. Determine common k_grid from the first result
+            ref_k = np.asarray(results_list[0]["k"], dtype=np.float64)
+            if "k_grid" not in grp_site:
+                grp_site.create_dataset("k_grid", data=ref_k, **_COMPRESS)
+                stored_k = ref_k
+            else:
+                stored_k = np.array(grp_site["k_grid"])
+            
+            # 2. Extract and reconcile all site arrays
+            n_new = len(results_list)
+            chi_batch = np.zeros((n_new, len(stored_k)), dtype=np.float64)
+            frame_indices = np.zeros(n_new, dtype=np.int32)
+            site_indices = np.zeros(n_new, dtype=np.int32)
+            absorber_elements = []
+            successes = np.zeros(n_new, dtype=np.bool_)
+            
+            all_path_contributions = []
+            
+            for i, res in enumerate(results_list):
+                f_idx = res["frame_index"]
+                s_idx = res["site_index"]
+                frame_indices[i] = f_idx
+                site_indices[i] = s_idx
+                absorber_elements.append(res["absorber_element"])
+                successes[i] = res["success"]
+                
+                # Reconcile k
+                k_res = np.asarray(res["k"], dtype=np.float64)
+                chi_res = np.asarray(res["chi"], dtype=np.float64)
+                if k_res.shape != stored_k.shape or not np.allclose(k_res, stored_k, rtol=1e-6, atol=1e-8):
+                    chi_res = np.interp(stored_k, k_res, chi_res)
+                chi_batch[i] = chi_res
+                
+                # Paths
+                if self.store_paths and res.get("path_contributions"):
+                    # Add frame_index and site_index to each path contribution for flat writing
+                    for pc in res["path_contributions"]:
+                        pc_copy = dict(pc)
+                        pc_copy["frame_index"] = f_idx
+                        pc_copy["site_index"] = s_idx
+                        all_path_contributions.append(pc_copy)
+            
+            # 3. Overwrite existing rows or append to site_results
+            if "chi" not in grp_site:
+                grp_site.create_dataset("chi", data=chi_batch, maxshape=(None, len(stored_k)), chunks=(128, len(stored_k)), **_COMPRESS)
+                grp_site.create_dataset("frame_index", data=frame_indices, maxshape=(None,), chunks=(1024,), **_COMPRESS)
+                grp_site.create_dataset("site_index", data=site_indices, maxshape=(None,), chunks=(1024,), **_COMPRESS)
+                import h5py
+                dt_str = h5py.string_dtype(encoding='utf-8')
+                grp_site.create_dataset("absorber_element", data=np.array(absorber_elements, dtype=dt_str), maxshape=(None,), chunks=(1024,), **_COMPRESS)
+                grp_site.create_dataset("success", data=successes, maxshape=(None,), chunks=(1024,), **_COMPRESS)
+            else:
+                existing_frames = np.array(grp_site["frame_index"])
+                existing_sites = np.array(grp_site["site_index"])
+                existing_map = {(f, s): idx for idx, (f, s) in enumerate(zip(existing_frames, existing_sites))}
+                
+                overwrite_indices_src = []
+                overwrite_indices_dst = []
+                append_indices = []
+                for i in range(n_new):
+                    key = (frame_indices[i], site_indices[i])
+                    if key in existing_map:
+                        overwrite_indices_src.append(i)
+                        overwrite_indices_dst.append(existing_map[key])
+                    else:
+                        append_indices.append(i)
+                
+                if overwrite_indices_src:
+                    grp_site["chi"][overwrite_indices_dst] = chi_batch[overwrite_indices_src]
+                    import h5py as _h5py
+                    _dt_str = _h5py.string_dtype(encoding='utf-8')
+                    _ae_arr = np.array([absorber_elements[i] for i in overwrite_indices_src], dtype=_dt_str)
+                    grp_site["absorber_element"][overwrite_indices_dst] = _ae_arr
+                    grp_site["success"][overwrite_indices_dst] = successes[overwrite_indices_src]
+                
+                if append_indices:
+                    n_old = len(existing_frames)
+                    n_append = len(append_indices)
+                    n_new_total = n_old + n_append
+                    
+                    grp_site["chi"].resize((n_new_total, len(stored_k)))
+                    grp_site["frame_index"].resize((n_new_total,))
+                    grp_site["site_index"].resize((n_new_total,))
+                    grp_site["absorber_element"].resize((n_new_total,))
+                    grp_site["success"].resize((n_new_total,))
+                    
+                    grp_site["chi"][n_old:] = chi_batch[append_indices]
+                    grp_site["frame_index"][n_old:] = frame_indices[append_indices]
+                    grp_site["site_index"][n_old:] = site_indices[append_indices]
+                    for idx_arr, orig_idx in enumerate(append_indices):
+                        grp_site["absorber_element"][n_old + idx_arr] = absorber_elements[orig_idx]
+                    grp_site["success"][n_old:] = successes[append_indices]
+
+            # 4. Batch write for paths
+            if self.store_paths and all_path_contributions:
+                grp_paths = self._h5.require_group("path_results")
+                import h5py
+                dt_str = h5py.string_dtype(encoding='utf-8')
+                
+                if "chi" not in grp_paths:
+                    pk = np.asarray(all_path_contributions[0]["k"], dtype=np.float64)
+                    grp_paths.create_dataset("k_grid_paths", data=pk, **_COMPRESS)
+                    
+                    _pk_param = all_path_contributions[0].get("k_param")
+                    if _pk_param is not None:
+                        grp_paths.create_dataset("k_grid_params", data=np.asarray(_pk_param, dtype=np.float64), **_COMPRESS)
+                        p_len = len(_pk_param)
+                    else:
+                        p_len = 0
+                    
+                    n_path_points = len(pk)
+                    grp_paths.create_dataset("chi", shape=(0, n_path_points), maxshape=(None, n_path_points), dtype=np.float64, chunks=(1024, n_path_points), **_COMPRESS)
+                    if p_len > 0:
+                        grp_paths.create_dataset("amp", shape=(0, p_len), maxshape=(None, p_len), dtype=np.float64, chunks=(1024, p_len), **_COMPRESS)
+                        grp_paths.create_dataset("pha", shape=(0, p_len), maxshape=(None, p_len), dtype=np.float64, chunks=(1024, p_len), **_COMPRESS)
+                        grp_paths.create_dataset("lam", shape=(0, p_len), maxshape=(None, p_len), dtype=np.float64, chunks=(1024, p_len), **_COMPRESS)
+                        grp_paths.create_dataset("rep", shape=(0, p_len), maxshape=(None, p_len), dtype=np.float64, chunks=(1024, p_len), **_COMPRESS)
+                        
+                    grp_paths.create_dataset("frame_index", shape=(0,), maxshape=(None,), dtype=np.int32, chunks=(4096,), **_COMPRESS)
+                    grp_paths.create_dataset("site_index", shape=(0,), maxshape=(None,), dtype=np.int32, chunks=(4096,), **_COMPRESS)
+                    grp_paths.create_dataset("path_index", shape=(0,), maxshape=(None,), dtype=np.int32, chunks=(4096,), **_COMPRESS)
+                    grp_paths.create_dataset("r_eff", shape=(0,), maxshape=(None,), dtype=np.float64, chunks=(4096,), **_COMPRESS)
+                    grp_paths.create_dataset("nlegs", shape=(0,), maxshape=(None,), dtype=np.int32, chunks=(4096,), **_COMPRESS)
+                    grp_paths.create_dataset("degeneracy", shape=(0,), maxshape=(None,), dtype=np.float64, chunks=(4096,), **_COMPRESS)
+                    grp_paths.create_dataset("scatterer", shape=(0,), maxshape=(None,), dtype=dt_str, chunks=(4096,), **_COMPRESS)
+                    grp_paths.create_dataset("cw_ratio", shape=(0,), maxshape=(None,), dtype=np.float64, chunks=(4096,), **_COMPRESS)
+                
+                unique_keys = set((res["frame_index"], res["site_index"]) for res in results_list)
+                if "frame_index" in grp_paths and len(grp_paths["frame_index"]) > 0:
+                    p_frames = np.array(grp_paths["frame_index"])
+                    p_sites = np.array(grp_paths["site_index"])
+                    
+                    mask_keep = np.ones(len(p_frames), dtype=np.bool_)
+                    for f, s in unique_keys:
+                        mask_keep &= ~((p_frames == f) & (p_sites == s))
+                    
+                    if not np.all(mask_keep):
+                        keep_indices = np.where(mask_keep)[0]
+                        for name in list(grp_paths.keys()):
+                            if name in ("k_grid_paths", "k_grid_params"):
+                                continue
+                            dset = grp_paths[name]
+                            old_data = np.array(dset)[keep_indices]
+                            del grp_paths[name]
+                            if name == "scatterer":
+                                grp_paths.create_dataset(name, data=old_data, maxshape=(None,), dtype=dt_str, chunks=(4096,), **_COMPRESS)
+                            elif dset.ndim == 1:
+                                grp_paths.create_dataset(name, data=old_data, maxshape=(None,), dtype=dset.dtype, chunks=(4096,), **_COMPRESS)
+                            elif dset.ndim == 2:
+                                grp_paths.create_dataset(name, data=old_data, maxshape=(None, dset.shape[1]), dtype=dset.dtype, chunks=(1024, dset.shape[1]), **_COMPRESS)
+
+                n_new_paths = len(all_path_contributions)
+                n_existing_paths = len(grp_paths["frame_index"])
+                new_paths_size = n_existing_paths + n_new_paths
+                
+                grp_paths["chi"].resize((new_paths_size, len(grp_paths["k_grid_paths"])))
+                if "amp" in grp_paths:
+                    p_len = grp_paths["amp"].shape[1]
+                    grp_paths["amp"].resize((new_paths_size, p_len))
+                    grp_paths["pha"].resize((new_paths_size, p_len))
+                    grp_paths["lam"].resize((new_paths_size, p_len))
+                    grp_paths["rep"].resize((new_paths_size, p_len))
+                
+                for k_attr in ("frame_index", "site_index", "path_index", "r_eff", "nlegs", "degeneracy", "scatterer", "cw_ratio"):
+                    grp_paths[k_attr].resize((new_paths_size,))
+                
+                stored_pk = np.array(grp_paths["k_grid_paths"])
+                
+                p_chi_batch = np.zeros((n_new_paths, len(stored_pk)), dtype=np.float64)
+                p_frame_indices = np.zeros(n_new_paths, dtype=np.int32)
+                p_site_indices = np.zeros(n_new_paths, dtype=np.int32)
+                p_path_indices = np.zeros(n_new_paths, dtype=np.int32)
+                p_r_effs = np.zeros(n_new_paths, dtype=np.float64)
+                p_nlegs = np.zeros(n_new_paths, dtype=np.int32)
+                p_degeneracies = np.zeros(n_new_paths, dtype=np.float64)
+                p_scatterers = []
+                p_cw_ratios = np.zeros(n_new_paths, dtype=np.float64)
+                
+                has_params = "amp" in grp_paths
+                if has_params:
+                    p_len = grp_paths["amp"].shape[1]
+                    p_amps = np.zeros((n_new_paths, p_len), dtype=np.float64)
+                    p_phas = np.zeros((n_new_paths, p_len), dtype=np.float64)
+                    p_lams = np.zeros((n_new_paths, p_len), dtype=np.float64)
+                    p_reps = np.zeros((n_new_paths, p_len), dtype=np.float64)
+                
+                for j, pc in enumerate(all_path_contributions):
+                    pk_pc = np.asarray(pc["k"], dtype=np.float64)
+                    chi_pc = np.asarray(pc["chi"], dtype=np.float64)
+                    if pk_pc.shape != stored_pk.shape or not np.allclose(pk_pc, stored_pk, rtol=1e-6, atol=1e-8):
+                        chi_pc = np.interp(stored_pk, pk_pc, chi_pc)
+                    
+                    p_chi_batch[j] = chi_pc
+                    p_frame_indices[j] = pc["frame_index"]
+                    p_site_indices[j] = pc["site_index"]
+                    p_path_indices[j] = pc["path_index"]
+                    p_r_effs[j] = pc["r_eff"]
+                    p_nlegs[j] = pc["nlegs"]
+                    p_degeneracies[j] = pc["degeneracy"]
+                    p_scatterers.append(pc["scatterer"])
+                    p_cw_ratios[j] = pc["cw_ratio"]
+                    
+                    if has_params:
+                        p_amps[j] = pc["amp"]
+                        p_phas[j] = pc["pha"]
+                        p_lams[j] = pc["lam"]
+                        p_reps[j] = pc["rep"]
+                
+                grp_paths["chi"][n_existing_paths:] = p_chi_batch
+                grp_paths["frame_index"][n_existing_paths:] = p_frame_indices
+                grp_paths["site_index"][n_existing_paths:] = p_site_indices
+                grp_paths["path_index"][n_existing_paths:] = p_path_indices
+                grp_paths["r_eff"][n_existing_paths:] = p_r_effs
+                grp_paths["nlegs"][n_existing_paths:] = p_nlegs
+                grp_paths["degeneracy"][n_existing_paths:] = p_degeneracies
+                grp_paths["scatterer"][n_existing_paths:] = np.array(p_scatterers)
+                grp_paths["cw_ratio"][n_existing_paths:] = p_cw_ratios
+                
+                if has_params:
+                    grp_paths["amp"][n_existing_paths:] = p_amps
+                    grp_paths["pha"][n_existing_paths:] = p_phas
+                    grp_paths["lam"][n_existing_paths:] = p_lams
+                    grp_paths["rep"][n_existing_paths:] = p_reps
+
+    # ------------------------------------------------------------------
     # Migration helper
     # ------------------------------------------------------------------
 
@@ -700,6 +786,7 @@ class ExafsHDF5Store:
         output_dir: Path,
         hdf5_path: Path | None = None,
         store_paths: bool = False,
+        max_paths: int | None = None,
     ) -> ExafsHDF5Store:
         """Scan an existing output tree and import all chi.dat files into HDF5.
 
@@ -714,14 +801,17 @@ class ExafsHDF5Store:
             Destination HDF5 file.  Defaults to ``output_dir / 'results.h5'``.
         store_paths:
             Whether to also import feffNNNN.dat path files if present.
+        max_paths:
+            Maximum number of path files to import per site (retains shortest).
         """
         from .feff_utils import read_feff_output
 
         hdf5_path = hdf5_path or (output_dir / "results.h5")
-        store = cls(hdf5_path, config=None, store_paths=store_paths, mode="a")
+        store = cls(hdf5_path, config=None, store_paths=store_paths, mode="a", max_paths=max_paths)
 
         imported = 0
         failed = 0
+        results_list = []
 
         frame_dirs = sorted(output_dir.glob("frame_*"))
         for frame_dir in frame_dirs:
@@ -750,20 +840,25 @@ class ExafsHDF5Store:
                     path_contributions = None
                     if store_paths:
                         path_contributions = _read_path_contributions_from_dir(
-                            site_dir, k_grid=k
+                            site_dir, k_grid=k, max_paths=store.max_paths
                         )
-                    store.write_site_result(
-                        frame_index=frame_index,
-                        site_index=site_index,
-                        k=k,
-                        chi=chi,
-                        success=True,
-                        path_contributions=path_contributions,
-                    )
+                    results_list.append({
+                        "frame_index": frame_index,
+                        "site_index": site_index,
+                        "k": k,
+                        "chi": chi,
+                        "absorber_element": "",
+                        "success": True,
+                        "path_contributions": path_contributions,
+                    })
                     imported += 1
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"Failed to import {site_dir}: {exc}")
                     failed += 1
+
+        if results_list:
+            logger.info(f"Writing {len(results_list)} site results (with paths) to HDF5 in batch...")
+            store.write_site_results_batch(results_list)
 
         logger.info(f"Migration complete: {imported} sites imported, {failed} failed")
         return store
@@ -778,13 +873,13 @@ class ExafsHDF5Store:
         created_at = meta.attrs.get("created_at", "unknown") if meta else "unknown"
         version = meta.attrs.get("version", "unknown") if meta else "unknown"
 
-        frames_grp = self._h5.get("frames", {})
-        n_frames = len(frames_grp) if frames_grp else 0
-        n_sites = (
-            sum(len(frames_grp[f].get("sites", {})) for f in frames_grp)
-            if frames_grp
-            else 0
-        )
+        site_res = self._h5.get("site_results")
+        if site_res is not None and "frame_index" in site_res:
+            n_sites = len(site_res["frame_index"])
+            n_frames = len(np.unique(site_res["frame_index"]))
+        else:
+            n_sites = 0
+            n_frames = 0
 
         file_size_mb = self.path.stat().st_size / (1024**2) if self.path.exists() else 0
 
@@ -793,6 +888,7 @@ class ExafsHDF5Store:
             "version": version,
             "created_at": created_at,
             "n_frames": n_frames,
+            "n_sites": n_sites,
             "n_sites_total": n_sites,
             "has_paths": bool(
                 (self._h5.get("meta") or {}).attrs.get("store_paths", self.store_paths)
@@ -871,7 +967,11 @@ def recompute_path_chi_on_grid(path_dict: dict, k_grid: np.ndarray) -> dict:
     return {**path_dict, "k": k_grid, "chi": chi}
 
 
-def _read_path_contributions_from_dir(feff_dir: Path) -> list[dict]:
+def _read_path_contributions_from_dir(
+    feff_dir: Path,
+    max_paths: int | None = None,
+    **kwargs,
+) -> list[dict]:
     """Read all feffNNNN.dat path files from a FEFF output directory.
 
     Uses :class:`larch.xafs.feffdat.FeffDatFile` to outsource the fragile
@@ -882,7 +982,7 @@ def _read_path_contributions_from_dir(feff_dir: Path) -> list[dict]:
     :func:`recompute_path_chi_on_grid`.
 
     Returns a list of dicts compatible with
-    :meth:`ExafsHDF5Store.write_site_result`'s *path_contributions*
+    :meth:`ExafsHDF5Store.write_site_results_batch`'s *path_contributions*
     parameter.  Returns an empty list if no path files are found.
     """
     from larch.xafs.feffdat import FeffDatFile
@@ -905,7 +1005,10 @@ def _read_path_contributions_from_dir(feff_dir: Path) -> list[dict]:
     results = []
     n_failed = 0
     first_exc: Exception | None = None
-    for path_file in sorted(path_files):
+    sorted_path_files = sorted(path_files)
+    if max_paths is not None:
+        sorted_path_files = sorted_path_files[:max_paths]
+    for path_file in sorted_path_files:
         try:
             fd = FeffDatFile(str(path_file))
 

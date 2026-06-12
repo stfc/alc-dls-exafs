@@ -283,6 +283,8 @@ class FeffConfig:
     # Keep per-path feffNNNN.dat files before cleanup (needed for path contributions).
     # Automatically forced True when HDF5 store is used with store_paths=True.
     keep_path_files: bool = False
+    # Maximum number of path contributions to store in HDF5.
+    max_paths: int | None = None
 
     # Get dictionary of the FT parameters
     @property

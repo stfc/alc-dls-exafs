@@ -256,6 +256,13 @@ class InputGenerator:
             self.config = main_config
 
         try:
+            # frame_idx is the 0-based index into `structures` as returned
+            # by ase.io.read(), NOT the original trajectory frame number.
+            # If the user passed e.g. {"index": "0::50"}, frame_0000 →
+            # trajectory frame 0, frame_0001 → trajectory frame 50, etc.
+            # TODO: store the original trajectory index alongside frame_idx
+            # so that directory/HDF5 labels can be matched back to the
+            # source trajectory without ambiguity.
             for frame_idx, structure in enumerate(structures):
                 frame_dir = output_dir / f"frame_{frame_idx:04d}"
                 frame_batch = self.generate_single_site_inputs(
@@ -354,6 +361,7 @@ class FeffExecutor:
         batch: FeffBatch,
         parallel: bool = True,
         progress_callback: callable = None,
+        hdf5_progress_callback: callable = None,
     ) -> dict[str, bool]:
         """Execute all FEFF calculations in a batch with caching support.
 
@@ -361,6 +369,8 @@ class FeffExecutor:
             batch: FeffBatch to execute
             parallel: Whether to use parallel execution
             progress_callback: Optional callback function called with (completed, total)
+            hdf5_progress_callback: Optional callback called with (completed, total)
+                when writing HDF5 results.
 
         Returns:
             Dict mapping task_id to success status
@@ -583,88 +593,82 @@ class FeffExecutor:
             completed_tasks = len(cached_results) + len(tasks_to_run)
 
             # Process results and update cache
+            pending_hdf5_writes: list[dict] = []
+
             for (task, cache_key), (feff_dir, success) in zip(
                 tasks_to_run, results, strict=False
             ):
                 if success:
-                    # Save successful result to cache
                     try:
                         from .feff_utils import read_feff_output
 
                         k, chi = read_feff_output(feff_dir)
-                        # Persist: pkl when no HDF5, HDF5 is its own persistence
                         if not self.hdf5_store:
                             self._save_to_cache(cache_key, chi, k)
                         self.logger.debug(f"Cached result for {task.task_id}")
 
-                        # Write to HDF5 store (and path contributions if requested)
                         if self.hdf5_store:
-                            try:
-                                path_contributions: list | None = None
-                                # Use the store's own store_paths flag (single source
-                                # of truth set at ExafsHDF5Store construction time)
-                                # rather than batch.config.keep_path_files to avoid
-                                # any config-to-batch propagation issues.
-                                if self.hdf5_store.store_paths:
-                                    from .feff_utils import get_feff_numbered_files
-                                    from .hdf5_store import (
-                                        _read_path_contributions_from_dir,
-                                        recompute_path_chi_on_grid,
-                                    )
-
-                                    n_feff_files = len(
-                                        get_feff_numbered_files(feff_dir)
-                                    )
-                                    path_contributions = [
-                                        recompute_path_chi_on_grid(pc, k)
-                                        for pc in _read_path_contributions_from_dir(
-                                            feff_dir
-                                        )
-                                    ]
-                                    if n_feff_files > 0 and not path_contributions:
-                                        self.logger.warning(
-                                            f"{task.task_id}: {n_feff_files}"
-                                            " feffNNNN.dat files found but 0"
-                                            " paths were successfully parsed."
-                                            " Check larch FeffDatFile"
-                                            " compatibility."
-                                        )
-                                    elif n_feff_files == 0:
-                                        self.logger.warning(
-                                            f"{task.task_id}: store_paths=True but no "
-                                            f"feffNNNN.dat files found in {feff_dir}. "
-                                            "Was FEFF run with CONTROL …1 1 1?"
-                                        )
-
-                                self.hdf5_store.write_site_result(
-                                    frame_index=task.frame_index,
-                                    site_index=task.site_index,
-                                    k=np.asarray(k),
-                                    chi=np.asarray(chi),
-                                    success=True,
-                                    absorber_element=task.absorber_element,
-                                    path_contributions=path_contributions,
+                            path_contributions: list | None = None
+                            if self.hdf5_store.store_paths:
+                                from .feff_utils import get_feff_numbered_files
+                                from .hdf5_store import (
+                                    _read_path_contributions_from_dir,
+                                    recompute_path_chi_on_grid,
                                 )
 
-                                # Manual cleanup after path reading when keep_path_files
-                                if (
-                                    self.hdf5_store.store_paths
-                                    and batch.config.cleanup_feff_files
-                                ):
+                                n_feff_files = len(get_feff_numbered_files(feff_dir))
+                                path_contributions = [
+                                    recompute_path_chi_on_grid(pc, k)
+                                    for pc in _read_path_contributions_from_dir(
+                                        feff_dir, max_paths=self.hdf5_store.max_paths
+                                    )
+                                ]
+                                if n_feff_files > 0 and not path_contributions:
+                                    self.logger.warning(
+                                        f"{task.task_id}: {n_feff_files}"
+                                        " feffNNNN.dat files found but 0"
+                                        " paths were successfully parsed."
+                                        " Check larch FeffDatFile compatibility."
+                                    )
+                                elif n_feff_files == 0:
+                                    self.logger.warning(
+                                        f"{task.task_id}: store_paths=True but no "
+                                        f"feffNNNN.dat files found in {feff_dir}. "
+                                        "Was FEFF run with CONTROL …1 1 1?"
+                                    )
+                                # Cleanup feff files after reading paths
+                                if batch.config.cleanup_feff_files:
                                     cleanup_feff_output(feff_dir)
-                            except Exception as exc:  # noqa: BLE001
-                                import traceback
 
-                                self.logger.warning(
-                                    f"HDF5 write failed for {task.task_id}: {exc}\n"
-                                    + traceback.format_exc()
-                                )
+                            pending_hdf5_writes.append({
+                                "frame_index": task.frame_index,
+                                "site_index": task.site_index,
+                                "k": np.asarray(k),
+                                "chi": np.asarray(chi),
+                                "absorber_element": task.absorber_element,
+                                "success": True,
+                                "path_contributions": path_contributions,
+                            })
                     except (OSError, ValueError, TypeError) as e:
                         self.logger.warning(
-                            f"Failed to cache result for {task.task_id}: {e}"
+                            f"Failed to read result for {task.task_id}: {e}"
                         )
 
                 cached_results[task.task_id] = success
+
+            # Write all new results to HDF5 in a single batch operation
+            if self.hdf5_store and pending_hdf5_writes:
+                if hdf5_progress_callback:
+                    hdf5_progress_callback(0, 1)
+                try:
+                    self.hdf5_store.write_site_results_batch(pending_hdf5_writes)
+                except Exception as exc:  # noqa: BLE001
+                    import traceback
+                    self.logger.warning(
+                        f"HDF5 batch write failed: {exc}\n" + traceback.format_exc()
+                    )
+                if hdf5_progress_callback:
+                    hdf5_progress_callback(1, 1)
 
         return cached_results
 
@@ -894,6 +898,7 @@ class PipelineProcessor:
                 config=config,
                 store_paths=config.keep_path_files,
                 dedup_k=True,
+                max_paths=config.max_paths,
             )
 
         self.input_generator = InputGenerator(config)
@@ -913,6 +918,7 @@ class PipelineProcessor:
         output_dir: Path,
         parallel: bool = True,
         progress_callback: callable = None,
+        hdf5_progress_callback: callable = None,
         precompute_potentials: bool = False,
         precompute_potentials_structure: Atoms = None,
         # site_weights: list[float] | None = None, # Not implemented yet
@@ -945,7 +951,10 @@ class PipelineProcessor:
 
         # Stage B: Execute all FEFF calculations
         task_results = self.feff_executor.execute_batch(
-            batch, parallel=parallel, progress_callback=progress_callback
+            batch,
+            parallel=parallel,
+            progress_callback=progress_callback,
+            hdf5_progress_callback=hdf5_progress_callback if not self._hdf5_store or not self._hdf5_store.store_paths else None,
         )
 
         # Stage C: Process results
@@ -989,6 +998,7 @@ class PipelineProcessor:
                         overall_average=overall_average,
                         site_averages=site_averages,
                         fourier_params=self.config.fourier_params,
+                        hdf5_progress_callback=hdf5_progress_callback,
                     )
                 except Exception as exc:  # noqa: BLE001
                     self.logger.warning(f"Averaged paths write failed: {exc}")
@@ -1003,6 +1013,7 @@ class PipelineProcessor:
         overall_average: Group | None,
         site_averages: dict[int, Group],
         fourier_params: dict,
+        hdf5_progress_callback: callable = None,
     ) -> None:
         """Compute MD-averaged path contributions and write to a second HDF5 file."""
         from .exafs_data import PathAggregator
@@ -1046,6 +1057,11 @@ class PipelineProcessor:
         # Count successful spectra for correct weighting
         n_total_overall = sum(1 for _ in self._hdf5_store.iter_site_results())
 
+        total_steps = len(site_averages) + (1 if overall_average is not None else 0)
+        current_step = 0
+        if hdf5_progress_callback:
+            hdf5_progress_callback(current_step, total_steps)
+
         if overall_average is not None:
             overall_paths = overall_agg.finalize(fourier_params)
             _add_contribution_pct(overall_paths, overall_average, n_total_overall)
@@ -1055,6 +1071,9 @@ class PipelineProcessor:
                 overall_paths,
                 n_total=n_total_overall,
             )
+            current_step += 1
+            if hdf5_progress_callback:
+                hdf5_progress_callback(current_step, total_steps)
 
         for site_idx, site_group in site_averages.items():
             site_paths = (
@@ -1071,6 +1090,9 @@ class PipelineProcessor:
             store.write_average(
                 f"site_averages/site_{site_idx:04d}", site_group, site_paths
             )
+            current_step += 1
+            if hdf5_progress_callback:
+                hdf5_progress_callback(current_step, total_steps)
 
         store.close()
         self.logger.info(f"Wrote averaged paths store: {avg_path}")

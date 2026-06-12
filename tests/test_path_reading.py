@@ -146,3 +146,16 @@ def test_recompute_path_chi_on_grid(feff_dir):
     mask = r_coarse["k"] > 0.1
     chi_fine_at_coarse = np.interp(r_coarse["k"][mask], r_fine["k"], r_fine["chi"])
     assert np.allclose(chi_fine_at_coarse, r_coarse["chi"][mask], atol=1e-3)
+
+
+def test_read_path_contributions_with_max_paths(feff_dir):
+    """_read_path_contributions_from_dir respects max_paths."""
+    from larch_cli_wrapper.hdf5_store import _read_path_contributions_from_dir
+
+    # Copy another dummy file to simulate multiple path files
+    shutil.copy(feff_dir / "feff0001.dat", feff_dir / "feff0002.dat")
+    shutil.copy(feff_dir / "feff0001.dat", feff_dir / "feff0003.dat")
+
+    # Limit to 2 paths
+    results = _read_path_contributions_from_dir(feff_dir, max_paths=2)
+    assert len(results) == 2

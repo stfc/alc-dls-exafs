@@ -519,6 +519,8 @@ def main(argv: list[str] | None = None) -> None:
         pat = "frames/*/sites/*/paths"
         if pat not in exclude:
             exclude.append(pat)
+        if "path_results" not in exclude:
+            exclude.append("path_results")
 
     filter_h5(
         src=args.src,

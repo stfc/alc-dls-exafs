@@ -48,6 +48,12 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--max-paths",
+        type=int,
+        default=None,
+        help="Maximum number of path files to import per site (ranked by effective length R_eff ascending).",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -86,6 +92,7 @@ def main() -> None:
         output_dir=output_dir,
         hdf5_path=hdf5_path,
         store_paths=args.keep_paths,
+        max_paths=args.max_paths,
     )
     info = store.info()
     store.close()

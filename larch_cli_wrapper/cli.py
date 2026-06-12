@@ -482,7 +482,12 @@ def generate_feff_inputs(
             "JSON string of ASE read kwargs. Examples: "
             '\'{"index":":"}\' (all frames), '
             '\'{"index":"::10"}\' (every 10th frame), '
-            '\'{"format":"vasp"}\' (force format)'
+            '\'{"format":"vasp"}\' (force format).'
+            "NOTE: frame labels in output directories and HDF5 "
+            "(frame_0000, frame_0001, ...) are the 0-based "
+            "processing order, not original trajectory indices. "
+            'With --ase-kwargs {"index":"0::50"}: '
+            "frame_0000 -> traj frame 0, frame_0001 -> traj frame 50, etc."
         ),
     ),
 ) -> None:
@@ -1238,7 +1243,12 @@ def run_full_pipeline(
             "JSON string of ASE read kwargs. Examples: "
             '\'{"index":":"}\' (all frames), '
             '\'{"index":"::10"}\' (every 10th frame), '
-            '\'{"format":"vasp"}\' (force format)'
+            '\'{"format":"vasp"}\' (force format).'
+            "NOTE: frame labels in output directories and HDF5 "
+            "(frame_0000, frame_0001, ...) are the 0-based "
+            "processing order, not original trajectory indices. "
+            'With --ase-kwargs {"index":"0::50"}: '
+            "frame_0000 -> traj frame 0, frame_0001 -> traj frame 50, etc."
         ),
     ),
     show_plot: bool = typer.Option(False, "--show", help="Display plots interactively"),
@@ -1415,6 +1425,7 @@ def run_full_pipeline(
         )
 
     try:
+        max_paths_cli = max_paths
         config = load_config(config_file, preset)
 
         # Resolve CLI-only flags:
@@ -1536,6 +1547,7 @@ def run_full_pipeline(
         if want_paths and use_hdf5:
             keep_path_files = True
         config.keep_path_files = keep_path_files
+        config.max_paths = max_paths_cli
 
         # Determine HDF5 output path
         effective_hdf5_path: Path | None = None
@@ -1553,6 +1565,7 @@ def run_full_pipeline(
 
         with create_progress() as progress:
             feff_task_id = progress.add_task("FEFF calculations...", total=None)
+            hdf5_task_id = progress.add_task("Averaging paths & writing HDF5...", total=None, visible=False)
 
             def progress_callback(completed: int, total: int):
                 """Update progress bar with FEFF calculation progress."""
@@ -1563,6 +1576,16 @@ def run_full_pipeline(
                     description=f"FEFF calculations: {completed}/{total}",
                 )
 
+            def hdf5_progress_callback(completed: int, total: int):
+                """Update progress bar with HDF5 writing progress."""
+                progress.update(
+                    hdf5_task_id,
+                    visible=True,
+                    completed=completed,
+                    total=total,
+                    description=f"Averaging paths & writing HDF5: {completed}/{total}",
+                )
+
             # Trajectory processing
             final_group, frame_averages, actual_site_averages, individual_groups = (
                 processor.process_trajectory(
@@ -1571,6 +1594,7 @@ def run_full_pipeline(
                     output_dir=output_dir,
                     parallel=parallel,
                     progress_callback=progress_callback,
+                    hdf5_progress_callback=hdf5_progress_callback,
                     precompute_potentials=precompute_potentials,
                     precompute_potentials_structure=precompute_potentials_structure,
                 )
@@ -1580,6 +1604,10 @@ def run_full_pipeline(
             progress.update(
                 feff_task_id,
                 description="[green]✓ FEFF calculations complete![/green]",
+            )
+            progress.update(
+                hdf5_task_id,
+                description="[green]✓ Averaging paths & writing HDF5 complete![/green]",
             )
 
         console.print("\n[bold green]✓ Pipeline completed successfully![/bold green]")

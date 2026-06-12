@@ -39,11 +39,8 @@ For nlegs=4 collinear rattle paths: σ²_rattle ≈ 4 × σ²_single (approximat
 
 import marimo
 
-__generated_with = "0.23.6"
-app = marimo.App(
-    width="full",
-    app_title="EXAFS Paths — chi + DW + Structure",
-)
+__generated_with = "0.23.9"
+app = marimo.App(width="full", app_title="EXAFS Paths — chi + DW + Structure")
 
 
 @app.cell
@@ -99,8 +96,8 @@ def _(np):
     from larch.xafs import xftf
 
     # k / R chart display limits — not FT window (those are UI sliders below)
-    KMIN = 0.0
-    KMAX = 20.0
+    KMIN = 2.0
+    KMAX = 14.0
     RMIN = 0.0
 
     def perform_FT(
@@ -428,8 +425,73 @@ def _(mo):
         label="MD trajectory file for DW/MSRD (optional — leave unselected to skip)",
         multiple=False,
     )
-    mo.vstack([hdf5_file, traj_file])
-    return hdf5_file, traj_file
+    demeter_file = mo.ui.file_browser(
+        initial_path=".",
+        filetypes=[".dat", ".txt"],
+        label="Demeter paths.dat file (optional — for path pre-selection)",
+        multiple=False,
+    )
+    mo.vstack([hdf5_file, traj_file, demeter_file])
+    return demeter_file, hdf5_file, traj_file
+
+
+@app.cell
+def _(demeter_file, pd):
+    """Parse an optional Demeter / Athena paths.dat file."""
+    import re as _re
+
+    def parse_demeter_paths(filepath):
+        """Return a DataFrame of FEFF paths from a Demeter paths.dat file.
+
+        Columns: path_num, degen, reff, legs, rank, path_type, path_str,
+                 atoms (space-separated non-absorber atoms), scatterer (element).
+        """
+        rows = []
+        with open(filepath) as fh:
+            for line in fh:
+                if not line.strip() or line.strip().startswith("#"):
+                    continue
+                m = _re.match(r"^\s*(\d{4})\s+([\d.]+)\s+([\d.]+)\s+---\s+", line)
+                if not m:
+                    continue
+                path_num = int(m.group(1))
+                degen = float(m.group(2))
+                reff = float(m.group(3))
+                rest = line[m.end() :]
+                last_at = rest.rfind("@")
+                if last_at < 0:
+                    continue
+                path_str = rest[: last_at + 1].strip()
+                after = rest[last_at + 1 :].split()
+                if len(after) < 3:
+                    continue
+                rank = float(after[1])
+                legs = int(after[2])
+                path_type = " ".join(after[3:])
+                atoms_raw = [t for t in path_str.split() if t != "@"]
+                scatterer = _re.sub(r"[\d.]+", "", atoms_raw[0]) if atoms_raw else "?"
+                rows.append(
+                    {
+                        "path_num": path_num,
+                        "degen": degen,
+                        "reff": reff,
+                        "legs": legs,
+                        "rank": rank,
+                        "path_type": path_type,
+                        "path_str": path_str,
+                        "atoms": " ".join(atoms_raw),
+                        "scatterer": scatterer,
+                    }
+                )
+        return pd.DataFrame(rows) if rows else None
+
+    demeter_df = None
+    if demeter_file.value:
+        try:
+            demeter_df = parse_demeter_paths(demeter_file.path(0))
+        except Exception:
+            pass  # silently skip unreadable files
+    return (demeter_df,)
 
 
 @app.cell
@@ -509,7 +571,7 @@ def _(mo):
         value=0, start=0, stop=10_000, step=1, label="Equilibration frames to skip"
     )
     n_paths_box = mo.ui.number(
-        value=50, start=1, stop=100, step=1, label="Max paths per site per frame"
+        value=100, start=1, step=1, label="Max paths per site per frame"
     )
     r_tol_box = mo.ui.number(
         value=0.25, start=0.01, stop=2.0, step=0.01, label="r_eff tolerance Å"
@@ -518,7 +580,7 @@ def _(mo):
         value=0, start=0, stop=100_000, step=1, label="Traj skip frames (DW)"
     )
     cutoff_box = mo.ui.number(
-        value=7.0, start=0.5, stop=20.0, step=0.1, label="Neighbor cutoff Å (DW)"
+        value=8.0, start=0.5, stop=20.0, step=0.1, label="Neighbor cutoff Å (DW)"
     )
     dw_tol_box = mo.ui.number(
         value=0.1, start=0.02, stop=1.0, step=0.01, label="DW shell grouping tol Å"
@@ -527,7 +589,7 @@ def _(mo):
         value=5.0, start=0.1, stop=45.0, step=0.5, label="Angle grouping tol (°)"
     )
     cutoff_3body_box = mo.ui.number(
-        value=0.0, start=0.0, stop=20.0, step=0.1, label="3-body cutoff Å (0=skip)"
+        value=6.0, start=0.0, stop=20.0, step=0.1, label="3-body cutoff Å (0=skip)"
     )
     site_indices_box = mo.ui.text(
         value="",
@@ -580,7 +642,7 @@ def _(mo):
 
 
 @app.cell
-def _(btn_load, h5py, hdf5_file, logger, mo, np):
+def _(btn_load, h5py, hdf5_file, mo, np):
     merged_path_data = None
     total_chi_hdf5 = None
     kref_hdf5 = None
@@ -1134,9 +1196,102 @@ def _(display_merged_data, mo, msrd_2b, msrd_3b, np, pd, r_tol_box):
 
 
 @app.cell
-def _(mo, path_table_df):
+def _(contrib_range, path_table_df):
+    filtered_path_table_df = path_table_df[
+        (path_table_df["contribution_pct"] >= contrib_range.value[0])
+        & (path_table_df["contribution_pct"] <= contrib_range.value[1])
+    ]
+    return (filtered_path_table_df,)
+
+
+@app.cell
+def _(demeter_df, mo):
+    """Demeter path selector panel — only shown when a paths.dat file is loaded."""
+    demeter_selector = None
+    demeter_apply_toggle = None
+    _panel = None
+
+    if demeter_df is not None:
+        demeter_apply_toggle = mo.ui.switch(
+            value=True,
+            label="Restrict selection table to Demeter paths",
+        )
+        _display_cols_dem = [
+            "path_num",
+            "degen",
+            "reff",
+            "legs",
+            "rank",
+            "path_type",
+            "atoms",
+        ]
+        demeter_selector = mo.ui.table(
+            demeter_df[_display_cols_dem].reset_index(drop=True),
+            selection="multi",
+            label="Demeter paths \u2014 select rows to restrict (leave empty = use all)",
+        )
+        _panel = mo.vstack(
+            [
+                mo.md("### Demeter path filter"),
+                mo.md(
+                    f"Loaded **{len(demeter_df)} paths** from Demeter file. "
+                    "Select rows to restrict the path table below, or leave empty to use all."
+                ),
+                demeter_apply_toggle,
+                demeter_selector,
+            ]
+        )
+    _panel
+    return demeter_apply_toggle, demeter_selector
+
+
+@app.cell
+def _(
+    demeter_apply_toggle,
+    demeter_df,
+    demeter_selector,
+    filtered_path_table_df,
+    pd,
+    r_tol_box,
+):
+    """Apply Demeter filter on top of the contribution-range filter."""
+    display_path_table_df = filtered_path_table_df
+
+    if (
+        demeter_df is None
+        or demeter_apply_toggle is None
+        or not demeter_apply_toggle.value
+    ):
+        pass  # pass-through: no Demeter filter active
+    else:
+        # Use selected Demeter paths; fall back to all if nothing selected
+        sel_dem = (
+            demeter_selector.value
+            if demeter_selector is not None and len(demeter_selector.value) > 0
+            else demeter_df
+        )
+        _tol = r_tol_box.value
+
+        def _dem_match(row):
+            reff_exafs = row["Reff_EXAFS (Å)"]
+            nlegs = row["Nlegs_FEFF"]
+            if pd.isna(reff_exafs) or pd.isna(nlegs):
+                return False
+            for _, dem in sel_dem.iterrows():
+                if abs(reff_exafs - dem["reff"]) <= _tol and int(nlegs) == dem["legs"]:
+                    return True
+            return False
+
+        display_path_table_df = filtered_path_table_df[
+            filtered_path_table_df.apply(_dem_match, axis=1)
+        ]
+    return (display_path_table_df,)
+
+
+@app.cell
+def _(display_path_table_df, mo):
     path_selector = None
-    mo.stop(path_table_df is None)
+    mo.stop(display_path_table_df is None)
 
     _display_cols = [
         "Body",
@@ -1151,12 +1306,37 @@ def _(mo, path_table_df):
         "contribution_pct",
     ]
     path_selector = mo.ui.table(
-        path_table_df[_display_cols].reset_index(drop=True),
+        display_path_table_df[_display_cols],
         selection="multi",
         label="Select one or more path groups",
     )
     path_selector
     return (path_selector,)
+
+
+@app.cell
+def _(merged_path_data, mo):
+    mo.stop(merged_path_data is None)
+    contrib_range = mo.ui.range_slider(
+        start=0.0,
+        stop=100.0,
+        value=[0.0, 100.0],
+        step=0.5,
+        label="Contribution filter (% of total χ)",
+        show_value=True,
+        full_width=True,
+    )
+    mo.vstack(
+        [
+            mo.md("### Path contribution filter"),
+            mo.md(
+                "Only paths whose `contribution_pct` falls within this range "
+                "appear in the selection table."
+            ),
+            contrib_range,
+        ]
+    )
+    return (contrib_range,)
 
 
 @app.cell
@@ -1466,11 +1646,29 @@ def _(
 
 
 @app.cell
-def _(alt, atomic_numbers, jmol_colors, mo, path_table_df, pd):
+def _(mo):
+    dw_show_all = mo.ui.switch(
+        value=True,
+        label="DW plot: show all paths (off = filtered paths only)",
+    )
+    return (dw_show_all,)
+
+
+@app.cell
+def _(
+    alt,
+    atomic_numbers,
+    dw_show_all,
+    filtered_path_table_df,
+    jmol_colors,
+    mo,
+    path_table_df,
+    pd,
+):
     dw_scatter = None
     mo.stop(path_table_df is None)
 
-    _df_dw = path_table_df.copy()
+    _df_dw = (path_table_df if dw_show_all.value else filtered_path_table_df).copy()
     mo.stop(
         len(_df_dw) == 0,
         mo.callout(
@@ -1536,10 +1734,11 @@ def _(alt, atomic_numbers, jmol_colors, mo, path_table_df, pd):
 
 
 @app.cell
-def _(dw_scatter, mo, viewer):
+def _(dw_scatter, dw_show_all, mo, viewer):
+    _dw_panel = mo.vstack([dw_show_all, dw_scatter]) if dw_scatter is not None else None
     _display = (
-        mo.hstack([viewer, dw_scatter], widths=[30, 70])
-        if dw_scatter is not None
+        mo.hstack([viewer, _dw_panel], widths=[30, 70])
+        if _dw_panel is not None
         else viewer
     )
     _display
