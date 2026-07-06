@@ -221,6 +221,20 @@ def _resolve_cli_arg(cli_value, yaml_value, default):
     return default
 
 
+def _get_cli_default(cli_defaults: dict, key: str):
+    """Get a CLI default value from YAML, accepting snake_case and kebab-case.
+
+    This makes config files resilient to either style, e.g. ``reuse_potentials``
+    and ``reuse-potentials``.
+    """
+    if key in cli_defaults:
+        return cli_defaults[key]
+    kebab_key = key.replace("_", "-")
+    if kebab_key in cli_defaults:
+        return cli_defaults[kebab_key]
+    return None
+
+
 def update_config_from_cli_options(
     config: FeffConfig,
     # FEFF Input parameters
@@ -1419,30 +1433,52 @@ def run_full_pipeline(
         # Resolve CLI-only flags:
         # explicit CLI arg > yaml cli: section > hardcoded default
         _c = load_cli_defaults(config_file)
-        all_sites = _resolve_cli_arg(all_sites, _c.get("all_sites"), False)
-        all_frames = _resolve_cli_arg(all_frames, _c.get("all_frames"), False)
-        show_plot = _resolve_cli_arg(show_plot, _c.get("show"), False)
-        save_groups = _resolve_cli_arg(save_groups, _c.get("save_groups"), False)
-        plot_include = _resolve_cli_arg(plot_include, _c.get("plot_include"), "all")
-        use_hdf5 = _resolve_cli_arg(use_hdf5, _c.get("hdf5"), False)
-        keep_path_files = _resolve_cli_arg(keep_path_files, _c.get("keep_paths"), False)
-        max_paths = _resolve_cli_arg(max_paths, _c.get("max_paths"), None)
-        min_cw_ratio = _resolve_cli_arg(min_cw_ratio, _c.get("min_cw_ratio"), None)
-        ase_read_kwargs = _resolve_cli_arg(ase_read_kwargs, _c.get("ase_kwargs"), None)
-        precompute_potentials = _resolve_cli_arg(
-            precompute_potentials, _c.get("reuse_potentials"), False
+        all_sites = _resolve_cli_arg(all_sites, _get_cli_default(_c, "all_sites"), False)
+        all_frames = _resolve_cli_arg(all_frames, _get_cli_default(_c, "all_frames"), False)
+        show_plot = _resolve_cli_arg(show_plot, _get_cli_default(_c, "show"), False)
+        save_groups = _resolve_cli_arg(save_groups, _get_cli_default(_c, "save_groups"), False)
+        plot_include = _resolve_cli_arg(
+            plot_include, _get_cli_default(_c, "plot_include"), "all"
         )
-        _hdf5_file_raw = _resolve_cli_arg(hdf5_file, _c.get("hdf5_file"), None)
+        use_hdf5 = _resolve_cli_arg(use_hdf5, _get_cli_default(_c, "hdf5"), False)
+        keep_path_files = _resolve_cli_arg(
+            keep_path_files, _get_cli_default(_c, "keep_paths"), False
+        )
+        max_paths = _resolve_cli_arg(max_paths, _get_cli_default(_c, "max_paths"), None)
+        min_cw_ratio = _resolve_cli_arg(
+            min_cw_ratio, _get_cli_default(_c, "min_cw_ratio"), None
+        )
+        ase_read_kwargs = _resolve_cli_arg(
+            ase_read_kwargs, _get_cli_default(_c, "ase_kwargs"), None
+        )
+        precompute_potentials = _resolve_cli_arg(
+            precompute_potentials,
+            _get_cli_default(_c, "reuse_potentials"),
+            False,
+        )
+        _hdf5_file_raw = _resolve_cli_arg(
+            hdf5_file, _get_cli_default(_c, "hdf5_file"), None
+        )
         hdf5_file = Path(_hdf5_file_raw) if _hdf5_file_raw is not None else None
         # These overlap with FeffConfig fields; cli: section wins over hardcoded
         # default but config file field wins over cli: default.
-        parallel = _resolve_cli_arg(parallel, _c.get("parallel"), config.parallel)
+        parallel = _resolve_cli_arg(
+            parallel, _get_cli_default(_c, "parallel"), config.parallel
+        )
         cleanup = _resolve_cli_arg(
-            cleanup, _c.get("cleanup"), config.cleanup_feff_files
+            cleanup, _get_cli_default(_c, "cleanup"), config.cleanup_feff_files
         )
         force_recalculate = _resolve_cli_arg(
-            force_recalculate, _c.get("force_recalculate"), config.force_recalculate
+            force_recalculate,
+            _get_cli_default(_c, "force_recalculate"),
+            config.force_recalculate,
         )
+
+        if precompute_potentials:
+            console.print(
+                "[dim]--reuse-potentials enabled: precomputing and reusing "
+                "potentials across frames[/dim]"
+            )
 
         config = update_config_from_cli_options(
             config,
@@ -1964,6 +2000,7 @@ def debye_waller(
     from rich.table import Table
 
     from .debye_waller_core import (
+        _max_safe_mic_cutoff,
         calculate_grouped_msrd,
         compute_adp_results,
         load_trajectory,
@@ -1996,6 +2033,23 @@ def debye_waller(
         f"  [green]✓[/green] {n_frames} frames · {n_atoms} atoms · "
         f"elements: {elements_str}"
     )
+
+    # ── Validate cutoffs against the safe MIC radius for this cell ──────────
+    max_safe_cutoff = _max_safe_mic_cutoff(structures[0].get_cell().complete())
+    if max_safe_cutoff is not None:
+        for cutoff_name, cutoff_value in [
+            ("--cutoff", cutoff),
+            ("--cutoff-3body", cutoff_3body if cutoff_3body > 0 else None),
+        ]:
+            if cutoff_value is not None and cutoff_value > max_safe_cutoff:
+                console.print(
+                    f"[yellow]⚠ Warning:[/yellow] {cutoff_name}={cutoff_value:.3f} Å "
+                    f"exceeds the maximum safe MIC cutoff for this unit cell "
+                    f"([bold]{max_safe_cutoff:.3f} Å[/bold]). Distances may be "
+                    f"ambiguous because the sphere overlaps with its own periodic "
+                    f"images. Consider using a supercell or reducing {cutoff_name} "
+                    f"to ≤ {max_safe_cutoff:.3f} Å."
+                )
 
     # ── Unwrap & align ────────────────────────────────────────────────────
     with console.status(
