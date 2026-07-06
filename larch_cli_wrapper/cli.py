@@ -1433,10 +1433,16 @@ def run_full_pipeline(
         # Resolve CLI-only flags:
         # explicit CLI arg > yaml cli: section > hardcoded default
         _c = load_cli_defaults(config_file)
-        all_sites = _resolve_cli_arg(all_sites, _get_cli_default(_c, "all_sites"), False)
-        all_frames = _resolve_cli_arg(all_frames, _get_cli_default(_c, "all_frames"), False)
+        all_sites = _resolve_cli_arg(
+            all_sites, _get_cli_default(_c, "all_sites"), False
+        )
+        all_frames = _resolve_cli_arg(
+            all_frames, _get_cli_default(_c, "all_frames"), False
+        )
         show_plot = _resolve_cli_arg(show_plot, _get_cli_default(_c, "show"), False)
-        save_groups = _resolve_cli_arg(save_groups, _get_cli_default(_c, "save_groups"), False)
+        save_groups = _resolve_cli_arg(
+            save_groups, _get_cli_default(_c, "save_groups"), False
+        )
         plot_include = _resolve_cli_arg(
             plot_include, _get_cli_default(_c, "plot_include"), "all"
         )

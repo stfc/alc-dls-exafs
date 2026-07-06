@@ -215,11 +215,14 @@ def _(find_mic, logger, np):
             area_ca = float(np.linalg.norm(np.cross(cell_matrix[2], cell_matrix[0])))
             if area_ab == 0.0 or area_bc == 0.0 or area_ca == 0.0:
                 return None
-            return min(
-                volume / area_ab,
-                volume / area_bc,
-                volume / area_ca,
-            ) / 2.0
+            return (
+                min(
+                    volume / area_ab,
+                    volume / area_bc,
+                    volume / area_ca,
+                )
+                / 2.0
+            )
 
         def unwrap_positions_pbc(structures):
             """Unwrap atomic positions for continuous trajectories across PBC."""
@@ -409,11 +412,14 @@ def _(find_mic, logger, np):
             area_ca = float(np.linalg.norm(np.cross(cell_matrix[2], cell_matrix[0])))
             if area_ab == 0.0 or area_bc == 0.0 or area_ca == 0.0:
                 return None
-            return min(
-                volume / area_ab,
-                volume / area_bc,
-                volume / area_ca,
-            ) / 2.0
+            return (
+                min(
+                    volume / area_ab,
+                    volume / area_bc,
+                    volume / area_ca,
+                )
+                / 2.0
+            )
 
         def calculate_grouped_msrd(
             structures,
@@ -498,10 +504,7 @@ def _(find_mic, logger, np):
 
                 neighbor_vectors_mic = {}
                 for n_idx in neighbors:
-                    v_raw = (
-                        orig_positions[:, n_idx, :]
-                        - orig_positions[:, c_idx, :]
-                    )
+                    v_raw = orig_positions[:, n_idx, :] - orig_positions[:, c_idx, :]
                     v_mic, dists = find_mic(v_raw, cell, pbc)
                     neighbor_vectors_mic[n_idx] = (v_mic, dists)
 
@@ -535,10 +538,7 @@ def _(find_mic, logger, np):
                         n1, n2 = neighbors_3body[i], neighbors_3body[j]
                         v01_mic, d01 = neighbor_vectors_mic[n1]
                         v02_mic, d02 = neighbor_vectors_mic[n2]
-                        v12_raw = (
-                            orig_positions[:, n2, :]
-                            - orig_positions[:, n1, :]
-                        )
+                        v12_raw = orig_positions[:, n2, :] - orig_positions[:, n1, :]
                         v12_mic, d12 = find_mic(v12_raw, cell, pbc)
                         d20 = d02
                         L = d01 + d12 + d20

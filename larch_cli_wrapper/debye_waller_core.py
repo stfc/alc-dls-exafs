@@ -508,7 +508,11 @@ def calculate_grouped_msrd(
             ("cutoff", cutoff),
             ("cutoff_3body", cutoff_3body),
         ]:
-            if cutoff_value is not None and cutoff_value > 0 and cutoff_value > max_safe_cutoff:
+            if (
+                cutoff_value is not None
+                and cutoff_value > 0
+                and cutoff_value > max_safe_cutoff
+            ):
                 logger.warning(
                     "%s=%.3f Å exceeds the maximum safe MIC cutoff "
                     "for this unit cell (%.3f Å). Distances may be "

@@ -46,6 +46,7 @@ app = marimo.App(width="full", app_title="EXAFS Paths — chi + DW + Structure")
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -142,6 +143,7 @@ def _(np):
         cchi = np.exp(-2 * reff * p.imag + 1j * (2 * q * reff + pha_i))
         cchi = degen * amp_i * cchi / (q * reff**2)
         return np.asarray(cchi.imag, dtype=np.float64)
+
     return KMAX, KMIN, RMIN, compute_chi_from_params, perform_FT
 
 
@@ -209,11 +211,14 @@ def _(defaultdict, find_mic, logger, np):
         area_ca = float(np.linalg.norm(np.cross(cell_matrix[2], cell_matrix[0])))
         if area_ab == 0.0 or area_bc == 0.0 or area_ca == 0.0:
             return None
-        return min(
-            volume / area_ab,
-            volume / area_bc,
-            volume / area_ca,
-        ) / 2.0
+        return (
+            min(
+                volume / area_ab,
+                volume / area_bc,
+                volume / area_ca,
+            )
+            / 2.0
+        )
 
     def calculate_grouped_msrd(
         structures,
@@ -296,9 +301,7 @@ def _(defaultdict, find_mic, logger, np):
             # Cache MIC vectors — reused for 3-body
             neighbor_vectors_mic = {}
             for n_idx in neighbors:
-                v_raw = (
-                    orig_positions[:, n_idx, :] - orig_positions[:, c_idx, :]
-                )
+                v_raw = orig_positions[:, n_idx, :] - orig_positions[:, c_idx, :]
                 v_mic, dists = find_mic(v_raw, cell, pbc)
                 neighbor_vectors_mic[n_idx] = (v_mic, dists)
 
@@ -331,9 +334,7 @@ def _(defaultdict, find_mic, logger, np):
                     n1, n2 = neighbors_3body[_i], neighbors_3body[_j]
                     v01_mic, d01 = neighbor_vectors_mic[n1]
                     v02_mic, d02 = neighbor_vectors_mic[n2]
-                    v12_raw = (
-                        orig_positions[:, n2, :] - orig_positions[:, n1, :]
-                    )
+                    v12_raw = orig_positions[:, n2, :] - orig_positions[:, n1, :]
                     v12_mic, d12 = find_mic(v12_raw, cell, pbc)
                     L = d01 + d12 + d02
                     v1 = -v01_mic
@@ -445,6 +446,7 @@ def _(defaultdict, find_mic, logger, np):
             sorted(res_2b, key=lambda x: x["reff"]),
             sorted(res_3b, key=lambda x: x["reff"]),
         )
+
     return (
         _max_safe_mic_cutoff,
         calculate_grouped_msrd,
