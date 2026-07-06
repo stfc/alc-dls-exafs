@@ -409,6 +409,74 @@ def parse_site_specification(spec: str, symbols: list[str]) -> list[int]:
 # ---------------------------------------------------------------------------
 
 
+def _trajectory_mic_arrays(
+    structures: list[Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    positions = np.asarray([atoms.get_positions() for atoms in structures], dtype=float)
+    cells = np.asarray(
+        [np.asarray(atoms.get_cell().complete()) for atoms in structures],
+        dtype=float,
+    )
+    pbcs = np.asarray([atoms.get_pbc() for atoms in structures], dtype=bool)
+    return positions, cells, pbcs
+
+
+def _mic_search_offsets(pbc: np.ndarray) -> np.ndarray:
+    axes = [
+        np.array([-1.0, 0.0, 1.0]) if periodic else np.array([0.0]) for periodic in pbc
+    ]
+    grids = np.meshgrid(*axes, indexing="ij")
+    return np.stack([grid.ravel() for grid in grids], axis=1)
+
+
+def _mic_vectors_varying_cell(
+    vectors: np.ndarray,
+    cells: np.ndarray,
+    pbcs: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    mic_vectors = np.empty_like(vectors, dtype=float)
+    for pbc_pattern in np.unique(pbcs, axis=0):
+        mask = np.all(pbcs == pbc_pattern, axis=1)
+        if not np.any(pbc_pattern):
+            mic_vectors[mask] = vectors[mask]
+            continue
+        these_cells = cells[mask]
+        if np.any(np.abs(np.linalg.det(these_cells)) < 1e-12):
+            raise ValueError("Periodic MIC requested for a frame with a singular cell.")
+        inv_cells = np.linalg.inv(these_cells)
+        frac = np.einsum("fi,fij->fj", vectors[mask], inv_cells)
+        frac[:, pbc_pattern] -= np.round(frac[:, pbc_pattern])
+        offsets = _mic_search_offsets(pbc_pattern)
+        trial_frac = frac[:, None, :] + offsets[None, :, :]
+        trial_cart = np.einsum("fki,fij->fkj", trial_frac, these_cells)
+        norm2 = np.einsum("fki,fki->fk", trial_cart, trial_cart)
+        best = np.argmin(norm2, axis=1)
+        mic_vectors[mask] = trial_cart[np.arange(np.count_nonzero(mask)), best]
+    distances = np.linalg.norm(mic_vectors, axis=1)
+    return mic_vectors, distances
+
+
+def _mic_vectors_for_pair(
+    positions: np.ndarray,
+    cells: np.ndarray,
+    pbcs: np.ndarray,
+    i_idx: int,
+    j_idx: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    vectors = positions[:, j_idx, :] - positions[:, i_idx, :]
+    if not np.any(pbcs):
+        distances = np.linalg.norm(vectors, axis=1)
+        return vectors, distances
+    same_cell = np.allclose(cells, cells[0])
+    same_pbc = np.all(pbcs == pbcs[0])
+    if same_cell and same_pbc:
+        if np.any(pbcs[0]) and abs(float(np.linalg.det(cells[0]))) < 1e-12:
+            raise ValueError("Periodic MIC requested with a singular cell.")
+        mic_vectors, distances = find_mic(vectors, cells[0], pbcs[0])
+        return np.asarray(mic_vectors), np.asarray(distances)
+    return _mic_vectors_varying_cell(vectors, cells, pbcs)
+
+
 def calculate_grouped_msrd(
     structures: list[Any],
     unwrapped_positions: np.ndarray,
@@ -420,56 +488,25 @@ def calculate_grouped_msrd(
     cutoff_3body: float | None = None,
     exclude_hydrogen: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Calculate grouped MSRD for 2-body and 3-body EXAFS paths.
-
-    Args:
-        structures: List of ASE ``Atoms`` objects.
-        unwrapped_positions: Processed positions, shape ``(n_frames, n_atoms, 3)``.
-        central_indices: Zero-based indices of the absorber atoms.
-        central_label: Human-readable label for the absorber (used in logging).
-        cutoff: Neighbor cutoff radius in Å.
-        tol_dist: Distance grouping tolerance in Å.
-        tol_angle: Angle grouping tolerance in degrees.
-        cutoff_3body: Maximum absorber-to-neighbor distance (Å) for atoms
-            included as legs in 3-body paths.  This is a *neighbor* cutoff,
-            not an Reff cutoff — it limits how far each individual leg
-            (absorber → scatterer) can be, not the total path length.
-            ``0`` or ``None`` disables 3-body path computation entirely.
-        exclude_hydrogen: When ``True`` (default), hydrogen atoms are excluded
-            from the neighbor search and will not appear as scatterers in any
-            MSRD path.
-
-    Returns:
-        Tuple ``(res_2b, res_3b)`` where each element is a list of dicts
-        sorted by ``"reff"``.  Each 2-body dict has keys ``"type"``,
-        ``"reff"``, ``"sigma2"``, ``"count"``, ``"atom_indices"``.
-        3-body dicts add ``"angle"``.
-    """
+    """Calculate grouped MSRD for 2-body and 3-body EXAFS paths."""
     if not central_indices:
         return [], []
-
     symbols = structures[0].get_chemical_symbols()
     central_element = symbols[central_indices[0]]
     reference_atoms = structures[0].copy()
-    cell = structures[0].get_cell()
-    pbc = structures[0].get_pbc()
-
-    # Build the set of atom indices eligible as neighbors
+    positions, cells, pbcs = _trajectory_mic_arrays(structures)
     if exclude_hydrogen:
         neighbor_candidates = {i for i, sym in enumerate(symbols) if sym != "H"}
         logger.info("Hydrogen excluded from neighbor search.")
     else:
         neighbor_candidates = set(range(len(symbols)))
-
     pair_list: list[dict[str, Any]] = []
     triplet_list: list[dict[str, Any]] = []
-
     logger.info(
         "Analysing MSRD paths for %s (%d sites)...",
         central_label,
         len(central_indices),
     )
-
     for c_idx in central_indices:
         all_indices = [
             i for i in range(len(symbols)) if i != c_idx and i in neighbor_candidates
@@ -481,17 +518,17 @@ def calculate_grouped_msrd(
         logger.info(
             "  %d neighbors within %.2f Å of atom %d", len(neighbors), cutoff, c_idx
         )
-
-        # Pre-compute MIC vectors for all neighbors
         neighbor_vectors_mic: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         for n_idx in neighbors:
-            v_raw = unwrapped_positions[:, n_idx, :] - unwrapped_positions[:, c_idx, :]
-            v_mic, dists = find_mic(v_raw, cell, pbc)
-            neighbor_vectors_mic[n_idx] = (v_mic, dists)
-
-        # ── 2-body paths ──────────────────────────────────────────────────
+            neighbor_vectors_mic[n_idx] = _mic_vectors_for_pair(
+                positions,
+                cells,
+                pbcs,
+                c_idx,
+                n_idx,
+            )
         for n_idx in neighbors:
-            v_mic, dists = neighbor_vectors_mic[n_idx]
+            _v_mic, dists = neighbor_vectors_mic[n_idx]
             pair_list.append(
                 {
                     "element": symbols[n_idx],
@@ -502,8 +539,6 @@ def calculate_grouped_msrd(
                     "n_idx": n_idx,
                 }
             )
-
-        # ── 3-body paths ──────────────────────────────────────────────────
         if cutoff_3body == 0 or cutoff_3body is None:
             continue
         neighbors_3body = (
@@ -515,17 +550,13 @@ def calculate_grouped_msrd(
             if cutoff_3body < cutoff
             else neighbors
         )
-
         for i in range(len(neighbors_3body)):
             for j in range(i + 1, len(neighbors_3body)):
                 n1, n2 = neighbors_3body[i], neighbors_3body[j]
                 v01_mic, d01 = neighbor_vectors_mic[n1]
-                v02_mic, d02 = neighbor_vectors_mic[n2]
-                v12_raw = unwrapped_positions[:, n2, :] - unwrapped_positions[:, n1, :]
-                v12_mic, d12 = find_mic(v12_raw, cell, pbc)
-                d20 = d02
-                L = d01 + d12 + d20
-
+                _v02_mic, d02 = neighbor_vectors_mic[n2]
+                v12_mic, d12 = _mic_vectors_for_pair(positions, cells, pbcs, n1, n2)
+                reff_series = (d01 + d12 + d02) / 2.0
                 v1 = -v01_mic
                 v2 = v12_mic
                 v1_norm = np.linalg.norm(v1, axis=1, keepdims=True)
@@ -534,8 +565,6 @@ def calculate_grouped_msrd(
                 v2_unit = v2 / np.maximum(v2_norm, 1e-10)
                 cos_t = np.clip(np.sum(v1_unit * v2_unit, axis=1), -1, 1)
                 angles_deg = np.degrees(np.arccos(cos_t))
-
-                reff_series = L / 2.0
                 elem_pair = tuple(sorted([symbols[n1], symbols[n2]]))
                 triplet_list.append(
                     {
@@ -548,22 +577,17 @@ def calculate_grouped_msrd(
                         "n2_idx": n2,
                     }
                 )
-
-    # ── Cluster 2-body paths ──────────────────────────────────────────────
     pairs_by_element: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     for path in pair_list:
         pairs_by_element[path["element"]].append(path)
-
     res_2b: list[dict[str, Any]] = []
     for _element, paths in pairs_by_element.items():
         paths.sort(key=lambda x: x["mean_d"])
         clusters: list[list[dict[str, Any]]] = []
         current: list[dict[str, Any]] = [paths[0]]
         for path in paths[1:]:
-            if (
-                abs(path["mean_d"] - float(np.mean([p["mean_d"] for p in current])))
-                <= tol_dist
-            ):
+            current_mean = float(np.mean([p["mean_d"] for p in current]))
+            if abs(path["mean_d"] - current_mean) <= tol_dist:
                 current.append(path)
             else:
                 clusters.append(current)
@@ -580,39 +604,31 @@ def calculate_grouped_msrd(
                     "atom_indices": [(p["c_idx"], p["n_idx"]) for p in cluster],
                 }
             )
-
-    # ── Cluster 3-body paths ──────────────────────────────────────────────
     triplets_by_elements: defaultdict[tuple[str, ...], list[dict[str, Any]]] = (
         defaultdict(list)
     )
     for path in triplet_list:
         triplets_by_elements[path["elements"]].append(path)
-
     res_3b: list[dict[str, Any]] = []
     for elem_pair, paths in triplets_by_elements.items():
         paths.sort(key=lambda x: x["angle"])
         angle_clusters: list[list[dict[str, Any]]] = []
         current = [paths[0]]
         for path in paths[1:]:
-            if (
-                abs(path["angle"] - float(np.mean([p["angle"] for p in current])))
-                <= tol_angle
-            ):
+            current_angle = float(np.mean([p["angle"] for p in current]))
+            if abs(path["angle"] - current_angle) <= tol_angle:
                 current.append(path)
             else:
                 angle_clusters.append(current)
                 current = [path]
         angle_clusters.append(current)
-
         for angle_cluster in angle_clusters:
             angle_cluster.sort(key=lambda x: x["mean_L"])
             dist_clusters: list[list[dict[str, Any]]] = []
             current = [angle_cluster[0]]
             for path in angle_cluster[1:]:
-                if (
-                    abs(path["mean_L"] - float(np.mean([p["mean_L"] for p in current])))
-                    <= tol_dist
-                ):
+                current_reff = float(np.mean([p["mean_L"] for p in current]))
+                if abs(path["mean_L"] - current_reff) <= tol_dist:
                     current.append(path)
                 else:
                     dist_clusters.append(current)
@@ -622,7 +638,7 @@ def calculate_grouped_msrd(
                 all_reffs = np.concatenate([p["reff_series"] for p in cluster])
                 res_3b.append(
                     {
-                        "type": (f"{central_element}-{elem_pair[0]}-{elem_pair[1]}"),
+                        "type": f"{central_element}-{elem_pair[0]}-{elem_pair[1]}",
                         "reff": float(np.mean(all_reffs)),
                         "sigma2": float(np.var(all_reffs, ddof=1)),
                         "angle": float(np.mean([p["angle"] for p in cluster])),
@@ -632,7 +648,6 @@ def calculate_grouped_msrd(
                         ],
                     }
                 )
-
     return (
         sorted(res_2b, key=lambda x: x["reff"]),
         sorted(res_3b, key=lambda x: x["reff"]),
