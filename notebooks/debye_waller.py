@@ -231,9 +231,7 @@ def _(find_mic, logger, np):
             n_atoms = len(structures[0])
             unwrapped = np.zeros((n_frames, n_atoms, 3))
 
-            ref_atoms = structures[0].copy()
-            ref_atoms.center()
-            unwrapped[0] = ref_atoms.get_positions()
+            unwrapped[0] = structures[0].get_positions()
 
             for i in range(1, n_frames):
                 if i % 500 == 0:
@@ -244,11 +242,12 @@ def _(find_mic, logger, np):
                     unwrapped[i] = atoms.get_positions()
                     continue
                 cell_matrix = cell.complete()
+                pbc = atoms.get_pbc()
                 inv_cell = np.linalg.inv(cell_matrix)
-                frac_current = atoms.get_scaled_positions()
-                frac_previous = unwrapped[i - 1] @ inv_cell.T
+                frac_current = atoms.get_positions() @ inv_cell
+                frac_previous = unwrapped[i - 1] @ inv_cell
                 frac_disp = frac_current - frac_previous
-                frac_disp -= np.round(frac_disp)
+                frac_disp[:, pbc] -= np.round(frac_disp[:, pbc])
                 unwrapped[i] = unwrapped[i - 1] + (frac_disp @ cell_matrix)
 
             return unwrapped
@@ -271,10 +270,10 @@ def _(find_mic, logger, np):
                 pos_c = pos - com
                 H = pos_c.T @ ref_pos_centered
                 U, _S, Vt = np.linalg.svd(H)
-                R = Vt.T @ U.T
+                R = U @ Vt
                 if np.linalg.det(R) < 0:
-                    Vt[-1, :] *= -1
-                    R = Vt.T @ U.T
+                    U[:, -1] *= -1
+                    R = U @ Vt
                 aligned[i] = (pos_c @ R) + ref_com
             return aligned
 
@@ -889,16 +888,23 @@ def _(
 
 
 @app.cell
-def _(Atoms, results, structures):
-    """Build the trajectory-averaged ASE Atoms object."""
+def _(Atoms, structures):
+    """Build the Atoms object shown for path visualisation.
+
+    The *time-averaged* crystal structure is meaningless here: atoms drift
+    across cell boundaries and exchange sites (this trajectory stores
+    unwrapped coordinates, with ~70% of atoms outside the stored cell), so the
+    arithmetic mean of per-atom Cartesian positions lands between lattice
+    sites and collapses to a smeared blob. MSRD paths are enumerated in the
+    frame-0 geometry (``enumerate_path_instances(structures[0], ...)``), so
+    the path viewer uses a **wrapped frame-0 snapshot** — the reference frame
+    the atom indices refer to. B-factors / ADPs / CIF output still come from
+    the aligned unwrapped trajectory via ``results``.
+    """
     avg_atoms = None
-    if results is not None:
-        avg_atoms = Atoms(
-            symbols=results["atom_names"],
-            positions=results["avg_positions"],
-            cell=results["avg_cell"],
-            pbc=structures[0].get_pbc(),
-        )
+    if structures is not None:
+        avg_atoms = structures[0].copy()
+        avg_atoms.wrap()  # pull periodic images back into the unit cell
     return (avg_atoms,)
 
 
@@ -1134,7 +1140,6 @@ def _(
                 with mo.status.spinner("Computing MSRD paths…"):
                     _res2b, _res3b = calculate_grouped_msrd(
                         structures,
-                        unwrapped,
                         _indices,
                         _spec,
                         cutoff=cutoff.value,

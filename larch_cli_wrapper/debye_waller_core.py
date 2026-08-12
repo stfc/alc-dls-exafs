@@ -139,8 +139,8 @@ def unwrap_positions_pbc(structures: list[Any]) -> np.ndarray:
         # small, so the choice of cell for the reference point only affects
         # the wrap decision, not the accumulated position).
         inv_cell = np.linalg.inv(cell_matrix)
-        frac_current = atoms.get_scaled_positions()
-        frac_previous = unwrapped[i - 1] @ inv_cell.T
+        frac_current = atoms.get_positions() @ inv_cell
+        frac_previous = unwrapped[i - 1] @ inv_cell
         frac_disp = frac_current - frac_previous
         # Only wrap along periodic directions; wrapping a non-periodic
         # direction (e.g. the vacuum axis of a slab) would corrupt positions.
