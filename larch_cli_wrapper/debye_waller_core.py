@@ -409,6 +409,47 @@ def parse_site_specification(spec: str, symbols: list[str]) -> list[int]:
 # ---------------------------------------------------------------------------
 
 
+def _max_safe_mic_cutoff(cell: np.ndarray) -> float | None:
+    """Return the largest sphere radius that fits inside a parallelepiped cell.
+
+    For the minimum image convention to be unambiguous, the cutoff must be
+    smaller than half the smallest perpendicular distance between two opposite
+    faces of the simulation box.  This function computes that value for an
+    arbitrary (non-orthogonal) cell.
+
+    Args:
+        cell: Unit cell matrix, shape ``(3, 3)`` (rows are lattice vectors).
+
+    Returns:
+        Maximum safe cutoff radius in Å, or ``None`` if the cell has zero
+        volume or is not periodic (no MIC constraint).
+    """
+    # Ensure we have a complete 3x3 cell matrix
+    cell_matrix = np.asarray(cell)
+    if cell_matrix.shape != (3, 3):
+        return None
+
+    volume = float(np.abs(np.linalg.det(cell_matrix)))
+    if volume <= 0.0:
+        return None
+
+    # Areas of the three faces (parallelograms)
+    area_ab = float(np.linalg.norm(np.cross(cell_matrix[0], cell_matrix[1])))
+    area_bc = float(np.linalg.norm(np.cross(cell_matrix[1], cell_matrix[2])))
+    area_ca = float(np.linalg.norm(np.cross(cell_matrix[2], cell_matrix[0])))
+
+    if area_ab == 0.0 or area_bc == 0.0 or area_ca == 0.0:
+        return None
+
+    # Perpendicular distances between opposite faces
+    dist_ab = volume / area_ab
+    dist_bc = volume / area_bc
+    dist_ca = volume / area_ca
+
+    # The largest inscribed sphere has radius half the smallest face distance
+    return min(dist_ab, dist_bc, dist_ca) / 2.0
+
+
 def calculate_grouped_msrd(
     structures: list[Any],
     unwrapped_positions: np.ndarray,
@@ -448,11 +489,42 @@ def calculate_grouped_msrd(
     if not central_indices:
         return [], []
 
+    # Extract original, unaligned positions. We must use these instead of the
+    # aligned unwrapped_positions because alignment rotates the frames, making
+    # them inconsistent with the static unrotated unit cell matrix used by find_mic.
+    orig_positions = np.array([atoms.get_positions() for atoms in structures])
+
     symbols = structures[0].get_chemical_symbols()
     central_element = symbols[central_indices[0]]
     reference_atoms = structures[0].copy()
     cell = structures[0].get_cell()
     pbc = structures[0].get_pbc()
+
+    # Warn if the requested cutoffs exceed the maximum safe MIC radius for this
+    # (possibly non-orthogonal) cell.
+    max_safe_cutoff = _max_safe_mic_cutoff(cell.complete())
+    if max_safe_cutoff is not None:
+        for cutoff_name, cutoff_value in [
+            ("cutoff", cutoff),
+            ("cutoff_3body", cutoff_3body),
+        ]:
+            if (
+                cutoff_value is not None
+                and cutoff_value > 0
+                and cutoff_value > max_safe_cutoff
+            ):
+                logger.warning(
+                    "%s=%.3f Å exceeds the maximum safe MIC cutoff "
+                    "for this unit cell (%.3f Å). Distances may be "
+                    "ambiguous because the sphere overlaps with its "
+                    "own periodic images. Consider using a supercell or "
+                    "reducing %s to <= %.3f Å.",
+                    cutoff_name,
+                    cutoff_value,
+                    max_safe_cutoff,
+                    cutoff_name,
+                    max_safe_cutoff,
+                )
 
     # Build the set of atom indices eligible as neighbors
     if exclude_hydrogen:
@@ -485,7 +557,7 @@ def calculate_grouped_msrd(
         # Pre-compute MIC vectors for all neighbors
         neighbor_vectors_mic: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         for n_idx in neighbors:
-            v_raw = unwrapped_positions[:, n_idx, :] - unwrapped_positions[:, c_idx, :]
+            v_raw = orig_positions[:, n_idx, :] - orig_positions[:, c_idx, :]
             v_mic, dists = find_mic(v_raw, cell, pbc)
             neighbor_vectors_mic[n_idx] = (v_mic, dists)
 
@@ -521,7 +593,7 @@ def calculate_grouped_msrd(
                 n1, n2 = neighbors_3body[i], neighbors_3body[j]
                 v01_mic, d01 = neighbor_vectors_mic[n1]
                 v02_mic, d02 = neighbor_vectors_mic[n2]
-                v12_raw = unwrapped_positions[:, n2, :] - unwrapped_positions[:, n1, :]
+                v12_raw = orig_positions[:, n2, :] - orig_positions[:, n1, :]
                 v12_mic, d12 = find_mic(v12_raw, cell, pbc)
                 d20 = d02
                 L = d01 + d12 + d20

@@ -187,6 +187,7 @@ def _(find_mic, logger, np):
 
     try:
         from larch_cli_wrapper.debye_waller_core import (
+            _max_safe_mic_cutoff,
             calculate_grouped_msrd,
             compute_adp_results,
             kabsch_align,
@@ -200,6 +201,28 @@ def _(find_mic, logger, np):
         # so that this notebook works in WASM / sandbox mode without the local
         # package on sys.path.
         # ---------------------------------------------------------------------------
+
+        def _max_safe_mic_cutoff(cell):
+            """Return the largest sphere radius that fits inside a parallelepiped cell."""
+            cell_matrix = np.asarray(cell)
+            if cell_matrix.shape != (3, 3):
+                return None
+            volume = float(np.abs(np.linalg.det(cell_matrix)))
+            if volume <= 0.0:
+                return None
+            area_ab = float(np.linalg.norm(np.cross(cell_matrix[0], cell_matrix[1])))
+            area_bc = float(np.linalg.norm(np.cross(cell_matrix[1], cell_matrix[2])))
+            area_ca = float(np.linalg.norm(np.cross(cell_matrix[2], cell_matrix[0])))
+            if area_ab == 0.0 or area_bc == 0.0 or area_ca == 0.0:
+                return None
+            return (
+                min(
+                    volume / area_ab,
+                    volume / area_bc,
+                    volume / area_ca,
+                )
+                / 2.0
+            )
 
         def unwrap_positions_pbc(structures):
             """Unwrap atomic positions for continuous trajectories across PBC."""
@@ -376,6 +399,28 @@ def _(find_mic, logger, np):
                 raise ValueError(f"No atoms of element '{spec}' found")
             return matching
 
+        def _max_safe_mic_cutoff(cell):
+            """Return the largest sphere radius that fits inside a parallelepiped cell."""
+            cell_matrix = np.asarray(cell)
+            if cell_matrix.shape != (3, 3):
+                return None
+            volume = float(np.abs(np.linalg.det(cell_matrix)))
+            if volume <= 0.0:
+                return None
+            area_ab = float(np.linalg.norm(np.cross(cell_matrix[0], cell_matrix[1])))
+            area_bc = float(np.linalg.norm(np.cross(cell_matrix[1], cell_matrix[2])))
+            area_ca = float(np.linalg.norm(np.cross(cell_matrix[2], cell_matrix[0])))
+            if area_ab == 0.0 or area_bc == 0.0 or area_ca == 0.0:
+                return None
+            return (
+                min(
+                    volume / area_ab,
+                    volume / area_bc,
+                    volume / area_ca,
+                )
+                / 2.0
+            )
+
         def calculate_grouped_msrd(
             structures,
             unwrapped_positions,
@@ -391,11 +436,37 @@ def _(find_mic, logger, np):
             if not central_indices:
                 return [], []
 
+            orig_positions = np.array([atoms.get_positions() for atoms in structures])
+
             symbols = structures[0].get_chemical_symbols()
             central_element = symbols[central_indices[0]]
             reference_atoms = structures[0].copy()
             cell = structures[0].get_cell()
             pbc = structures[0].get_pbc()
+
+            max_safe_cutoff = _max_safe_mic_cutoff(cell.complete())
+            if max_safe_cutoff is not None:
+                for cutoff_name, cutoff_value in [
+                    ("cutoff", cutoff),
+                    ("cutoff_3body", cutoff_3body),
+                ]:
+                    if (
+                        cutoff_value is not None
+                        and cutoff_value > 0
+                        and cutoff_value > max_safe_cutoff
+                    ):
+                        logger.warning(
+                            "%s=%.3f Å exceeds the maximum safe MIC cutoff "
+                            "for this unit cell (%.3f Å). Distances may be "
+                            "ambiguous because the sphere overlaps with its "
+                            "own periodic images. Consider using a supercell or "
+                            "reducing %s to <= %.3f Å.",
+                            cutoff_name,
+                            cutoff_value,
+                            max_safe_cutoff,
+                            cutoff_name,
+                            max_safe_cutoff,
+                        )
 
             if exclude_hydrogen:
                 neighbor_candidates = {i for i, sym in enumerate(symbols) if sym != "H"}
@@ -433,10 +504,7 @@ def _(find_mic, logger, np):
 
                 neighbor_vectors_mic = {}
                 for n_idx in neighbors:
-                    v_raw = (
-                        unwrapped_positions[:, n_idx, :]
-                        - unwrapped_positions[:, c_idx, :]
-                    )
+                    v_raw = orig_positions[:, n_idx, :] - orig_positions[:, c_idx, :]
                     v_mic, dists = find_mic(v_raw, cell, pbc)
                     neighbor_vectors_mic[n_idx] = (v_mic, dists)
 
@@ -470,10 +538,7 @@ def _(find_mic, logger, np):
                         n1, n2 = neighbors_3body[i], neighbors_3body[j]
                         v01_mic, d01 = neighbor_vectors_mic[n1]
                         v02_mic, d02 = neighbor_vectors_mic[n2]
-                        v12_raw = (
-                            unwrapped_positions[:, n2, :]
-                            - unwrapped_positions[:, n1, :]
-                        )
+                        v12_raw = orig_positions[:, n2, :] - orig_positions[:, n1, :]
                         v12_mic, d12 = find_mic(v12_raw, cell, pbc)
                         d20 = d02
                         L = d01 + d12 + d20
@@ -599,6 +664,7 @@ def _(find_mic, logger, np):
             )
 
     return (
+        _max_safe_mic_cutoff,
         calculate_grouped_msrd,
         compute_adp_results,
         kabsch_align,
@@ -1003,6 +1069,7 @@ def _(mo):
 
 @app.cell
 def _(
+    _max_safe_mic_cutoff,
     calculate_grouped_msrd,
     cutoff,
     cutoff_3body,
@@ -1044,6 +1111,25 @@ def _(
 
             if _indices is not None:
                 _c3b = cutoff_3body.value if cutoff_3body.value != 0 else 0
+
+                # Check whether the chosen cutoffs exceed the safe MIC radius
+                _warnings = []
+                _max_safe = _max_safe_mic_cutoff(structures[0].get_cell().complete())
+                if _max_safe is not None:
+                    if cutoff.value > _max_safe:
+                        _warnings.append(
+                            f"**cutoff** = {cutoff.value:.3f} Å exceeds the "
+                            f"maximum safe MIC cutoff **{_max_safe:.3f} Å**. "
+                            f"Distances may be ambiguous; reduce cutoff to ≤ {_max_safe:.3f} Å "
+                            f"or use a supercell."
+                        )
+                    if _c3b > 0 and _c3b > _max_safe:
+                        _warnings.append(
+                            f"**cutoff_3body** = {_c3b:.3f} Å exceeds the "
+                            f"maximum safe MIC cutoff **{_max_safe:.3f} Å**. "
+                            f"Angles/path lengths may be ambiguous; reduce cutoff_3body to "
+                            f"≤ {_max_safe:.3f} Å or use a supercell."
+                        )
 
                 with mo.status.spinner("Computing MSRD paths…"):
                     _res2b, _res3b = calculate_grouped_msrd(
@@ -1119,6 +1205,12 @@ def _(
                             f"**{len(_res2b)} two-body** and "
                             f"**{len(_res3b)} three-body** paths found"
                         ),
+                        mo.callout(
+                            mo.md("\n\n".join(_warnings)),
+                            kind="warn",
+                        )
+                        if _warnings
+                        else mo.md(""),
                         mo.md("### 2-Body Paths"),
                         mo.ui.table(_rows2b)
                         if _rows2b
