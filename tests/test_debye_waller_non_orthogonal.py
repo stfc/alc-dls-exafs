@@ -2,10 +2,7 @@ import numpy as np
 import pytest
 from ase import Atoms
 
-from larch_cli_wrapper.debye_waller_core import (
-    calculate_grouped_msrd,
-    process_trajectory,
-)
+from larch_cli_wrapper.debye_waller_core import calculate_grouped_msrd
 
 
 def test_msrd_non_orthogonal_cell():
@@ -61,14 +58,9 @@ def test_msrd_non_orthogonal_cell():
         angle = np.degrees(np.arccos(np.clip(cos_t, -1.0, 1.0)))
         ref_angles.append(angle)
 
-    # Calculate processed (unwrapped & aligned) positions
-    # (By default align=True, which does Kabsch alignment and rotates coordinates)
-    unwrapped = process_trajectory(structures, align=True)
-
     # Run the calculate_grouped_msrd function
     res_2b, res_3b = calculate_grouped_msrd(
         structures=structures,
-        unwrapped_positions=unwrapped,
         central_indices=[0],
         central_label="Mn.1",
         cutoff=4.0,
@@ -94,6 +86,11 @@ def test_msrd_non_orthogonal_cell():
     print("EXPECTED 3-BODY ANGLE:", expected_angle_3b)
 
     np.testing.assert_allclose(calc_angle_3b, expected_angle_3b, rtol=1e-5)
+
+    # A single atom-triplet contributes to this cluster, so the pooling
+    # spread (variance across the per-triplet mean angles pooled into the
+    # shell) is exactly zero.
+    assert res_3b[0]["angle_var"] == 0.0
 
 
 def test_max_safe_mic_cutoff_orthorhombic():
@@ -160,13 +157,11 @@ def test_msrd_warns_on_cutoff_exceeding_safe_radius(caplog):
         "Mn2", positions=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], cell=cell, pbc=True
     )
     structures = [atoms, atoms]
-    unwrapped = np.array([atoms.get_positions() for atoms in structures])
 
     # Use a cutoff larger than the safe MIC radius
     with caplog.at_level("WARNING", logger="larch_cli_wrapper.debye_waller_core"):
         calculate_grouped_msrd(
             structures=structures,
-            unwrapped_positions=unwrapped,
             central_indices=[0],
             central_label="Mn.1",
             cutoff=1.5,
@@ -188,12 +183,10 @@ def test_msrd_no_warning_for_safe_cutoff(caplog):
         "Mn2", positions=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], cell=cell, pbc=True
     )
     structures = [atoms, atoms]
-    unwrapped = np.array([atoms.get_positions() for atoms in structures])
 
     with caplog.at_level("WARNING", logger="larch_cli_wrapper.debye_waller_core"):
         calculate_grouped_msrd(
             structures=structures,
-            unwrapped_positions=unwrapped,
             central_indices=[0],
             central_label="Mn.1",
             cutoff=1.5,
@@ -230,11 +223,8 @@ def test_msrd_uses_ase_consistent_mic_for_nonorthogonal_cell():
         ),
     ]
 
-    dummy_processed_positions = np.zeros((len(frames), len(frames[0]), 3))
-
     res_2b, res_3b = calculate_grouped_msrd(
         frames,
-        dummy_processed_positions,
         central_indices=[0],
         central_label="Mn",
         cutoff=1.0,

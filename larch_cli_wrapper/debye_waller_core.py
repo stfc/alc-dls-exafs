@@ -120,9 +120,7 @@ def unwrap_positions_pbc(structures: list[Any]) -> np.ndarray:
     n_atoms = len(structures[0])
     unwrapped = np.zeros((n_frames, n_atoms, 3))
 
-    ref_atoms = structures[0].copy()
-    ref_atoms.center()
-    unwrapped[0] = ref_atoms.get_positions()
+    unwrapped[0] = structures[0].get_positions()
 
     for i in range(1, n_frames):
         if i % 500 == 0:
@@ -133,11 +131,18 @@ def unwrap_positions_pbc(structures: list[Any]) -> np.ndarray:
             unwrapped[i] = atoms.get_positions()
             continue
         cell_matrix = cell.complete()
+        pbc = atoms.get_pbc()
+        # Convert the previous unwrapped position to fractional coordinates
+        # using the *current* frame's cell (the displacement between frames is
+        # small, so the choice of cell for the reference point only affects
+        # the wrap decision, not the accumulated position).
         inv_cell = np.linalg.inv(cell_matrix)
         frac_current = atoms.get_scaled_positions()
         frac_previous = unwrapped[i - 1] @ inv_cell.T
         frac_disp = frac_current - frac_previous
-        frac_disp -= np.round(frac_disp)
+        # Only wrap along periodic directions; wrapping a non-periodic
+        # direction (e.g. the vacuum axis of a slab) would corrupt positions.
+        frac_disp[:, pbc] -= np.round(frac_disp[:, pbc])
         unwrapped[i] = unwrapped[i - 1] + (frac_disp @ cell_matrix)
 
     return unwrapped
@@ -175,10 +180,10 @@ def kabsch_align(
         pos_c = pos - com
         H = pos_c.T @ ref_pos_centered
         U, _S, Vt = np.linalg.svd(H)
-        R = Vt.T @ U.T
+        R = U @ Vt
         if np.linalg.det(R) < 0:
-            Vt[-1, :] *= -1
-            R = Vt.T @ U.T
+            U[:, -1] *= -1
+            R = U @ Vt
         aligned[i] = (pos_c @ R) + ref_com
     return aligned
 
