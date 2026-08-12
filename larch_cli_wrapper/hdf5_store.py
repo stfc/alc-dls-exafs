@@ -429,7 +429,16 @@ class ExafsHDF5Store:
     # ------------------------------------------------------------------
 
     def iter_path_contributions(self) -> Iterator[tuple[str, dict, int, int]]:
-        """Iterate over all stored path contributions."""
+        """Iterate over all stored path contributions.
+
+        The large 2-D arrays (``chi``/``amp``/``pha``/``lam``/``rep``) are read
+        in **chunk-aligned blocks** rather than one row at a time.  The datasets
+        are gzip-compressed with a chunk of 1024 rows (~2.4 MB), which is larger
+        than h5py's default 1 MB chunk cache; a naive ``dataset[i]`` per row
+        therefore re-decompresses the whole enclosing chunk on every access
+        (up to 1024× redundant work per chunk, per array).  Reading a full
+        block at once decompresses each chunk exactly once.
+        """
         from .exafs_data import make_path_key
 
         path_res = self._h5.get("path_results")
@@ -443,51 +452,88 @@ class ExafsHDF5Store:
 
         frame_indices = np.array(path_res["frame_index"])
         site_indices = np.array(path_res["site_index"])
-        _path_indices = np.array(path_res["path_index"])
         r_effs = np.array(path_res["r_eff"])
         nlegs_arr = np.array(path_res["nlegs"])
         degeneracies = np.array(path_res["degeneracy"])
+        # Bulk-read the string dataset once ([:]) then decode. Iterating the
+        # h5py dataset directly (``for s in path_res["scatterer"]``) reads one
+        # element per iteration, which dominates the aggregation cost.
         scatterers = [
             s.decode("utf-8") if isinstance(s, bytes) else s
-            for s in path_res["scatterer"]
+            for s in path_res["scatterer"][:]
         ]
         cw_ratios = np.array(path_res["cw_ratio"])
+        angles = np.array(path_res["angle"]) if "angle" in path_res else None
 
-        chis = path_res["chi"]
-        amps = path_res.get("amp")
-        phas = path_res.get("pha")
-        lams = path_res.get("lam")
-        reps = path_res.get("rep")
+        chi_ds = path_res["chi"]
+        amp_ds = path_res.get("amp")
+        pha_ds = path_res.get("pha")
+        lam_ds = path_res.get("lam")
+        rep_ds = path_res.get("rep")
 
-        for i in range(len(frame_indices)):
-            frame_index = int(frame_indices[i])
-            site_index = int(site_indices[i])
-            r_eff = float(r_effs[i])
-            nlegs = int(nlegs_arr[i])
-            scatterer = scatterers[i]
-            path_key = make_path_key(scatterer, nlegs, r_eff)
+        n = len(frame_indices)
+        # Read whole chunks at a time (chunks[0] rows), so each compressed
+        # chunk is decompressed exactly once instead of once per row.
+        block = chi_ds.chunks[0] if chi_ds.chunks else 1024
 
-            info = {
-                "k": pk,
-                "chi": np.array(chis[i]),
-                "r_eff": r_eff,
-                "nlegs": nlegs,
-                "degeneracy": float(degeneracies[i]),
-                "scatterer": scatterer,
-                "cw_ratio": float(cw_ratios[i]),
-            }
-            if amps is not None:
-                info["amp"] = np.array(amps[i])
-            if phas is not None:
-                info["pha"] = np.array(phas[i])
-            if lams is not None:
-                info["lam"] = np.array(lams[i])
-            if reps is not None:
-                info["rep"] = np.array(reps[i])
-            if pk_param is not None:
-                info["k_param"] = pk_param
+        for start in range(0, n, block):
+            end = min(start + block, n)
+            chi_blk = chi_ds[start:end]
+            amp_blk = amp_ds[start:end] if amp_ds is not None else None
+            pha_blk = pha_ds[start:end] if pha_ds is not None else None
+            lam_blk = lam_ds[start:end] if lam_ds is not None else None
+            rep_blk = rep_ds[start:end] if rep_ds is not None else None
 
-            yield path_key, info, frame_index, site_index
+            for j in range(end - start):
+                i = start + j
+                frame_index = int(frame_indices[i])
+                site_index = int(site_indices[i])
+                r_eff = float(r_effs[i])
+                nlegs = int(nlegs_arr[i])
+                scatterer = scatterers[i]
+                path_key = make_path_key(scatterer, nlegs, r_eff)
+
+                info = {
+                    "k": pk,
+                    "chi": chi_blk[j],
+                    "r_eff": r_eff,
+                    "nlegs": nlegs,
+                    "degeneracy": float(degeneracies[i]),
+                    "scatterer": scatterer,
+                    "cw_ratio": float(cw_ratios[i]),
+                    # NaN sentinel (used for HDF5 storage, which has no native
+                    # "missing" for float datasets) is converted back to None
+                    # here so all in-memory/dict representations of "no angle"
+                    # (2-/4-leg paths, or angle extraction failures) agree.
+                    "angle": (
+                        float(angles[i])
+                        if angles is not None and np.isfinite(angles[i])
+                        else None
+                    ),
+                    # Provenance included directly so callers need not copy the
+                    # dict just to attach these.
+                    "frame_index": frame_index,
+                    "site_index": site_index,
+                }
+                if amp_blk is not None:
+                    info["amp"] = amp_blk[j]
+                if pha_blk is not None:
+                    info["pha"] = pha_blk[j]
+                if lam_blk is not None:
+                    info["lam"] = lam_blk[j]
+                if rep_blk is not None:
+                    info["rep"] = rep_blk[j]
+                if pk_param is not None:
+                    info["k_param"] = pk_param
+
+                yield path_key, info, frame_index, site_index
+
+    def count_path_contributions(self) -> int:
+        """Return the number of stored per-path contributions (path rows)."""
+        path_res = self._h5.get("path_results")
+        if path_res is None or "frame_index" not in path_res:
+            return 0
+        return int(path_res["frame_index"].shape[0])
 
     # ------------------------------------------------------------------
     # Reading – aggregates
@@ -840,6 +886,14 @@ class ExafsHDF5Store:
                         chunks=(4096,),
                         **_COMPRESS,
                     )
+                    grp_paths.create_dataset(
+                        "angle",
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=np.float64,
+                        chunks=(4096,),
+                        **_COMPRESS,
+                    )
 
                 unique_keys = {
                     (res["frame_index"], res["site_index"]) for res in results_list
@@ -911,6 +965,7 @@ class ExafsHDF5Store:
                     "degeneracy",
                     "scatterer",
                     "cw_ratio",
+                    "angle",
                 ):
                     grp_paths[k_attr].resize((new_paths_size,))
 
@@ -925,6 +980,8 @@ class ExafsHDF5Store:
                 p_degeneracies = np.zeros(n_new_paths, dtype=np.float64)
                 p_scatterers = []
                 p_cw_ratios = np.zeros(n_new_paths, dtype=np.float64)
+                # NaN sentinel: only 3-leg paths carry a meaningful angle.
+                p_angles = np.full(n_new_paths, np.nan, dtype=np.float64)
 
                 has_params = "amp" in grp_paths
                 if has_params:
@@ -951,6 +1008,9 @@ class ExafsHDF5Store:
                     p_degeneracies[j] = pc["degeneracy"]
                     p_scatterers.append(pc["scatterer"])
                     p_cw_ratios[j] = pc["cw_ratio"]
+                    _angle = pc.get("angle")
+                    if _angle is not None:
+                        p_angles[j] = _angle
 
                     if has_params:
                         p_amps[j] = pc["amp"]
@@ -967,6 +1027,7 @@ class ExafsHDF5Store:
                 grp_paths["degeneracy"][n_existing_paths:] = p_degeneracies
                 grp_paths["scatterer"][n_existing_paths:] = np.array(p_scatterers)
                 grp_paths["cw_ratio"][n_existing_paths:] = p_cw_ratios
+                grp_paths["angle"][n_existing_paths:] = p_angles
 
                 if has_params:
                     grp_paths["amp"][n_existing_paths:] = p_amps
@@ -1241,12 +1302,46 @@ def _read_path_contributions_from_dir(
             damp = np.exp(-2.0 * reff / np.clip(_lam, 1e-6, None))
             chi = prefactor * damp * np.sin(2.0 * k * reff + _pha)
 
-            # Scatterer label from geometry (geom[0] is absorber, geom[1:] scatterers)
+            # Scatterer label from geometry (geom[0] is absorber, geom[1:] scatterers).
+            # Sorted so that e.g. an N-C and a C-N leg ordering (which can differ
+            # frame-to-frame purely due to how FEFF's path finder lists the atoms)
+            # are always canonicalized to the same label instead of silently
+            # fragmenting one physical path into two pooled populations.
             if len(fd.geom) >= 2:
-                scatterers = [atom[0] for atom in fd.geom[1:]]
+                scatterers = sorted(atom[0] for atom in fd.geom[1:])
                 scatterer = "-".join(scatterers)
             else:
                 scatterer = "?"
+
+            # For 3-leg (triangular / double-scattering) paths, compute the
+            # internal geometric angle at the scatterer vertex with the
+            # *shorter absorber leg* (the "anchored" convention used for MD
+            # paths in ``debye_waller_core.group_path_instances``
+            # (``internal_angle_deg``; the FEFF scattering angle is
+            # beta = 180 - internal angle). Anchoring on the shorter leg is
+            # reversal-invariant (A->n1->n2->A and A->n2->n1->A give the same
+            # value), so pooled per-frame angles are not corrupted by FEFF
+            # listing the two orientations in different orders across frames.
+            angle: float | None = None
+            if nleg == 3 and len(fd.geom) >= 3:
+                try:
+                    c_pos = np.array([float(x) for x in fd.geom[0][4:7]])
+                    n1_pos = np.array([float(x) for x in fd.geom[1][4:7]])
+                    n2_pos = np.array([float(x) for x in fd.geom[2][4:7]])
+                    d1 = float(np.linalg.norm(n1_pos - c_pos))
+                    d2 = float(np.linalg.norm(n2_pos - c_pos))
+                    apex, other = (n1_pos, n2_pos) if d1 <= d2 else (n2_pos, n1_pos)
+                    v1 = c_pos - apex
+                    v2 = other - apex
+                    n1_norm = np.linalg.norm(v1)
+                    n2_norm = np.linalg.norm(v2)
+                    if n1_norm > 1e-10 and n2_norm > 1e-10:
+                        cos_t = np.clip(np.dot(v1, v2) / (n1_norm * n2_norm), -1.0, 1.0)
+                        angle = float(np.degrees(np.arccos(cos_t)))
+                except (ValueError, IndexError) as exc:  # noqa: BLE001
+                    logger.debug(
+                        "Could not compute 3-body angle for %s: %s", path_file, exc
+                    )
 
             path_index = int(path_file.stem.removeprefix("feff").lstrip("0") or "0")
 
@@ -1268,6 +1363,7 @@ def _read_path_contributions_from_dir(
                     "degeneracy": deg,
                     "scatterer": scatterer,
                     "cw_ratio": cw_ratio,
+                    "angle": angle,
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -1489,6 +1585,12 @@ class AveragedPathsStore:
                     p_grp.attrs["cw_ratio"] = float(pc.cw_ratio)
                     if hasattr(pc, "contribution_pct"):
                         p_grp.attrs["contribution_pct"] = float(pc.contribution_pct)
+                    if getattr(pc, "angle", None) is not None:
+                        p_grp.attrs["angle"] = float(pc.angle)
+                    # Pooling-quality spread diagnostics (Å / degrees).
+                    p_grp.attrs["r_eff_std"] = float(getattr(pc, "r_eff_std", 0.0))
+                    if getattr(pc, "angle_std", None) is not None:
+                        p_grp.attrs["angle_std"] = float(pc.angle_std)
 
     def close(self) -> None:
         """Flush and close the HDF5 file."""
