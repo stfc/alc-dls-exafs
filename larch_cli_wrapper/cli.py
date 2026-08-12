@@ -1595,6 +1595,9 @@ def run_full_pipeline(
 
         with create_progress() as progress:
             feff_task_id = progress.add_task("FEFF calculations...", total=None)
+            read_task_id = progress.add_task(
+                "Reading path files...", total=None, visible=False
+            )
             hdf5_task_id = progress.add_task(
                 "Averaging paths & writing HDF5...", total=None, visible=False
             )
@@ -1608,14 +1611,44 @@ def run_full_pipeline(
                     description=f"FEFF calculations: {completed}/{total}",
                 )
 
-            def hdf5_progress_callback(completed: int, total: int):
-                """Update progress bar with HDF5 writing progress."""
+            read_shown = False
+            hdf5_shown = False
+
+            def path_read_progress_callback(completed: int, total: int):
+                """Update progress bar for reading per-path feffNNNN.dat files."""
+                nonlocal read_shown
+                read_shown = True
+                progress.update(
+                    read_task_id,
+                    visible=True,
+                    completed=completed,
+                    total=total,
+                    description=f"Reading path files: {completed}/{total} dirs",
+                )
+
+            def hdf5_progress_callback(
+                completed: int, total: int, phase: str | None = None
+            ):
+                """Update progress bar for averaging & writing HDF5 paths.
+
+                ``phase`` distinguishes the aggregation pass (reading every
+                stored path row back and bucketing it) from the finalize/write
+                pass, so the bar's units are unambiguous.
+                """
+                nonlocal hdf5_shown
+                hdf5_shown = True
+                if phase == "aggregating":
+                    label = f"Averaging paths (aggregating): {completed}/{total}"
+                elif phase == "writing":
+                    label = f"Averaging paths (writing): {completed}/{total} groups"
+                else:
+                    label = f"Averaging paths & writing HDF5: {completed}/{total}"
                 progress.update(
                     hdf5_task_id,
                     visible=True,
                     completed=completed,
                     total=total,
-                    description=f"Averaging paths & writing HDF5: {completed}/{total}",
+                    description=label,
                 )
 
             # Trajectory processing
@@ -1627,6 +1660,7 @@ def run_full_pipeline(
                     parallel=parallel,
                     progress_callback=progress_callback,
                     hdf5_progress_callback=hdf5_progress_callback,
+                    path_read_progress_callback=path_read_progress_callback,
                     precompute_potentials=precompute_potentials,
                     precompute_potentials_structure=precompute_potentials_structure,
                 )
@@ -1637,10 +1671,17 @@ def run_full_pipeline(
                 feff_task_id,
                 description="[green]✓ FEFF calculations complete![/green]",
             )
-            progress.update(
-                hdf5_task_id,
-                description="[green]✓ Averaging paths & writing HDF5 complete![/green]",
-            )
+            if read_shown:
+                progress.update(
+                    read_task_id,
+                    description="[green]✓ Path files read![/green]",
+                )
+            if hdf5_shown:
+                progress.update(
+                    hdf5_task_id,
+                    description="[green]✓ Averaging paths"
+                    " & writing HDF5 complete![/green]",
+                )
 
         console.print("\n[bold green]✓ Pipeline completed successfully![/bold green]")
         console.print(f"  Output directory: {output_dir}")
@@ -1676,12 +1717,10 @@ def run_full_pipeline(
                     for (
                         path_key,
                         info,
-                        frame_idx,
-                        site_idx,
+                        _frame_idx,
+                        _site_idx,
                     ) in store.iter_path_contributions():
-                        info = dict(info)
-                        info["frame_index"] = frame_idx
-                        info["site_index"] = site_idx
+                        # info already carries frame_index/site_index
                         agg.add({path_key: info})
                     path_contributions = agg.finalize(config.fourier_params)
                     store.close()
@@ -1972,9 +2011,10 @@ def debye_waller(
         0.0,
         "--cutoff-3body",
         help=(
-            "Maximum absorber-to-neighbor distance (Å) used to select legs for "
-            "3-body paths. This is a neighbor distance cutoff, not an Reff cutoff — "
-            "it limits each individual leg length, not the total path length. "
+            "Maximum effective path length Reff (half total path length, Å) "
+            "for 3-body paths — comparable to FEFF's path-length cutoff "
+            "(FEFF cuts on total path length = 2×Reff). Triangles whose "
+            "half-perimeter exceeds this are excluded. "
             "Set to 0 to skip 3-body paths entirely."
         ),
     ),
@@ -2133,7 +2173,6 @@ def debye_waller(
     with console.status("[bold]Computing MSRD paths…"):
         res_2b, res_3b = calculate_grouped_msrd(
             structures,
-            unwrapped,
             central_indices,
             site,
             cutoff=cutoff,
@@ -2150,8 +2189,9 @@ def debye_waller(
             ("Path type", "left"),
             ("Reff (Å)", "right"),
             ("σ² (Å²)", "right"),
+            ("σ² thermal (Å²)", "right"),
             ("Count", "right"),
-            ("Degeneracy", "right"),
+            ("MD mult. est.", "right"),
         ]:
             t2.add_column(col, justify=just)
         for r in res_2b:
@@ -2159,6 +2199,7 @@ def debye_waller(
                 r["type"],
                 f"{r['reff']:.4f}",
                 f"{r['sigma2']:.6f}",
+                f"{r['sigma2_thermal_A2']:.6f}",
                 str(r["count"]),
                 f"{r['count'] / len(central_indices):.1f}",
             )
@@ -2170,9 +2211,11 @@ def debye_waller(
             ("Path type", "left"),
             ("Reff (Å)", "right"),
             ("σ² (Å²)", "right"),
+            ("σ² thermal (Å²)", "right"),
             ("Angle (°)", "right"),
+            ("FEFF β (°)", "right"),
             ("Count", "right"),
-            ("Degeneracy", "right"),
+            ("MD mult. est.", "right"),
         ]:
             t3.add_column(col, justify=just)
         for r in res_3b:
@@ -2180,7 +2223,9 @@ def debye_waller(
                 r["type"],
                 f"{r['reff']:.4f}",
                 f"{r['sigma2']:.6f}",
-                f"{r['angle']:.1f}",
+                f"{r['sigma2_thermal_A2']:.6f}",
+                f"{r['internal_angle_deg']:.1f}",
+                f"{r['feff_beta_deg']:.1f}",
                 str(r["count"]),
                 f"{2 * r['count'] / len(central_indices):.1f}",
             )

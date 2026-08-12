@@ -7,6 +7,7 @@ This module implements a clean separation of concerns:
 """
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import copy2
@@ -356,12 +357,105 @@ class FeffExecutor:
 
         save_to_cache(cache_key, chi, k, self.cache_dir)
 
+    def _resolve_path_workers(self, n_dirs: int) -> int:
+        """Mirror the FEFF worker count for parallel path parsing.
+
+        Uses ``self.max_workers`` when set (the same value passed to the FEFF
+        calculations), otherwise falls back to the identical default formula
+        used by ``feff_utils._run_parallel``: ``min(n, cpu//2, 4)``.
+        """
+        if self.max_workers is not None:
+            n_workers = self.max_workers
+        else:
+            cpu_count = os.cpu_count() or 4
+            n_workers = min(n_dirs, max(1, cpu_count // 2), 4)
+        return max(1, min(n_workers, n_dirs))
+
+    def _parse_paths_parallel(
+        self,
+        dirs: list[tuple[str, Path]],
+        parallel: bool,
+        progress_callback: callable = None,
+    ) -> dict[str, list]:
+        """Parse feffNNNN.dat path files across directories.
+
+        Reading path contributions relies on larch's ``FeffDatFile`` text
+        parsing, which is CPU/GIL-bound, so this is offloaded to a
+        ``ProcessPoolExecutor``.  The returned path-contribution dicts contain
+        only numpy arrays and scalars, so they pickle cleanly across processes.
+        HDF5 writing remains serial in the caller.
+
+        Args:
+            dirs: ``[(task_id, feff_dir), ...]`` for successful calculations.
+            parallel: Whether parallel execution is enabled for this batch.
+            progress_callback: Optional callback ``(completed, total)`` invoked
+                as each directory's path files finish parsing.
+
+        Returns:
+            ``{task_id: [path_contribution_dict, ...]}``.
+        """
+        from .hdf5_store import _read_path_contributions_from_dir
+
+        max_paths = self.hdf5_store.max_paths
+
+        if not dirs:
+            return {}
+
+        total = len(dirs)
+        if progress_callback:
+            progress_callback(0, total)
+
+        def _serial() -> dict[str, list]:
+            out: dict[str, list] = {}
+            for done, (task_id, feff_dir) in enumerate(dirs, start=1):
+                out[task_id] = _read_path_contributions_from_dir(
+                    feff_dir, max_paths=max_paths
+                )
+                if progress_callback:
+                    progress_callback(done, total)
+            return out
+
+        n_workers = self._resolve_path_workers(total)
+        if not parallel or n_workers <= 1 or total == 1:
+            return _serial()
+
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        self.logger.info(
+            f"Reading path contributions from {total} directories "
+            f"using {n_workers} worker processes"
+        )
+        results: dict[str, list] = {}
+        try:
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                future_to_task = {
+                    executor.submit(
+                        _read_path_contributions_from_dir, feff_dir, max_paths
+                    ): task_id
+                    for task_id, feff_dir in dirs
+                }
+                done = 0
+                for future in as_completed(future_to_task):
+                    task_id = future_to_task[future]
+                    results[task_id] = future.result()
+                    done += 1
+                    if progress_callback:
+                        progress_callback(done, total)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                f"Parallel path parsing failed ({type(exc).__name__}: {exc}); "
+                "falling back to serial reading."
+            )
+            return _serial()
+        return results
+
     def execute_batch(
         self,
         batch: FeffBatch,
         parallel: bool = True,
         progress_callback: callable = None,
         hdf5_progress_callback: callable = None,
+        path_read_progress_callback: callable = None,
     ) -> dict[str, bool]:
         """Execute all FEFF calculations in a batch with caching support.
 
@@ -371,6 +465,9 @@ class FeffExecutor:
             progress_callback: Optional callback function called with (completed, total)
             hdf5_progress_callback: Optional callback called with (completed, total)
                 when writing HDF5 results.
+            path_read_progress_callback: Optional callback called with
+                (completed, total) as per-path feffNNNN.dat files are read from
+                each calculation directory.
 
         Returns:
             Dict mapping task_id to success status
@@ -595,6 +692,28 @@ class FeffExecutor:
             # Process results and update cache
             pending_hdf5_writes: list[dict] = []
 
+            # Pre-parse per-path feffNNNN.dat files in parallel processes.
+            # This parsing (larch FeffDatFile) is the bottleneck and is
+            # GIL-bound, so it is offloaded to a process pool here; the HDF5
+            # write below stays serial in the main thread.
+            parsed_paths: dict[str, list] = {}
+            store_paths = bool(self.hdf5_store and self.hdf5_store.store_paths)
+            if store_paths:
+                from .feff_utils import get_feff_numbered_files
+
+                dirs_to_parse = [
+                    (task.task_id, feff_dir)
+                    for (task, _cache_key), (feff_dir, success) in zip(
+                        tasks_to_run, results, strict=False
+                    )
+                    if success
+                ]
+                parsed_paths = self._parse_paths_parallel(
+                    dirs_to_parse,
+                    parallel,
+                    progress_callback=path_read_progress_callback,
+                )
+
             for (task, cache_key), (feff_dir, success) in zip(
                 tasks_to_run, results, strict=False
             ):
@@ -609,19 +728,13 @@ class FeffExecutor:
 
                         if self.hdf5_store:
                             path_contributions: list | None = None
-                            if self.hdf5_store.store_paths:
-                                from .feff_utils import get_feff_numbered_files
-                                from .hdf5_store import (
-                                    _read_path_contributions_from_dir,
-                                    recompute_path_chi_on_grid,
-                                )
+                            if store_paths:
+                                from .hdf5_store import recompute_path_chi_on_grid
 
                                 n_feff_files = len(get_feff_numbered_files(feff_dir))
                                 path_contributions = [
                                     recompute_path_chi_on_grid(pc, k)
-                                    for pc in _read_path_contributions_from_dir(
-                                        feff_dir, max_paths=self.hdf5_store.max_paths
-                                    )
+                                    for pc in parsed_paths.get(task.task_id, [])
                                 ]
                                 if n_feff_files > 0 and not path_contributions:
                                     self.logger.warning(
@@ -922,6 +1035,7 @@ class PipelineProcessor:
         parallel: bool = True,
         progress_callback: callable = None,
         hdf5_progress_callback: callable = None,
+        path_read_progress_callback: callable = None,
         precompute_potentials: bool = False,
         precompute_potentials_structure: Atoms = None,
         # site_weights: list[float] | None = None, # Not implemented yet
@@ -936,6 +1050,8 @@ class PipelineProcessor:
             parallel: Whether to use parallel execution
             progress_callback: Optional callback function
             hdf5_progress_callback: Optional callback function for HDF5 path writes
+            path_read_progress_callback: Optional callback for reading per-path
+                feffNNNN.dat files (completed, total directories)
             precompute_potentials: Whether to precompute potentials once and reuse
             precompute_potentials_structure: Structure to use for
                                              precompute (defaults to average)
@@ -961,6 +1077,7 @@ class PipelineProcessor:
             hdf5_progress_callback=hdf5_progress_callback
             if not self._hdf5_store or not self._hdf5_store.store_paths
             else None,
+            path_read_progress_callback=path_read_progress_callback,
         )
 
         # Stage C: Process results
@@ -1022,31 +1139,35 @@ class PipelineProcessor:
         hdf5_progress_callback: callable = None,
     ) -> None:
         """Compute MD-averaged path contributions and write to a second HDF5 file."""
-        from .exafs_data import PathAggregator
+        from .exafs_data import aggregate_store_paths
         from .hdf5_store import AveragedPathsStore
 
         if self._hdf5_store is None or self.hdf5_path is None:
             return
 
         avg_path = self.hdf5_path.with_name(self.hdf5_path.stem + "_averaged_paths.h5")
+
+        # Count successful spectra for correct weighting, then close the writer
+        # handle *before* aggregating: the streaming aggregator opens the same
+        # results file read-only from multiple worker processes, which conflicts
+        # with an open ``'a'``-mode writer handle (HDF5 file locking / same-file
+        # re-open).  Nothing writes to this store again after this point.
+        n_total_overall = sum(1 for _ in self._hdf5_store.iter_site_results())
+        self._hdf5_store.close()
+
         store = AveragedPathsStore(avg_path, source_h5_path=self.hdf5_path)
 
-        overall_agg = PathAggregator()
-        site_aggs: dict[int, PathAggregator] = {}
-
-        for (
-            path_key,
-            info,
-            frame_idx,
-            site_idx,
-        ) in self._hdf5_store.iter_path_contributions():
-            info = dict(info)
-            info["frame_index"] = frame_idx
-            info["site_index"] = site_idx
-            overall_agg.add({path_key: info})
-            if site_idx not in site_aggs:
-                site_aggs[site_idx] = PathAggregator()
-            site_aggs[site_idx].add({path_key: info})
+        # Phase 1: aggregate all stored path contributions.  This reads every
+        # path row back from HDF5, clusters into physical path populations and
+        # averages them, using a vectorized, process-parallel streaming
+        # aggregator (see :func:`aggregate_store_paths`) that is dramatically
+        # faster than per-row Python accumulation for large trajectories.
+        overall_paths_all, per_site_paths = aggregate_store_paths(
+            self.hdf5_path,
+            fourier_params,
+            max_workers=self.feff_executor.max_workers,
+            progress_callback=hdf5_progress_callback,
+        )
 
         def _add_contribution_pct(contribs, total_group, n_total) -> None:
             if not contribs or n_total <= 0:
@@ -1060,16 +1181,14 @@ class PipelineProcessor:
                         np.trapezoid(np.abs(pc.chi * weight), pc.k) / total_norm * 100
                     )
 
-        # Count successful spectra for correct weighting
-        n_total_overall = sum(1 for _ in self._hdf5_store.iter_site_results())
-
+        # Phase 2: finalize (cluster) and write the averaged paths per group.
         total_steps = len(site_averages) + (1 if overall_average is not None else 0)
         current_step = 0
         if hdf5_progress_callback:
-            hdf5_progress_callback(current_step, total_steps)
+            hdf5_progress_callback(current_step, total_steps, "writing")
 
         if overall_average is not None:
-            overall_paths = overall_agg.finalize(fourier_params)
+            overall_paths = overall_paths_all
             _add_contribution_pct(overall_paths, overall_average, n_total_overall)
             store.write_average(
                 "overall_average",
@@ -1079,14 +1198,10 @@ class PipelineProcessor:
             )
             current_step += 1
             if hdf5_progress_callback:
-                hdf5_progress_callback(current_step, total_steps)
+                hdf5_progress_callback(current_step, total_steps, "writing")
 
         for site_idx, site_group in site_averages.items():
-            site_paths = (
-                site_aggs[site_idx].finalize(fourier_params)
-                if site_idx in site_aggs
-                else {}
-            )
+            site_paths = per_site_paths.get(site_idx, {})
             n_total_site = (
                 max((pc.n_samples for pc in site_paths.values()), default=1)
                 if site_paths
@@ -1098,7 +1213,7 @@ class PipelineProcessor:
             )
             current_step += 1
             if hdf5_progress_callback:
-                hdf5_progress_callback(current_step, total_steps)
+                hdf5_progress_callback(current_step, total_steps, "writing")
 
         store.close()
         self.logger.info(f"Wrote averaged paths store: {avg_path}")
