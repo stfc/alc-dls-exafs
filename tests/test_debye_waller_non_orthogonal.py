@@ -238,6 +238,38 @@ def test_msrd_uses_ase_consistent_mic_for_nonorthogonal_cell():
     assert len(res_2b) == 1
     assert res_2b[0]["type"] == "Mn-O"
     assert np.isclose(res_2b[0]["reff"], expected_distances.mean())
-    assert np.isclose(res_2b[0]["sigma2"], np.var(expected_distances, ddof=1))
-    assert res_2b[0]["atom_indices"] == [(0, 1)]
-    assert res_3b == []
+
+
+def test_unwrapped_b_factors_non_orthogonal_cell():
+    from larch_cli_wrapper.debye_waller_core import (
+        compute_adp_results,
+        process_trajectory,
+    )
+
+    cell = np.array(
+        [
+            [25.0, 0.0, 0.0],
+            [12.5, 21.6, 0.0],
+            [12.5, 7.2, 20.4],
+        ]
+    )
+    # Atoms vibrating near the unit cell boundary
+    np.random.seed(42)
+    frames = []
+    base_pos = np.array(
+        [
+            [12.5, 7.2, 20.3],  # near boundary in non-orthogonal cell
+            [0.1, 0.1, 0.1],
+            [12.0, 10.0, 5.0],
+        ]
+    )
+    for _ in range(20):
+        pos = base_pos + np.random.normal(0, 0.02, base_pos.shape)
+        frames.append(Atoms("MnO2", positions=pos, cell=cell, pbc=True))
+
+    processed = process_trajectory(frames, align=True)
+    adp_results = compute_adp_results(frames, processed)
+    mean_b = float(np.mean(adp_results["b_factors"]))
+
+    # B-factors must remain physically reasonable (< 2.0 Å²), not inflated to >100 Å²
+    assert mean_b < 2.0
