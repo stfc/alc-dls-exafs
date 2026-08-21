@@ -167,3 +167,5 @@ test_outputs/*
 
 # Marimo files
 notebooks/__marimo__
+
+.serena/

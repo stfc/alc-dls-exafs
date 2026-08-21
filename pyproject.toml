@@ -22,6 +22,7 @@ keywords = ["xafs", "exafs", "spectroscopy", "larch", "feff", "materials-science
 dependencies = [
     "ase<4.0,>=3.25",
     "numpy<3.0.0,>=1.26.4",
+    "scipy>=1.11",
     "xraylarch>=0.9.47",
     "typer<1.0.0,>=0.17.3",
     "rich<14.0.0,>=13.9.1",
@@ -166,6 +167,10 @@ omit = [
     "*/tests/*",
     "*/test_*",
     "*/conftest.py",
+    # Thin/UI-only modules with no meaningful logic to unit test:
+    "*/larch_cli_wrapper/marimo_utils.py",
+    "*/larch_cli_wrapper/__main__.py",
+    "*/larch_cli_wrapper/styles/*",
 ]
 
 [tool.coverage.report]

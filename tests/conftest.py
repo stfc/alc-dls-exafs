@@ -1,9 +1,98 @@
 """Test configuration and fixtures for CLI test suite."""
 
+import shutil
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
+
+# ---------------------------------------------------------------------------
+# Real-FEFF integration support
+# ---------------------------------------------------------------------------
+# ``feff8l`` ships with xraylarch (a hard dependency), so it is normally on the
+# PATH both locally and in CI.  Guard anyway so the suite degrades gracefully.
+FEFF_FIXTURE_DIR = Path(__file__).parent
+HAS_FEFF8L = shutil.which("feff8l") is not None
+requires_feff8l = pytest.mark.skipif(
+    not HAS_FEFF8L, reason="feff8l executable not found on PATH"
+)
+
+
+def write_valid_chi_dat(
+    feff_dir: Path,
+    k: np.ndarray | None = None,
+    chi: np.ndarray | None = None,
+) -> Path:
+    """Write a FEFF-style ``chi.dat`` that ``read_feff_output`` can parse.
+
+    The column-label line ends with ``@#`` so larch's ``read_ascii`` picks up
+    the ``k``/``chi`` column names.
+    """
+    feff_dir = Path(feff_dir)
+    feff_dir.mkdir(parents=True, exist_ok=True)
+    if k is None:
+        k = np.linspace(0.0, 15.0, 120)
+    if chi is None:
+        chi = np.sin(k) * np.exp(-k / 10.0)
+    mag = np.abs(chi)
+    phase = np.zeros_like(k)
+    data = np.column_stack([k, chi, mag, phase])
+    chi_file = feff_dir / "chi.dat"
+    np.savetxt(
+        chi_file,
+        data,
+        header="       k          chi          mag           phase @#",
+        fmt="%.8e",
+    )
+    return chi_file
+
+
+def write_fake_feff_outputs(feff_dir: Path) -> None:
+    """Populate *feff_dir* with realistic FEFF outputs (no FEFF binary needed).
+
+    Writes a parseable ``chi.dat`` plus a real ``feff0001.dat`` path file and
+    ``files.dat`` copied from the committed fixtures, so the downstream path
+    parsing / HDF5 storage / aggregation code runs for real.
+    """
+    feff_dir = Path(feff_dir)
+    feff_dir.mkdir(parents=True, exist_ok=True)
+    write_valid_chi_dat(feff_dir)
+    shutil.copy(FEFF_FIXTURE_DIR / "feff0001.dat", feff_dir / "feff0001.dat")
+    shutil.copy(FEFF_FIXTURE_DIR / "files.dat", feff_dir / "files.dat")
+
+
+@pytest.fixture
+def fake_feff():
+    """Drop-in replacement for ``run_multi_site_feff_calculations``.
+
+    Instead of invoking FEFF, it writes realistic outputs into each task
+    directory and returns ``[(feff_dir, True), ...]`` in input order, honouring
+    the ``progress_callback`` contract.  Patch it over
+    ``larch_cli_wrapper.pipeline.run_multi_site_feff_calculations``.
+    """
+
+    def _run(
+        input_files,
+        cleanup: bool = True,
+        parallel: bool = True,
+        max_workers=None,
+        progress_callback=None,
+        timeout: int = 600,
+        max_retries: int = 2,
+        require_chi: bool = True,
+    ):
+        results = []
+        total = len(input_files)
+        for i, inp in enumerate(input_files, start=1):
+            feff_dir = Path(inp).parent
+            write_fake_feff_outputs(feff_dir)
+            results.append((feff_dir, True))
+            if progress_callback:
+                progress_callback(i, total)
+        return results
+
+    return _run
 
 
 @pytest.fixture
