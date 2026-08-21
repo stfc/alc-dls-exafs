@@ -1310,13 +1310,47 @@ def run_full_pipeline(
             "Maximum number of path contributions to display (ranked by peak |chi(R)|)."
         ),
     ),
+    stream_chunk_size: int | None = typer.Option(
+        None,
+        "--stream-chunk-size",
+        help=(
+            "Number of FEFF calculation directories to run before their "
+            "per-path feff####.dat files are read, written to HDF5, and "
+            "deleted. Bounds peak on-disk usage to ~one chunk of directories "
+            "(critical for large trajectories). Use 0 to process everything in "
+            "a single chunk (legacy behaviour). Default: 256."
+        ),
+    ),
+    potential_link_mode: str | None = typer.Option(
+        None,
+        "--potential-link-mode",
+        help=(
+            "How precomputed potentials are placed into each frame directory "
+            "when --reuse-potentials is used: 'copy' (default, safest), "
+            "'hardlink', or 'symlink'. Linking is near-instant and uses no "
+            "extra disk (potentials are read-only during path runs), so it is "
+            "much faster for large trajectories."
+        ),
+    ),
+    store_path_params: bool | None = typer.Option(
+        None,
+        "--store-path-params/--no-store-path-params",
+        help=(
+            "Persist raw per-path FEFF parameters (amp/pha/lam/rep) in the "
+            "results HDF5. Off by default: they roughly double the path table "
+            "but have no effect on the averaged output (only needed to re-grid "
+            "individual path chi(k) later, e.g. in the paths-explorer notebook)."
+        ),
+    ),
     min_cw_ratio: float | None = typer.Option(
         None,
         "--min-cw-ratio",
         help=(
-            "Minimum curved-wave amplitude ratio (0-100) relative to the strongest"
-            " path. Paths below this threshold are excluded from the plot."
-            " E.g. 5.0 keeps paths with >=5% of the peak amplitude."
+            "Minimum curved-wave amplitude ratio (0-100) relative to the "
+            "strongest path in each calculation. Paths below this threshold are "
+            "not stored in the HDF5 (shrinking it several-fold) and are excluded "
+            "from path plots. E.g. 5.0 keeps paths with >=5% of the peak "
+            "amplitude. The total averaged EXAFS spectrum is unaffected."
         ),
     ),
     cache_dir: Path | None = typer.Option(
@@ -1454,6 +1488,10 @@ def run_full_pipeline(
         min_cw_ratio = _resolve_cli_arg(
             min_cw_ratio, _get_cli_default(_c, "min_cw_ratio"), None
         )
+        # A single knob: --min-cw-ratio prunes weak paths at write time (which
+        # also excludes them from path plots) and does not affect the total
+        # averaged spectrum.
+        config.store_min_cw_ratio = min_cw_ratio
         ase_read_kwargs = _resolve_cli_arg(
             ase_read_kwargs, _get_cli_default(_c, "ase_kwargs"), None
         )
@@ -1579,6 +1617,37 @@ def run_full_pipeline(
         config.keep_path_files = keep_path_files
         config.max_paths = max_paths_cli
 
+        stream_chunk_size = _resolve_cli_arg(
+            stream_chunk_size,
+            _get_cli_default(_c, "stream_chunk_size"),
+            config.stream_chunk_size,
+        )
+        if stream_chunk_size is not None:
+            config.stream_chunk_size = stream_chunk_size
+
+        potential_link_mode = _resolve_cli_arg(
+            potential_link_mode,
+            _get_cli_default(_c, "potential_link_mode"),
+            config.potential_link_mode,
+        )
+        if potential_link_mode is not None:
+            valid_modes = {"copy", "hardlink", "symlink"}
+            if potential_link_mode not in valid_modes:
+                console.print(
+                    f"[red]Error: --potential-link-mode must be one of "
+                    f"{sorted(valid_modes)}, got '{potential_link_mode}'[/red]"
+                )
+                raise typer.Exit(1)
+            config.potential_link_mode = potential_link_mode
+
+        store_path_params = _resolve_cli_arg(
+            store_path_params,
+            _get_cli_default(_c, "store_path_params"),
+            config.store_path_params,
+        )
+        if store_path_params is not None:
+            config.store_path_params = store_path_params
+
         # Determine HDF5 output path
         effective_hdf5_path: Path | None = None
         if use_hdf5:
@@ -1594,6 +1663,15 @@ def run_full_pipeline(
         )
 
         with create_progress() as progress:
+            input_task_id = progress.add_task(
+                "Generating FEFF inputs...", total=None, visible=False
+            )
+            copy_task_id = progress.add_task(
+                "Distributing potentials...", total=None, visible=False
+            )
+            chunk_task_id = progress.add_task(
+                "Streaming chunks...", total=None, visible=False
+            )
             feff_task_id = progress.add_task("FEFF calculations...", total=None)
             read_task_id = progress.add_task(
                 "Reading path files...", total=None, visible=False
@@ -1601,6 +1679,49 @@ def run_full_pipeline(
             hdf5_task_id = progress.add_task(
                 "Averaging paths & writing HDF5...", total=None, visible=False
             )
+
+            chunk_shown = False
+            input_shown = False
+            copy_shown = False
+
+            def input_progress_callback(completed: int, total: int):
+                """Show FEFF input-file generation progress (Stage A)."""
+                nonlocal input_shown
+                input_shown = True
+                progress.update(
+                    input_task_id,
+                    visible=True,
+                    completed=completed,
+                    total=total,
+                    description=f"Generating FEFF inputs: {completed}/{total} frames",
+                )
+
+            def copy_progress_callback(completed: int, total: int):
+                """Show precomputed-potential distribution progress."""
+                nonlocal copy_shown
+                copy_shown = True
+                progress.update(
+                    copy_task_id,
+                    visible=True,
+                    completed=completed,
+                    total=total,
+                    description=f"Distributing potentials: {completed}/{total} files",
+                )
+
+            def chunk_progress_callback(chunk_index: int, n_chunks: int):
+                """Show which disk-bounded streaming chunk is running."""
+                nonlocal chunk_shown
+                chunk_shown = True
+                progress.update(
+                    chunk_task_id,
+                    visible=True,
+                    completed=chunk_index,
+                    total=n_chunks,
+                    description=(
+                        f"Streaming chunk {chunk_index}/{n_chunks} "
+                        "(run \u2192 read \u2192 write \u2192 delete)"
+                    ),
+                )
 
             def progress_callback(completed: int, total: int):
                 """Update progress bar with FEFF calculation progress."""
@@ -1661,16 +1782,34 @@ def run_full_pipeline(
                     progress_callback=progress_callback,
                     hdf5_progress_callback=hdf5_progress_callback,
                     path_read_progress_callback=path_read_progress_callback,
+                    chunk_progress_callback=chunk_progress_callback,
+                    copy_progress_callback=copy_progress_callback,
+                    input_progress_callback=input_progress_callback,
                     precompute_potentials=precompute_potentials,
                     precompute_potentials_structure=precompute_potentials_structure,
                 )
             )
 
             # Mark as complete
+            if input_shown:
+                progress.update(
+                    input_task_id,
+                    description="[green]✓ FEFF inputs generated![/green]",
+                )
+            if copy_shown:
+                progress.update(
+                    copy_task_id,
+                    description="[green]✓ Potentials distributed![/green]",
+                )
             progress.update(
                 feff_task_id,
                 description="[green]✓ FEFF calculations complete![/green]",
             )
+            if chunk_shown:
+                progress.update(
+                    chunk_task_id,
+                    description="[green]✓ Streaming chunks complete![/green]",
+                )
             if read_shown:
                 progress.update(
                     read_task_id,
