@@ -155,6 +155,7 @@ class InputGenerator:
         output_dir: Path,
         precompute_potentials: bool = False,
         precompute_potentials_structure: Atoms = None,
+        input_progress_callback: callable = None,
     ) -> FeffBatch:
         """Generate inputs for trajectory with multiple frames.
 
@@ -167,6 +168,9 @@ class InputGenerator:
                                             precomputing potentials.
                                             If None, uses the average
                                             structure for all frames.
+            input_progress_callback: Optional callback (completed, total)
+                                     invoked after each frame's inputs are
+                                     generated.
 
         Returns:
             FeffBatch containing all tasks for all frames,
@@ -256,6 +260,9 @@ class InputGenerator:
             original_config = self.config
             self.config = main_config
 
+        n_frames = len(structures)
+        if input_progress_callback:
+            input_progress_callback(0, n_frames)
         try:
             # frame_idx is the 0-based index into `structures` as returned
             # by ase.io.read(), NOT the original trajectory frame number.
@@ -273,6 +280,8 @@ class InputGenerator:
                     frame_index=frame_idx,
                 )
                 all_tasks.extend(frame_batch.tasks)
+                if input_progress_callback:
+                    input_progress_callback(frame_idx + 1, n_frames)
         finally:
             if precompute_potentials:
                 # Restore original config
@@ -449,6 +458,131 @@ class FeffExecutor:
             return _serial()
         return results
 
+    # Essential potential files produced by the precompute run
+    # (CONTROL 1 1 1 0 0 0) that each main path-only task (CONTROL 0 0 0 1 1 1)
+    # needs to reuse the potentials.
+    _POTENTIAL_FILES = (
+        "phase.pad",
+        "pot.pad",
+        "xsect.json",
+        "xsph.json",
+        "genfmt.json",
+        "ff2x.json",
+        "geom.json",
+        "atoms.json",
+        "pot.json",
+        "global.json",
+        "path.json",
+        "libpotph.json",
+        "POTENTIALS",
+    )
+
+    def _place_potential_file(self, src: Path, dst: Path, mode: str) -> bool:
+        """Place a single potential file at ``dst`` using copy/hardlink/symlink.
+
+        Falls back to copying if linking is unsupported (e.g. cross-device
+        hardlink).  Returns True on success.
+        """
+        try:
+            if dst.exists() or dst.is_symlink():
+                dst.unlink()
+            if mode == "hardlink":
+                try:
+                    os.link(src, dst)
+                    return True
+                except OSError:
+                    copy2(src, dst)  # cross-device or FS without hardlinks
+                    return True
+            elif mode == "symlink":
+                os.symlink(src, dst)
+                return True
+            else:  # "copy"
+                copy2(src, dst)
+                return True
+        except OSError as e:
+            self.logger.error(f"Failed to place {src.name} -> {dst}: {e}")
+            return False
+
+    def _distribute_potentials(
+        self,
+        batch: FeffBatch,
+        parallel: bool = True,
+        progress_callback: callable = None,
+    ) -> int:
+        """Distribute precomputed potential files to every main task directory.
+
+        For large trajectories this places tens of thousands of small files, so
+        it is parallelized (I/O bound) and reports progress.  The placement
+        mechanism is controlled by ``config.potential_link_mode``
+        (``"copy"``/``"hardlink"``/``"symlink"``); linking is far faster and
+        uses no extra disk because the potentials are read-only during
+        path-only FEFF runs.
+
+        Returns the number of files successfully placed.
+        """
+        mode = getattr(batch.config, "potential_link_mode", "copy") or "copy"
+        precompute_dir = batch.output_dir / "precomputed_potentials"
+        n_tasks = len(batch.tasks)
+
+        self.logger.info(
+            f"Distributing precomputed potential files to {n_tasks} task "
+            f"directories (mode={mode})"
+        )
+
+        # Build the list of (src, dst) placements up front.
+        placements: list[tuple[Path, Path]] = []
+        for task in batch.tasks:
+            precompute_site_dir = precompute_dir / f"site_{task.site_index:04d}"
+            if not precompute_site_dir.exists():
+                self.logger.warning(
+                    "Precompute directory not found for "
+                    f"site {task.site_index}: {precompute_site_dir}"
+                )
+                continue
+            task.feff_dir.mkdir(parents=True, exist_ok=True)
+            for filename in self._POTENTIAL_FILES:
+                src = precompute_site_dir / filename
+                if src.exists():
+                    placements.append((src, task.feff_dir / filename))
+                else:
+                    self.logger.warning(f"Required file not found: {src}")
+
+        total = len(placements)
+        if progress_callback:
+            progress_callback(0, total)
+        if total == 0:
+            return 0
+
+        def _place(item: tuple[Path, Path]) -> bool:
+            src, dst = item
+            return self._place_potential_file(src, dst, mode)
+
+        files_placed = 0
+        # Copies to distinct destinations are independent; a thread pool gives a
+        # large speedup for this I/O-bound work.  Linking is so fast that serial
+        # placement is already cheap.
+        use_parallel = parallel and mode == "copy" and total > 1
+        if use_parallel:
+            from concurrent.futures import ThreadPoolExecutor
+
+            workers = self.max_workers or min(total, max(1, (os.cpu_count() or 4)), 8)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                for done, ok in enumerate(executor.map(_place, placements), start=1):
+                    files_placed += int(ok)
+                    if progress_callback:
+                        progress_callback(done, total)
+        else:
+            for done, item in enumerate(placements, start=1):
+                files_placed += int(_place(item))
+                if progress_callback:
+                    progress_callback(done, total)
+
+        self.logger.info(
+            f"Placed {files_placed} of {total} potential files across "
+            f"{n_tasks} main tasks (mode={mode})"
+        )
+        return files_placed
+
     def execute_batch(
         self,
         batch: FeffBatch,
@@ -456,6 +590,8 @@ class FeffExecutor:
         progress_callback: callable = None,
         hdf5_progress_callback: callable = None,
         path_read_progress_callback: callable = None,
+        chunk_progress_callback: callable = None,
+        copy_progress_callback: callable = None,
     ) -> dict[str, bool]:
         """Execute all FEFF calculations in a batch with caching support.
 
@@ -468,6 +604,12 @@ class FeffExecutor:
             path_read_progress_callback: Optional callback called with
                 (completed, total) as per-path feffNNNN.dat files are read from
                 each calculation directory.
+            chunk_progress_callback: Optional callback called with
+                (chunk_index, n_chunks) at the start of each streaming chunk
+                (only when the work is split into more than one chunk).
+            copy_progress_callback: Optional callback called with
+                (completed, total) while distributing precomputed potential
+                files into each frame's task directory.
 
         Returns:
             Dict mapping task_id to success status
@@ -510,70 +652,10 @@ class FeffExecutor:
                 )
             else:
                 self.logger.info("All precompute tasks completed successfully")
-
-                # NOW copy the precomputed potential files to all main task directories
-                self.logger.info(
-                    "Copying precomputed potential files to main task directories"
-                )
-                precompute_dir = batch.output_dir / "precomputed_potentials"
-                files_copied = 0
-
-                for task in batch.tasks:
-                    # Find the corresponding precompute site directory
-                    precompute_site_dir = precompute_dir / f"site_{task.site_index:04d}"
-
-                    if not precompute_site_dir.exists():
-                        self.logger.warning(
-                            "Precompute directory not found for "
-                            f"site {task.site_index}: {precompute_site_dir}"
-                        )
-                        continue
-
-                    # Create main task directory if needed
-                    task.feff_dir.mkdir(parents=True, exist_ok=True)
-
-                    # Copy essential potential files that FEFF needs to reuse potentials
-                    # These files are created by CONTROL 1 1 1 0 0 0
-                    # and needed by CONTROL 0 0 0 1 1 1
-                    potential_files = [
-                        # Core potential files
-                        "phase.pad",
-                        "pot.pad",
-                        # JSON files needed for path calculation
-                        "xsect.json",
-                        "xsph.json",
-                        "genfmt.json",
-                        "ff2x.json",
-                        "geom.json",
-                        "atoms.json",
-                        "pot.json",
-                        "global.json",
-                        "path.json",
-                        "libpotph.json",
-                        # Optional but useful
-                        "POTENTIALS",
-                    ]
-
-                    for filename in potential_files:
-                        src = precompute_site_dir / filename
-                        dst = task.feff_dir / filename
-
-                        if src.exists():
-                            try:
-                                copy2(src, dst)
-                                files_copied += 1
-                                self.logger.debug(
-                                    f"Copied {filename} to {task.feff_dir}"
-                                )
-                            except OSError as e:
-                                self.logger.error(f"Failed to copy {filename}: {e}")
-                        else:
-                            self.logger.warning(f"Required file not found: {src}")
-
-                expected_file_count = len(potential_files) * len(batch.tasks)
-                self.logger.info(
-                    f"Copied {files_copied} of {expected_file_count} "
-                    f"potential files across {len(batch.tasks)} main tasks"
+                self._distribute_potentials(
+                    batch,
+                    parallel=parallel,
+                    progress_callback=copy_progress_callback,
                 )
 
         total_tasks = len(batch.tasks)
@@ -661,130 +743,182 @@ class FeffExecutor:
                 f"Found {n_cached} cached results, running {n_to_run} new calculations"
             )
 
-        # Execute uncached calculations
+        # Execute uncached calculations in disk-bounded chunks.
+        #
+        # Rather than running *every* remaining task before any of its per-path
+        # feffNNNN.dat files are read and deleted, we process the tasks in
+        # chunks: run one chunk of FEFF calculations, parse their path files,
+        # write the results to HDF5, then immediately delete the path files
+        # before moving on to the next chunk.  This keeps peak on-disk usage
+        # bounded to roughly one chunk of calculation directories, which is
+        # essential for large trajectories whose accumulated feffNNNN.dat files
+        # would otherwise fill the disk.
         if tasks_to_run:
-            input_files = [task.input_file for task, _ in tasks_to_run]
+            store_paths = bool(self.hdf5_store and self.hdf5_store.store_paths)
 
-            # Create wrapper callback for FEFF calculations
+            chunk_size = getattr(batch.config, "stream_chunk_size", None)
+            if not chunk_size or chunk_size <= 0:
+                chunk_size = len(tasks_to_run)
+
+            total_to_run = len(tasks_to_run)
+            n_cached_initial = len(cached_results)
+            n_feff_done = 0  # FEFF calcs completed in already-finished chunks
+            n_paths_read = 0  # path directories parsed in finished chunks
+
             def feff_progress_callback(feff_completed: int, feff_total: int):
-                """Update overall progress based on FEFF calculation progress."""
-                nonlocal completed_tasks
+                """Update overall progress across all chunks."""
                 if progress_callback:
-                    # Update completed_tasks to current cached + completed FEFF
-                    # calculations
-                    current_completed = len(cached_results) + feff_completed
+                    current_completed = n_cached_initial + n_feff_done + feff_completed
                     progress_callback(current_completed, total_tasks)
 
-            results = run_multi_site_feff_calculations(
-                input_files=input_files,
-                # Disable auto-cleanup when keep_path_files is set; we'll
-                # do cleanup manually after reading the per-path feffNNNN.dat files.
-                cleanup=batch.config.cleanup_feff_files
-                and not batch.config.keep_path_files,
-                parallel=parallel,
-                max_workers=self.max_workers,
-                progress_callback=feff_progress_callback,
-            )
+            def path_progress(done: int, total: int):
+                if path_read_progress_callback:
+                    path_read_progress_callback(n_paths_read + done, total_to_run)
 
-            # Update completed_tasks to final count (will be used for final processing)
-            completed_tasks = len(cached_results) + len(tasks_to_run)
-
-            # Process results and update cache
-            pending_hdf5_writes: list[dict] = []
-
-            # Pre-parse per-path feffNNNN.dat files in parallel processes.
-            # This parsing (larch FeffDatFile) is the bottleneck and is
-            # GIL-bound, so it is offloaded to a process pool here; the HDF5
-            # write below stays serial in the main thread.
-            parsed_paths: dict[str, list] = {}
-            store_paths = bool(self.hdf5_store and self.hdf5_store.store_paths)
-            if store_paths:
-                from .feff_utils import get_feff_numbered_files
-
-                dirs_to_parse = [
-                    (task.task_id, feff_dir)
-                    for (task, _cache_key), (feff_dir, success) in zip(
-                        tasks_to_run, results, strict=False
-                    )
-                    if success
-                ]
-                parsed_paths = self._parse_paths_parallel(
-                    dirs_to_parse,
-                    parallel,
-                    progress_callback=path_read_progress_callback,
+            n_chunks = (total_to_run + chunk_size - 1) // chunk_size
+            if n_chunks > 1:
+                self.logger.info(
+                    f"Streaming {total_to_run} calculations in {n_chunks} chunks "
+                    f"of up to {chunk_size} (path files parsed and deleted per "
+                    f"chunk to bound disk usage)"
                 )
 
-            for (task, cache_key), (feff_dir, success) in zip(
-                tasks_to_run, results, strict=False
+            for chunk_idx, chunk_start in enumerate(
+                range(0, total_to_run, chunk_size), start=1
             ):
-                if success:
-                    try:
-                        from .feff_utils import read_feff_output
+                chunk = tasks_to_run[chunk_start : chunk_start + chunk_size]
+                input_files = [task.input_file for task, _ in chunk]
 
-                        k, chi = read_feff_output(feff_dir)
-                        if not self.hdf5_store:
-                            self._save_to_cache(cache_key, chi, k)
-                        self.logger.debug(f"Cached result for {task.task_id}")
-
-                        if self.hdf5_store:
-                            path_contributions: list | None = None
-                            if store_paths:
-                                from .hdf5_store import recompute_path_chi_on_grid
-
-                                n_feff_files = len(get_feff_numbered_files(feff_dir))
-                                path_contributions = [
-                                    recompute_path_chi_on_grid(pc, k)
-                                    for pc in parsed_paths.get(task.task_id, [])
-                                ]
-                                if n_feff_files > 0 and not path_contributions:
-                                    self.logger.warning(
-                                        f"{task.task_id}: {n_feff_files}"
-                                        " feffNNNN.dat files found but 0"
-                                        " paths were successfully parsed."
-                                        " Check larch FeffDatFile compatibility."
-                                    )
-                                elif n_feff_files == 0:
-                                    self.logger.warning(
-                                        f"{task.task_id}: store_paths=True but no "
-                                        f"feffNNNN.dat files found in {feff_dir}. "
-                                        "Was FEFF run with CONTROL …1 1 1?"
-                                    )
-                                # Cleanup feff files after reading paths
-                                if batch.config.cleanup_feff_files:
-                                    cleanup_feff_output(feff_dir)
-
-                            pending_hdf5_writes.append(
-                                {
-                                    "frame_index": task.frame_index,
-                                    "site_index": task.site_index,
-                                    "k": np.asarray(k),
-                                    "chi": np.asarray(chi),
-                                    "absorber_element": task.absorber_element,
-                                    "success": True,
-                                    "path_contributions": path_contributions,
-                                }
-                            )
-                    except (OSError, ValueError, TypeError) as e:
-                        self.logger.warning(
-                            f"Failed to read result for {task.task_id}: {e}"
-                        )
-
-                cached_results[task.task_id] = success
-
-            # Write all new results to HDF5 in a single batch operation
-            if self.hdf5_store and pending_hdf5_writes:
-                if hdf5_progress_callback:
-                    hdf5_progress_callback(0, 1)
-                try:
-                    self.hdf5_store.write_site_results_batch(pending_hdf5_writes)
-                except Exception as exc:  # noqa: BLE001
-                    import traceback
-
-                    self.logger.warning(
-                        f"HDF5 batch write failed: {exc}\n" + traceback.format_exc()
+                if n_chunks > 1:
+                    self.logger.info(
+                        f"Streaming chunk {chunk_idx}/{n_chunks} "
+                        f"({len(chunk)} calculations)"
                     )
-                if hdf5_progress_callback:
-                    hdf5_progress_callback(1, 1)
+                    if chunk_progress_callback:
+                        chunk_progress_callback(chunk_idx, n_chunks)
+
+                results = run_multi_site_feff_calculations(
+                    input_files=input_files,
+                    # Disable auto-cleanup when keep_path_files is set; we clean
+                    # up manually after reading the per-path feffNNNN.dat files.
+                    cleanup=batch.config.cleanup_feff_files
+                    and not batch.config.keep_path_files,
+                    parallel=parallel,
+                    max_workers=self.max_workers,
+                    progress_callback=feff_progress_callback,
+                )
+                n_feff_done += len(chunk)
+
+                # Pre-parse per-path feffNNNN.dat files for this chunk in
+                # parallel processes.  The larch FeffDatFile parse is the
+                # GIL-bound bottleneck, so it is offloaded to a process pool;
+                # the HDF5 write below stays serial in the main thread.
+                parsed_paths: dict[str, list] = {}
+                if store_paths:
+                    from .feff_utils import get_feff_numbered_files
+
+                    dirs_to_parse = [
+                        (task.task_id, feff_dir)
+                        for (task, _cache_key), (feff_dir, success) in zip(
+                            chunk, results, strict=False
+                        )
+                        if success
+                    ]
+                    parsed_paths = self._parse_paths_parallel(
+                        dirs_to_parse,
+                        parallel,
+                        progress_callback=path_progress,
+                    )
+                    n_paths_read += len(dirs_to_parse)
+
+                # Process results, read chi(k), recompute path chi on the grid,
+                # delete the per-path files, and stage the HDF5 write.
+                pending_hdf5_writes: list[dict] = []
+                for (task, cache_key), (feff_dir, success) in zip(
+                    chunk, results, strict=False
+                ):
+                    if success:
+                        try:
+                            from .feff_utils import read_feff_output
+
+                            k, chi = read_feff_output(feff_dir)
+                            if not self.hdf5_store:
+                                self._save_to_cache(cache_key, chi, k)
+                            self.logger.debug(f"Cached result for {task.task_id}")
+
+                            if self.hdf5_store:
+                                path_contributions: list | None = None
+                                if store_paths:
+                                    from .hdf5_store import recompute_path_chi_on_grid
+
+                                    n_feff_files = len(
+                                        get_feff_numbered_files(feff_dir)
+                                    )
+                                    _parsed = parsed_paths.get(task.task_id, [])
+                                    # Optionally prune negligible paths at write
+                                    # time to shrink the results file.
+                                    _min_cw = batch.config.store_min_cw_ratio
+                                    if _min_cw is not None:
+                                        _parsed = [
+                                            pc
+                                            for pc in _parsed
+                                            if pc.get("cw_ratio", 100.0) >= _min_cw
+                                        ]
+                                    path_contributions = [
+                                        recompute_path_chi_on_grid(pc, k)
+                                        for pc in _parsed
+                                    ]
+                                    if n_feff_files > 0 and not path_contributions:
+                                        self.logger.warning(
+                                            f"{task.task_id}: {n_feff_files}"
+                                            " feffNNNN.dat files found but 0"
+                                            " paths were successfully parsed."
+                                            " Check larch FeffDatFile compatibility."
+                                        )
+                                    elif n_feff_files == 0:
+                                        self.logger.warning(
+                                            f"{task.task_id}: store_paths=True but no "
+                                            f"feffNNNN.dat files found in {feff_dir}. "
+                                            "Was FEFF run with CONTROL …1 1 1?"
+                                        )
+                                    # Cleanup feff files right after reading paths
+                                    # so they do not accumulate on disk.
+                                    if batch.config.cleanup_feff_files:
+                                        cleanup_feff_output(feff_dir)
+
+                                pending_hdf5_writes.append(
+                                    {
+                                        "frame_index": task.frame_index,
+                                        "site_index": task.site_index,
+                                        "k": np.asarray(k),
+                                        "chi": np.asarray(chi),
+                                        "absorber_element": task.absorber_element,
+                                        "success": True,
+                                        "path_contributions": path_contributions,
+                                    }
+                                )
+                        except (OSError, ValueError, TypeError) as e:
+                            self.logger.warning(
+                                f"Failed to read result for {task.task_id}: {e}"
+                            )
+
+                    cached_results[task.task_id] = success
+
+                # Write this chunk's results to HDF5 before running the next
+                # chunk.  Repeated calls append/overwrite rows incrementally.
+                if self.hdf5_store and pending_hdf5_writes:
+                    if hdf5_progress_callback:
+                        hdf5_progress_callback(0, 1)
+                    try:
+                        self.hdf5_store.write_site_results_batch(pending_hdf5_writes)
+                    except Exception as exc:  # noqa: BLE001
+                        import traceback
+
+                        self.logger.warning(
+                            f"HDF5 batch write failed: {exc}\n" + traceback.format_exc()
+                        )
+                    if hdf5_progress_callback:
+                        hdf5_progress_callback(1, 1)
 
         return cached_results
 
@@ -1015,6 +1149,7 @@ class PipelineProcessor:
                 store_paths=config.keep_path_files,
                 dedup_k=True,
                 max_paths=config.max_paths,
+                store_path_params=config.store_path_params,
             )
 
         self.input_generator = InputGenerator(config)
@@ -1036,6 +1171,9 @@ class PipelineProcessor:
         progress_callback: callable = None,
         hdf5_progress_callback: callable = None,
         path_read_progress_callback: callable = None,
+        chunk_progress_callback: callable = None,
+        copy_progress_callback: callable = None,
+        input_progress_callback: callable = None,
         precompute_potentials: bool = False,
         precompute_potentials_structure: Atoms = None,
         # site_weights: list[float] | None = None, # Not implemented yet
@@ -1052,6 +1190,12 @@ class PipelineProcessor:
             hdf5_progress_callback: Optional callback function for HDF5 path writes
             path_read_progress_callback: Optional callback for reading per-path
                 feffNNNN.dat files (completed, total directories)
+            chunk_progress_callback: Optional callback (chunk_index, n_chunks)
+                invoked at the start of each disk-bounded streaming chunk
+            copy_progress_callback: Optional callback (completed, total) while
+                distributing precomputed potential files to task directories
+            input_progress_callback: Optional callback (completed, total) while
+                generating FEFF input files for each frame (Stage A)
             precompute_potentials: Whether to precompute potentials once and reuse
             precompute_potentials_structure: Structure to use for
                                              precompute (defaults to average)
@@ -1067,6 +1211,7 @@ class PipelineProcessor:
             output_dir=output_dir,
             precompute_potentials=precompute_potentials,
             precompute_potentials_structure=precompute_potentials_structure,
+            input_progress_callback=input_progress_callback,
         )
 
         # Stage B: Execute all FEFF calculations
@@ -1078,6 +1223,8 @@ class PipelineProcessor:
             if not self._hdf5_store or not self._hdf5_store.store_paths
             else None,
             path_read_progress_callback=path_read_progress_callback,
+            chunk_progress_callback=chunk_progress_callback,
+            copy_progress_callback=copy_progress_callback,
         )
 
         # Stage C: Process results
