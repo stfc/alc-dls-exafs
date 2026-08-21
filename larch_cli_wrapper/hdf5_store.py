@@ -123,7 +123,17 @@ from .feff_utils import FeffConfig  # noqa: E402
 logger = logging.getLogger(__name__)
 
 _STORE_VERSION = "1.0"
-_COMPRESS = {"compression": "gzip", "compression_opts": 1}
+# The ``shuffle`` byte filter reorders bytes so that the high-order bytes of
+# many floats sit together, which makes gzip dramatically more effective on
+# smooth/oscillatory float arrays for negligible extra CPU.  gzip level is kept
+# low (1) to avoid slowing the write path during large runs.
+_COMPRESS = {"compression": "gzip", "compression_opts": 1, "shuffle": True}
+# Storage dtype for the large per-frame/per-path 2-D arrays (site chi and
+# per-path chi/amp/pha/lam/rep).  float32 halves the on-disk size and I/O for a
+# relative precision of ~1e-7, far below EXAFS noise.  k-grids and the small
+# averaged aggregates stay float64 for accurate interpolation / Fourier
+# transforms.
+_ARRAY_DTYPE = np.float32
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +184,7 @@ class ExafsHDF5Store:
         dedup_k: bool = True,
         mode: str = "a",
         max_paths: int | None = None,
+        store_path_params: bool | None = None,
     ) -> None:
         """Open or create the HDF5 file at *path*."""
         import h5py
@@ -185,6 +196,21 @@ class ExafsHDF5Store:
             max_paths
             if max_paths is not None
             else (config.max_paths if config is not None else None)
+        )
+        # Whether to persist the raw FEFF path parameters (amp/pha/lam/rep on
+        # the coarse k grid).  These are averaged then discarded by the current
+        # averaged-paths output, so storing them roughly doubles the path table
+        # for no effect on the primary result; default off.  They are only
+        # needed to re-grid individual path χ(k) onto a different k-grid later
+        # (e.g. in the interactive paths explorer notebook).
+        self.store_path_params = (
+            store_path_params
+            if store_path_params is not None
+            else (
+                bool(getattr(config, "store_path_params", False))
+                if config is not None
+                else False
+            )
         )
         self._lock = threading.Lock()
         self._h5 = h5py.File(self.path, mode)
@@ -664,9 +690,10 @@ class ExafsHDF5Store:
             if "chi" not in grp_site:
                 grp_site.create_dataset(
                     "chi",
-                    data=chi_batch,
+                    data=chi_batch.astype(_ARRAY_DTYPE, copy=False),
                     maxshape=(None, len(stored_k)),
                     chunks=(128, len(stored_k)),
+                    dtype=_ARRAY_DTYPE,
                     **_COMPRESS,
                 )
                 grp_site.create_dataset(
@@ -768,7 +795,11 @@ class ExafsHDF5Store:
                     pk = np.asarray(all_path_contributions[0]["k"], dtype=np.float64)
                     grp_paths.create_dataset("k_grid_paths", data=pk, **_COMPRESS)
 
-                    _pk_param = all_path_contributions[0].get("k_param")
+                    _pk_param = (
+                        all_path_contributions[0].get("k_param")
+                        if self.store_path_params
+                        else None
+                    )
                     if _pk_param is not None:
                         grp_paths.create_dataset(
                             "k_grid_params",
@@ -784,7 +815,7 @@ class ExafsHDF5Store:
                         "chi",
                         shape=(0, n_path_points),
                         maxshape=(None, n_path_points),
-                        dtype=np.float64,
+                        dtype=_ARRAY_DTYPE,
                         chunks=(1024, n_path_points),
                         **_COMPRESS,
                     )
@@ -793,7 +824,7 @@ class ExafsHDF5Store:
                             "amp",
                             shape=(0, p_len),
                             maxshape=(None, p_len),
-                            dtype=np.float64,
+                            dtype=_ARRAY_DTYPE,
                             chunks=(1024, p_len),
                             **_COMPRESS,
                         )
@@ -801,7 +832,7 @@ class ExafsHDF5Store:
                             "pha",
                             shape=(0, p_len),
                             maxshape=(None, p_len),
-                            dtype=np.float64,
+                            dtype=_ARRAY_DTYPE,
                             chunks=(1024, p_len),
                             **_COMPRESS,
                         )
@@ -809,7 +840,7 @@ class ExafsHDF5Store:
                             "lam",
                             shape=(0, p_len),
                             maxshape=(None, p_len),
-                            dtype=np.float64,
+                            dtype=_ARRAY_DTYPE,
                             chunks=(1024, p_len),
                             **_COMPRESS,
                         )
@@ -817,7 +848,7 @@ class ExafsHDF5Store:
                             "rep",
                             shape=(0, p_len),
                             maxshape=(None, p_len),
-                            dtype=np.float64,
+                            dtype=_ARRAY_DTYPE,
                             chunks=(1024, p_len),
                             **_COMPRESS,
                         )
