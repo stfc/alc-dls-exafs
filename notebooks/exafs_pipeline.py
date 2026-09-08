@@ -14,6 +14,7 @@ def _():
     from pathlib import Path
 
     import marimo as mo
+    import numpy as np
     from ase import Atoms
     from ase.io import read
 
@@ -31,6 +32,7 @@ def _():
         from larch_cli_wrapper import DEFAULT_CACHE_DIR
         from larch_cli_wrapper.exafs_data import (
             PlotConfig,
+            format_chi_ascii,
             plot_exafs_plotly,
         )
         from larch_cli_wrapper.feff_utils import (
@@ -67,9 +69,11 @@ def _():
         WindowType,
         ast,
         file_upload,
+        format_chi_ascii,
         input_kwargs_text,
         mo,
         model_style,
+        np,
         plot_exafs_plotly,
         read,
         read_button,
@@ -1306,6 +1310,7 @@ def _(
         config = None
 
     # Skip if no result
+    export_collection = None
     if result is None:
         plot_output = message
     else:
@@ -1322,6 +1327,8 @@ def _(
         else:
             # Fallback: assume result is already EXAFSDataCollection
             plot_data_collection = result
+
+        export_collection = plot_data_collection
 
         try:
             plot_kweight = (
@@ -1377,7 +1384,37 @@ def _(
                     message,
                 ]
             )
-    return (plot_output,)
+    return export_collection, plot_output
+
+
+@app.cell(hide_code=True)
+def _(export_collection, format_chi_ascii, mo, np):
+    _avg = getattr(export_collection, "overall_average", None)
+    if _avg is None:
+        export_output = mo.md("")
+    else:
+        _chi = _avg.chi
+        _text = format_chi_ascii(
+            _avg.k,
+            np.real(_chi) if np.iscomplexobj(_chi) else _chi,
+            metadata={
+                "absorber": getattr(_avg, "absorber_element", "unknown"),
+                "n_spectra": len(export_collection.individual_spectra),
+                "note": "ensemble-averaged chi(k), unweighted",
+            },
+        )
+        export_output = mo.vstack(
+            [
+                mo.md("### Export"),
+                mo.download(
+                    data=_text.encode(),
+                    filename="ensemble_chi.chik",
+                    label="⬇ Download averaged chi(k) (Athena/Larch readable)",
+                ),
+            ]
+        )
+    export_output
+    return
 
 
 @app.cell(hide_code=True)

@@ -726,21 +726,25 @@ class TestLarchGroupsExportImport:
             assert not (result_dir / "site_averages").exists()
             assert not (result_dir / "individual_spectra").exists()
 
-    def test_export_athena_format_fallback(self, sample_group):
-        """Test fallback to ASCII when Athena format is not available."""
+    def test_export_athena_format(self, sample_group):
+        """Athena export writes a two-column chi(k) file with a header."""
         collection = EXAFSDataCollection()
         collection.overall_average = sample_group
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            output_dir = Path(temp_dir) / "athena_fallback"
+            output_dir = Path(temp_dir) / "athena"
 
-            # Test the ImportError handling in the _save_group_larch_format method
-            # This happens when larch.io.athena is not available
             collection.export_larch_groups(output_dir=output_dir, format="athena")
 
-            # Should fall back to ASCII format (since athena import will likely fail)
-            assert (output_dir / "overall_average.chi").exists()
-            assert (output_dir / "overall_average.chir").exists()
+            chik_file = output_dir / "overall_average.chik"
+            assert chik_file.exists()
+
+            lines = chik_file.read_text().splitlines()
+            data = [ln for ln in lines if not ln.startswith("#")]
+            assert len(data) == len(sample_group.k)
+            k0, chi0 = (float(v) for v in data[0].split())
+            assert k0 == pytest.approx(float(sample_group.k[0]))
+            assert chi0 == pytest.approx(float(np.real(sample_group.chi[0])))
 
     def test_load_group_from_ascii_invalid_data(self):
         """Test error handling for invalid ASCII data."""

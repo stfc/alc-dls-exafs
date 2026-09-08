@@ -1093,6 +1093,33 @@ def _block_variance_error(x: np.ndarray) -> float:
     return float(np.std(block_vars, ddof=1) / np.sqrt(len(block_vars)))
 
 
+def _pooled_block_variance_error(series: list[np.ndarray]) -> float:
+    """Standard error of a pooled variance via time blocking.
+
+    Each instance's time series is split into the same ``k`` contiguous
+    blocks and the instances are pooled *within* each block, so blocks never
+    straddle an instance boundary. Falls back to blocking the concatenated
+    array when the instances do not share a frame count.
+    """
+    if not series:
+        return float("nan")
+    n_frames = len(series[0])
+    if any(len(s) != n_frames for s in series):
+        return _block_variance_error(np.concatenate(series))
+    k = int(np.sqrt(n_frames))
+    if k < 2 or n_frames < 2 * k:
+        return float("nan")
+    splits = [np.array_split(s, k) for s in series]
+    block_vars = [
+        float(np.var(np.concatenate(blocks), ddof=1))
+        for blocks in zip(*splits, strict=True)
+        if sum(len(b) for b in blocks) > 1
+    ]
+    if len(block_vars) < 2:
+        return float("nan")
+    return float(np.std(block_vars, ddof=1) / np.sqrt(len(block_vars)))
+
+
 def _effective_n_samples(x: np.ndarray) -> float:
     """Effective sample size from the lag-1 autocorrelation."""
     n = len(x)
@@ -1249,7 +1276,8 @@ def group_path_instances(
     def _group_stats(
         cluster: list[tuple[PathSamples, dict[str, Any]]],
     ) -> dict[str, Any]:
-        pooled = np.concatenate([s.reff for s, _st in cluster])
+        series = [s.reff for s, _st in cluster]
+        pooled = np.concatenate(series)
         weights = np.array([st["n_frames"] for _s, st in cluster], dtype=float)
         within_vars = np.array([st["sigma2_A2"] for _s, st in cluster])
         means = np.array([st["mean_reff_A"] for _s, st in cluster])
@@ -1273,7 +1301,7 @@ def group_path_instances(
                 np.mean(pooled)
                 - np.mean([s.instance.reference_reff for s, _st in cluster])
             ),
-            "sigma2_block_error_A2": _block_variance_error(pooled),
+            "sigma2_block_error_A2": _pooled_block_variance_error(series),
             "third_cumulant_A3": third,
             "fourth_cumulant_A4": fourth,
             "effective_n_samples": float(
@@ -1632,8 +1660,15 @@ def msrd_to_dataframe(
 
     Returns:
         A ``pandas.DataFrame`` with columns: ``Body``, ``Path type``,
-        ``Reff (Å)``, ``σ² (Å²)``, ``σ² thermal (Å²)``, ``Angle (°)``,
-        ``FEFF β (°)``, ``Count``, ``MD multiplicity estimate``.
+        ``Reff (Å)``, ``σ² (Å²)``, ``σ² SE (Å²)``, ``σ² thermal (Å²)``,
+        ``C₃ (Å³)``, ``C₄ (Å⁴)``, ``N_eff``, ``Angle (°)``, ``FEFF β (°)``,
+        ``Count``, ``MD multiplicity estimate``.
+
+        ``σ² SE`` is a block-averaged standard error that accounts for time
+        correlation between frames; ``N_eff`` is the summed lag-1
+        autocorrelation effective sample size. ``C₃``/``C₄`` are the third
+        and fourth cumulants of the pooled path-length distribution and
+        quantify departure from the Gaussian disorder model.
 
         The multiplicity column is an MD-side estimate (instances per
         absorber, with an assumed reversal factor of 2 for 3-body paths) —
@@ -1641,36 +1676,37 @@ def msrd_to_dataframe(
     """
     import pandas as pd
 
-    rows = [
-        {
+    def _row(i: int, r: dict[str, Any], body: str) -> dict[str, Any]:
+        three_body = body == "3-body"
+        return {
             "_row_id": i,
-            "Body": "2-body",
+            "Body": body,
             "Path type": r["type"],
             "Reff (Å)": r["reff"],
             "σ² (Å²)": r["sigma2"],
+            "σ² SE (Å²)": r.get("sigma2_block_error_A2", float("nan")),
             "σ² thermal (Å²)": r.get("sigma2_thermal_A2", r["sigma2"]),
-            "Angle (°)": float("nan"),
-            "FEFF β (°)": float("nan"),
+            "C₃ (Å³)": r.get("third_cumulant_A3", float("nan")),
+            "C₄ (Å⁴)": r.get("fourth_cumulant_A4", float("nan")),
+            "N_eff": r.get("effective_n_samples", float("nan")),
+            "Angle (°)": (
+                r.get("internal_angle_deg", r.get("angle"))
+                if three_body
+                else float("nan")
+            ),
+            "FEFF β (°)": (
+                r.get("feff_beta_deg", float("nan")) if three_body else float("nan")
+            ),
             "Count": r["count"],
-            "MD multiplicity estimate": r["count"] / n_absorbers,
+            # Assumed reversal multiplicity of 2 for 3-body — an MD-side
+            # estimate, not a FEFF degeneracy.
+            "MD multiplicity estimate": (
+                (2 if three_body else 1) * r["count"] / n_absorbers
+            ),
         }
-        for i, r in enumerate(res_2b)
-    ] + [
-        {
-            "_row_id": len(res_2b) + i,
-            "Body": "3-body",
-            "Path type": r["type"],
-            "Reff (Å)": r["reff"],
-            "σ² (Å²)": r["sigma2"],
-            "σ² thermal (Å²)": r.get("sigma2_thermal_A2", r["sigma2"]),
-            "Angle (°)": r.get("internal_angle_deg", r.get("angle")),
-            "FEFF β (°)": r.get("feff_beta_deg", float("nan")),
-            "Count": r["count"],
-            # Assumed reversal multiplicity of 2 — an MD-side estimate, not
-            # a FEFF degeneracy.
-            "MD multiplicity estimate": 2 * r["count"] / n_absorbers,
-        }
-        for i, r in enumerate(res_3b)
+
+    rows = [_row(i, r, "2-body") for i, r in enumerate(res_2b)] + [
+        _row(len(res_2b) + i, r, "3-body") for i, r in enumerate(res_3b)
     ]
     return pd.DataFrame(rows)
 

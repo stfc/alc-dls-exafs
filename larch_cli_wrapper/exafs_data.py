@@ -32,7 +32,39 @@ __all__ = [
     "filter_path_contributions",
     "make_path_key",
     "PlotConfig",
+    "format_chi_ascii",
 ]
+
+
+def format_chi_ascii(
+    k: np.ndarray,
+    chi: np.ndarray,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """Format ``chi(k)`` as two-column ASCII readable by Athena and Larch.
+
+    Athena imports any plain column file whose final comment line names the
+    columns, so no binary ``.prj`` writer is needed.
+
+    Args:
+        k: Photoelectron wavenumber grid (Å⁻¹).
+        chi: Real ``chi(k)`` values on the same grid, unweighted.
+        metadata: Optional key/value pairs written as ``#`` comment lines.
+
+    Returns:
+        The full file contents as a string.
+    """
+    lines = [
+        "# XDI/1.0 larch-cli-wrapper",
+        "# Column.1: k angstrom^-1",
+        "# Column.2: chi",
+    ]
+    for key, value in (metadata or {}).items():
+        lines.append(f"# {key}: {value}")
+    lines.append("#---")
+    lines.append("#    k           chi")
+    lines.extend(f"{ki:12.6f} {ci:14.8g}" for ki, ci in zip(k, chi, strict=True))
+    return "\n".join(lines) + "\n"
 
 
 @dataclass
@@ -297,12 +329,26 @@ class EXAFSDataCollection:
                 )
 
         elif format == "athena":
-            # Note: Athena project format support would need proper implementation
-            # For now, fallback to ASCII format
-            print(
-                "Warning: Athena format not fully implemented, saving as ASCII instead"
+            meta = {
+                "created": self.created_at.isoformat(),
+                "kweight": self.kweight_used,
+            }
+            for attr_name in (
+                "site_idx",
+                "frame_idx",
+                "absorber_element",
+                "is_average",
+                "average_type",
+            ):
+                if hasattr(group, attr_name):
+                    meta[attr_name] = getattr(group, attr_name)
+            chi = group.chi
+            text = format_chi_ascii(
+                group.k,
+                np.real(chi) if np.iscomplexobj(chi) else chi,
+                metadata=meta,
             )
-            self._save_group_larch_format(group, base_path, "ascii")
+            base_path.with_suffix(".chik").write_text(text)
         else:
             raise ValueError(f"Unsupported format: {format}. Use 'ascii' or 'athena'.")
 

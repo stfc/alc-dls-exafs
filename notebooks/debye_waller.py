@@ -49,15 +49,16 @@ def _(mo):
 def _(mo):
     mo.callout(
         mo.md(
-            "**⚠️ Active development notice** — This notebook is under active "
-            "development and has not yet been validated for production use. "
-            "Results should **not** be used in publications without independent "
-            "verification."
+            "**Scope** — MSRDs here are classical: they carry no zero-point "
+            "contribution, so they are least reliable for light scatterers and "
+            "for temperatures well below the Debye temperature. Shell "
+            "assignment depends on the distance and angle grouping tolerances; "
+            "check the resolved path list before using the values."
             "\n\n"
             "Please report any issues or feedback on the GitHub repository: "
             "https://github.com/stfc/alc-dls-exafs/issues"
         ),
-        kind="warn",
+        kind="info",
     )
     return
 
