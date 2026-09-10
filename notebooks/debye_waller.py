@@ -202,28 +202,20 @@ def _(find_mic, logger, np):
         # so that this notebook works in WASM / sandbox mode without the local
         # package on sys.path.
         # ---------------------------------------------------------------------------
+        from ase.cell import Cell
 
         def _max_safe_mic_cutoff(cell):
             """Return the largest sphere radius that fits inside a parallelepiped cell."""
-            cell_matrix = np.asarray(cell)
-            if cell_matrix.shape != (3, 3):
+            try:
+                c = Cell.ascell(cell)
+            except (ValueError, TypeError):
                 return None
-            volume = float(np.abs(np.linalg.det(cell_matrix)))
-            if volume <= 0.0:
+            if c.rank != 3 or c.volume <= 0.0:
                 return None
-            area_ab = float(np.linalg.norm(np.cross(cell_matrix[0], cell_matrix[1])))
-            area_bc = float(np.linalg.norm(np.cross(cell_matrix[1], cell_matrix[2])))
-            area_ca = float(np.linalg.norm(np.cross(cell_matrix[2], cell_matrix[0])))
-            if area_ab == 0.0 or area_bc == 0.0 or area_ca == 0.0:
+            areas = c.areas()
+            if np.any(areas <= 0.0):
                 return None
-            return (
-                min(
-                    volume / area_ab,
-                    volume / area_bc,
-                    volume / area_ca,
-                )
-                / 2.0
-            )
+            return float(min(c.volume / areas) / 2.0)
 
         def unwrap_positions_pbc(structures):
             """Unwrap atomic positions for continuous trajectories across PBC."""
@@ -244,12 +236,13 @@ def _(find_mic, logger, np):
                     continue
                 cell_matrix = cell.complete()
                 pbc = atoms.get_pbc()
-                inv_cell = np.linalg.inv(cell_matrix)
-                frac_current = atoms.get_positions() @ inv_cell
-                frac_previous = unwrapped[i - 1] @ inv_cell
+                frac_current = cell_matrix.scaled_positions(atoms.get_positions())
+                frac_previous = cell_matrix.scaled_positions(unwrapped[i - 1])
                 frac_disp = frac_current - frac_previous
                 frac_disp[:, pbc] -= np.round(frac_disp[:, pbc])
-                unwrapped[i] = unwrapped[i - 1] + (frac_disp @ cell_matrix)
+                unwrapped[i] = unwrapped[i - 1] + cell_matrix.cartesian_positions(
+                    frac_disp
+                )
 
             return unwrapped
 
@@ -300,29 +293,12 @@ def _(find_mic, logger, np):
             """Return a CIF string with mean positions and anisotropic U tensors."""
             pos = results["avg_positions"]
             names = results["atom_names"]
-            u_cart = results["u_tensor"]
-            cell = results["avg_cell"]
-            inv_cell = np.linalg.inv(cell)
-            frac_pos = pos @ inv_cell.T
-            a, b, c = np.linalg.norm(cell, axis=1)
-
-            def ang(v1, v2):
-                return float(
-                    np.degrees(
-                        np.arccos(
-                            np.clip(
-                                np.dot(v1, v2)
-                                / (np.linalg.norm(v1) * np.linalg.norm(v2)),
-                                -1,
-                                1,
-                            )
-                        )
-                    )
-                )
-
-            alpha = ang(cell[1], cell[2])
-            beta = ang(cell[0], cell[2])
-            gamma = ang(cell[0], cell[1])
+            cell = Cell.ascell(results["avg_cell"])
+            rcell = cell.reciprocal()
+            transform = rcell / rcell.lengths()[:, None]
+            u_cif = transform @ results["u_tensor"] @ transform.T
+            frac_pos = cell.scaled_positions(pos)
+            a, b, c, alpha, beta, gamma = cell.cellpar()
 
             buf = io.StringIO()
             buf.write("data_MD_results\n\n")
@@ -351,7 +327,7 @@ def _(find_mic, logger, np):
                 "_atom_site_aniso_U_23\n_atom_site_aniso_U_13\n_atom_site_aniso_U_12\n"
             )
             for i in range(len(names)):
-                u = u_cart[i]
+                u = u_cif[i]
                 buf.write(
                     f"{names[i]}{i + 1} "
                     f"{u[0, 0]:.5f} {u[1, 1]:.5f} {u[2, 2]:.5f} "
@@ -360,14 +336,18 @@ def _(find_mic, logger, np):
             return buf.getvalue()
 
         def parse_site_specification(spec, symbols):
-            """Parse a site specification string and return atomic indices."""
+            """Parse a site specification string (0-based) into atomic indices."""
             if spec.replace("-", "").replace(" ", "").isdigit():
                 spec = spec.replace(" ", "")
-                if "-" in spec:
-                    start, end = spec.split("-")
-                    return list(range(int(start) - 1, int(end)))
-                else:
-                    return [int(spec) - 1]
+                start, end = [
+                    int(x) for x in (spec.split("-") if "-" in spec else (spec, spec))
+                ]
+                if end >= len(symbols):
+                    raise ValueError(
+                        f"Index {end} out of range: structure has "
+                        f"{len(symbols)} atoms (indices are 0-based)"
+                    )
+                return list(range(start, end + 1))
 
             if "." in spec:
                 element, index_part = spec.split(".", 1)
@@ -377,20 +357,20 @@ def _(find_mic, logger, np):
                 index_part = index_part.replace(" ", "")
                 if "-" in index_part:
                     start, end = index_part.split("-")
-                    start_idx = int(start) - 1
-                    end_idx = int(end)
+                    start_idx = int(start)
+                    end_idx = int(end) + 1
                     if end_idx > len(element_indices):
                         raise ValueError(
                             f"'{element}' only has {len(element_indices)} atoms, "
-                            f"cannot select up to {end_idx}"
+                            f"cannot select up to index {end} (indices are 0-based)"
                         )
                     return element_indices[start_idx:end_idx]
                 else:
-                    idx = int(index_part) - 1
+                    idx = int(index_part)
                     if idx >= len(element_indices):
                         raise ValueError(
                             f"'{element}' only has {len(element_indices)} atoms, "
-                            f"cannot select index {idx + 1}"
+                            f"cannot select index {idx} (indices are 0-based)"
                         )
                     return [element_indices[idx]]
 
@@ -398,28 +378,6 @@ def _(find_mic, logger, np):
             if not matching:
                 raise ValueError(f"No atoms of element '{spec}' found")
             return matching
-
-        def _max_safe_mic_cutoff(cell):
-            """Return the largest sphere radius that fits inside a parallelepiped cell."""
-            cell_matrix = np.asarray(cell)
-            if cell_matrix.shape != (3, 3):
-                return None
-            volume = float(np.abs(np.linalg.det(cell_matrix)))
-            if volume <= 0.0:
-                return None
-            area_ab = float(np.linalg.norm(np.cross(cell_matrix[0], cell_matrix[1])))
-            area_bc = float(np.linalg.norm(np.cross(cell_matrix[1], cell_matrix[2])))
-            area_ca = float(np.linalg.norm(np.cross(cell_matrix[2], cell_matrix[0])))
-            if area_ab == 0.0 or area_bc == 0.0 or area_ca == 0.0:
-                return None
-            return (
-                min(
-                    volume / area_ab,
-                    volume / area_bc,
-                    volume / area_ca,
-                )
-                / 2.0
-            )
 
         def calculate_grouped_msrd(
             structures,
@@ -1003,10 +961,12 @@ def _(mo):
     | Format | Meaning |
     |--------|----------|
     | `K` | All K atoms |
-    | `K.1` | First K atom (1-based within element) |
-    | `K.1-3` | First three K atoms |
-    | `11` | 11th atom in structure (1-based, any element) |
-    | `11-20` | Atoms 11–20 (1-based, inclusive) |
+    | `K.0` | First K atom (0-based within element) |
+    | `K.0-2` | First three K atoms (inclusive range) |
+    | `11` | Atom with global index 11 (0-based, any element) |
+    | `11-20` | Atoms 11–20 (0-based, inclusive) |
+
+    Indices are 0-based, matching the pipeline absorber convention.
     """)
     return
 
@@ -1014,7 +974,7 @@ def _(mo):
 @app.cell
 def _(mo):
     element_spec = mo.ui.text(
-        placeholder="e.g.  K  or  Cu.1  or  11-20",
+        placeholder="e.g.  K  or  Cu.0  or  11-20",
         label="Absorber site specification",
     )
     cutoff = mo.ui.number(

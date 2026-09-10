@@ -210,6 +210,48 @@ class TestHelperFunctions:
             parse_absorber_specification("0,10", sample_atoms)  # Index 10 doesn't exist
 
 
+class TestParseSiteSpecification:
+    """The DW --site parser shares the pipeline's 0-based index convention."""
+
+    # Fe at 0 and 3, O at 1 and 2, H at 4
+    symbols = ["Fe", "O", "O", "Fe", "H"]
+
+    def test_bare_element_selects_all(self):
+        from larch_cli_wrapper.debye_waller_core import parse_site_specification
+
+        assert parse_site_specification("Fe", self.symbols) == [0, 3]
+
+    def test_element_local_index_zero_based(self):
+        from larch_cli_wrapper.debye_waller_core import parse_site_specification
+
+        assert parse_site_specification("Fe.0", self.symbols) == [0]
+        assert parse_site_specification("Fe.1", self.symbols) == [3]
+
+    def test_element_local_range_inclusive(self):
+        from larch_cli_wrapper.debye_waller_core import parse_site_specification
+
+        assert parse_site_specification("O.0-1", self.symbols) == [1, 2]
+
+    def test_global_index_zero_based(self):
+        from larch_cli_wrapper.debye_waller_core import parse_site_specification
+
+        assert parse_site_specification("0", self.symbols) == [0]
+        assert parse_site_specification("4", self.symbols) == [4]
+
+    def test_global_range_inclusive(self):
+        from larch_cli_wrapper.debye_waller_core import parse_site_specification
+
+        assert parse_site_specification("1-3", self.symbols) == [1, 2, 3]
+
+    def test_out_of_range_raises(self):
+        from larch_cli_wrapper.debye_waller_core import parse_site_specification
+
+        with pytest.raises(ValueError, match="0-based"):
+            parse_site_specification("5", self.symbols)
+        with pytest.raises(ValueError, match="0-based"):
+            parse_site_specification("Fe.2", self.symbols)
+
+
 # ============================================================================
 # Test CLI Commands
 # ============================================================================

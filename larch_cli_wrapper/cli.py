@@ -2141,8 +2141,9 @@ def debye_waller(
         "--site",
         help=(
             "Absorber site for MSRD analysis. "
-            "Formats: 'K' (all K atoms), 'K.1' (first K), 'K.1-3' (first three K), "
-            "'11' (11th atom), '11-20' (atoms 11-20, 1-based)."
+            "Formats: 'K' (all K atoms), 'K.0' (first K), 'K.0-2' (first three K), "
+            "'11' (atom index 11), '11-20' (indices 11-20, inclusive). "
+            "Indices are 0-based, matching the pipeline absorber convention."
         ),
     ),
     cutoff: float = typer.Option(3.5, "--cutoff", "-r", help="Neighbor cutoff in Å"),

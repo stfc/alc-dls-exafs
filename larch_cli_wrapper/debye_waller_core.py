@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from ase.cell import Cell
 from ase.geometry import find_mic
 from ase.io import read as ase_read
 
@@ -84,7 +85,7 @@ def load_trajectory(
     if errors:
         raise ValueError("Trajectory validation failed:\n" + "\n".join(errors))
 
-    if not raw[0].get_cell().any():
+    if not np.any(raw[0].get_cell()):
         warnings.append(
             "No periodic cell found. PBC unwrapping will be skipped "
             "(positions used as-is)."
@@ -138,14 +139,13 @@ def unwrap_positions_pbc(structures: list[Any]) -> np.ndarray:
         # using the *current* frame's cell (the displacement between frames is
         # small, so the choice of cell for the reference point only affects
         # the wrap decision, not the accumulated position).
-        inv_cell = np.linalg.inv(cell_matrix)
-        frac_current = atoms.get_positions() @ inv_cell
-        frac_previous = unwrapped[i - 1] @ inv_cell
+        frac_current = cell_matrix.scaled_positions(atoms.get_positions())
+        frac_previous = cell_matrix.scaled_positions(unwrapped[i - 1])
         frac_disp = frac_current - frac_previous
         # Only wrap along periodic directions; wrapping a non-periodic
         # direction (e.g. the vacuum axis of a slab) would corrupt positions.
         frac_disp[:, pbc] -= np.round(frac_disp[:, pbc])
-        unwrapped[i] = unwrapped[i - 1] + (frac_disp @ cell_matrix)
+        unwrapped[i] = unwrapped[i - 1] + cell_matrix.cartesian_positions(frac_disp)
 
     return unwrapped
 
@@ -265,8 +265,35 @@ def compute_adp_results(
 # ---------------------------------------------------------------------------
 
 
+def cartesian_u_to_cif(u_cart: np.ndarray, cell: np.ndarray | Cell) -> np.ndarray:
+    """Convert Cartesian ADP tensors to the CIF ``_atom_site_aniso_U`` basis.
+
+    The CIF convention defines U^ij with respect to the crystal axes
+    (dimensioned by the reciprocal cell): U_cart = A N U_cif N A^T with
+    A the column-vector cell matrix and N = diag(a*_i)
+    (Grosse-Kunstleve & Adams, J. Appl. Cryst. 35, 477 (2002)).
+    For cells whose Cartesian matrix is diagonal the transform is the
+    identity, so orthogonal-cell output is unchanged.
+
+    Args:
+        u_cart: Cartesian U tensors, shape ``(n_atoms, 3, 3)`` or ``(3, 3)``.
+        cell: Cell matrix with lattice vectors as *rows* (ASE convention).
+
+    Returns:
+        U tensors in the CIF convention, same shape as ``u_cart``.
+    """
+    rcell = Cell.ascell(cell).reciprocal()
+    transform = rcell / rcell.lengths()[:, None]
+    return transform @ np.asarray(u_cart) @ transform.T
+
+
 def save_cif_with_adp(results: dict[str, Any]) -> str:
     """Return a CIF string containing mean positions and anisotropic U tensors.
+
+    Anisotropic tensors are written in the CIF ``_atom_site_aniso_U`` crystal-
+    axes convention (converted from the Cartesian tensors of
+    :func:`compute_adp_results` via :func:`cartesian_u_to_cif`), so the file
+    renders correctly in VESTA and refinement codes for non-orthogonal cells.
 
     Args:
         results: Dictionary as returned by :func:`compute_adp_results`.
@@ -276,28 +303,10 @@ def save_cif_with_adp(results: dict[str, Any]) -> str:
     """
     pos = results["avg_positions"]
     names = results["atom_names"]
-    u_cart = results["u_tensor"]
-    cell = results["avg_cell"]
-    inv_cell = np.linalg.inv(cell)
-    frac_pos = pos @ inv_cell.T
-    a, b, c = np.linalg.norm(cell, axis=1)
-
-    def ang(v1: np.ndarray, v2: np.ndarray) -> float:
-        return float(
-            np.degrees(
-                np.arccos(
-                    np.clip(
-                        np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)),
-                        -1,
-                        1,
-                    )
-                )
-            )
-        )
-
-    alpha = ang(cell[1], cell[2])
-    beta = ang(cell[0], cell[2])
-    gamma = ang(cell[0], cell[1])
+    cell = Cell.ascell(results["avg_cell"])
+    u_cif = cartesian_u_to_cif(results["u_tensor"], cell)
+    frac_pos = cell.scaled_positions(pos)
+    a, b, c, alpha, beta, gamma = cell.cellpar()
 
     buf = io.StringIO()
     buf.write("data_MD_results\n\n")
@@ -326,7 +335,7 @@ def save_cif_with_adp(results: dict[str, Any]) -> str:
         "_atom_site_aniso_U_23\n_atom_site_aniso_U_13\n_atom_site_aniso_U_12\n"
     )
     for i in range(len(names)):
-        u = u_cart[i]
+        u = u_cif[i]
         buf.write(
             f"{names[i]}{i + 1} "
             f"{u[0, 0]:.5f} {u[1, 1]:.5f} {u[2, 2]:.5f} "
@@ -343,21 +352,22 @@ def save_cif_with_adp(results: dict[str, Any]) -> str:
 def parse_site_specification(spec: str, symbols: list[str]) -> list[int]:
     """Parse a site specification string and return atomic indices.
 
-    Supported formats:
+    Indices are zero-based, matching the pipeline's absorber specification
+    and the ASE/Python convention.  Supported formats:
 
-    +----------+---------------------------------------+
-    | Format   | Meaning                               |
-    +==========+=======================================+
-    | ``K``    | All K atoms                           |
-    +----------+---------------------------------------+
-    | ``K.1``  | First K atom (1-based within element) |
-    +----------+---------------------------------------+
-    | ``K.1-3``| First three K atoms                   |
-    +----------+---------------------------------------+
-    | ``11``   | 11th atom in full structure (1-based) |
-    +----------+---------------------------------------+
-    | ``11-20``| Atoms 11–20 (1-based, inclusive)      |
-    +----------+---------------------------------------+
+    +----------+----------------------------------------+
+    | Format   | Meaning                                |
+    +==========+========================================+
+    | ``K``    | All K atoms                            |
+    +----------+----------------------------------------+
+    | ``K.0``  | First K atom (0-based within element)  |
+    +----------+----------------------------------------+
+    | ``K.0-2``| First three K atoms (inclusive range)  |
+    +----------+----------------------------------------+
+    | ``11``   | Atom with global index 11 (0-based)    |
+    +----------+----------------------------------------+
+    | ``11-20``| Atoms 11–20 (0-based, inclusive)       |
+    +----------+----------------------------------------+
 
     Args:
         spec: Site specification string.
@@ -369,16 +379,20 @@ def parse_site_specification(spec: str, symbols: list[str]) -> list[int]:
     Raises:
         ValueError: If the specification is invalid or no matching atoms exist.
     """
-    # Pure numeric: absolute indices
+    # Pure numeric: absolute (global) 0-based indices
     if spec.replace("-", "").replace(" ", "").isdigit():
         spec = spec.replace(" ", "")
-        if "-" in spec:
-            start, end = spec.split("-")
-            return list(range(int(start) - 1, int(end)))
-        else:
-            return [int(spec) - 1]
+        start, end = [
+            int(x) for x in (spec.split("-") if "-" in spec else (spec, spec))
+        ]
+        if end >= len(symbols):
+            raise ValueError(
+                f"Index {end} out of range: structure has "
+                f"{len(symbols)} atoms (indices are 0-based)"
+            )
+        return list(range(start, end + 1))
 
-    # Element with optional sub-index
+    # Element with optional sub-index (0-based within the element)
     if "." in spec:
         element, index_part = spec.split(".", 1)
         element_indices = [i for i, sym in enumerate(symbols) if sym == element]
@@ -387,20 +401,20 @@ def parse_site_specification(spec: str, symbols: list[str]) -> list[int]:
         index_part = index_part.replace(" ", "")
         if "-" in index_part:
             start, end = index_part.split("-")
-            start_idx = int(start) - 1
-            end_idx = int(end)
+            start_idx = int(start)
+            end_idx = int(end) + 1
             if end_idx > len(element_indices):
                 raise ValueError(
                     f"'{element}' only has {len(element_indices)} atoms, "
-                    f"cannot select up to {end_idx}"
+                    f"cannot select up to index {end} (indices are 0-based)"
                 )
             return element_indices[start_idx:end_idx]
         else:
-            idx = int(index_part) - 1
+            idx = int(index_part)
             if idx >= len(element_indices):
                 raise ValueError(
                     f"'{element}' only has {len(element_indices)} atoms, "
-                    f"cannot select index {idx + 1}"
+                    f"cannot select index {idx} (indices are 0-based)"
                 )
             return [element_indices[idx]]
 
@@ -694,16 +708,15 @@ def _normalize_cells(structures: list[Any]) -> list[Any]:
     else:
         return structures  # constant cell — nothing to do
 
-    ref_cell_arr = np.asarray(structures[0].get_cell().complete())
     normalized: list[Any] = []
     for atoms in structures:
         frac = atoms.get_scaled_positions(wrap=False)
-        pos = frac @ ref_cell_arr.T
+        pos = ref_cell.cartesian_positions(frac)
         normalized.append(
             _Atoms(
                 symbols=atoms.get_chemical_symbols(),
                 positions=pos,
-                cell=ref_cell_arr,
+                cell=ref_cell,
                 pbc=atoms.get_pbc(),
             )
         )
@@ -769,7 +782,7 @@ def _reference_reff(
     return total / 2.0
 
 
-def _max_safe_mic_cutoff(cell: np.ndarray) -> float | None:
+def _max_safe_mic_cutoff(cell: Any) -> float | None:
     """Return the largest sphere radius that fits inside a parallelepiped cell.
 
     For the minimum image convention to be unambiguous, the cutoff must be
@@ -784,30 +797,16 @@ def _max_safe_mic_cutoff(cell: np.ndarray) -> float | None:
         Maximum safe cutoff radius in Å, or ``None`` if the cell has zero
         volume or is not periodic (no MIC constraint).
     """
-    # Ensure we have a complete 3x3 cell matrix
-    cell_matrix = np.asarray(cell)
-    if cell_matrix.shape != (3, 3):
+    try:
+        c = Cell.ascell(cell)
+    except (ValueError, TypeError):
         return None
-
-    volume = float(np.abs(np.linalg.det(cell_matrix)))
-    if volume <= 0.0:
+    if c.rank != 3 or c.volume <= 0.0:
         return None
-
-    # Areas of the three faces (parallelograms)
-    area_ab = float(np.linalg.norm(np.cross(cell_matrix[0], cell_matrix[1])))
-    area_bc = float(np.linalg.norm(np.cross(cell_matrix[1], cell_matrix[2])))
-    area_ca = float(np.linalg.norm(np.cross(cell_matrix[2], cell_matrix[0])))
-
-    if area_ab == 0.0 or area_bc == 0.0 or area_ca == 0.0:
+    areas = c.areas()
+    if np.any(areas <= 0.0):
         return None
-
-    # Perpendicular distances between opposite faces
-    dist_ab = volume / area_ab
-    dist_bc = volume / area_bc
-    dist_ca = volume / area_ca
-
-    # The largest inscribed sphere has radius half the smallest face distance
-    return min(dist_ab, dist_bc, dist_ca) / 2.0
+    return float(min(c.volume / areas) / 2.0)
 
 
 def _warn_unsafe_mic_cutoff(
