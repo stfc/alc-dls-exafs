@@ -1,417 +1,230 @@
-# EXAFS Processing Pipeline
+# MD-EXAFS (`md-exafs`)
 
-A comprehensive CLI and interactive toolkit for Extended X-ray Absorption Fine Structure (EXAFS) processing using Larch and FEFF.
+[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-green.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests/)
 
-## Features
+`md-exafs` provides the core scientific engine and command-line interface for calculating ensemble-averaged Extended X-ray Absorption Fine Structure (EXAFS) spectra from molecular dynamics trajectories.
 
-- 🌐 **Interactive Marimo App**: Web-based interface for EXAFS processing
-- 🖥️ **Command Line Interface**: Streamlined CLI for batch processing
-- ⇶ **Multiple Processing Modes**: Single structure, trajectory/ensemble processing
-- 🔧 **FEFF Integration**: Automated FEFF input generation and calculation
-- 📈 **Plotting**: Publication-ready plots with matplotlib and plotly
-- 📊 **Parallel Processing**: Multi-core support for large datasets
-- 💾 **Smart Caching**: Intelligent caching to avoid redundant calculations
+The package sits at the base of the MD-EXAFS software ecosystem:
+- **MD-EXAFS Core and CLI (`md-exafs`)**: Trajectory analysis, Debye–Waller extraction, FEFF card and input generation, path reconstruction, and streaming batch execution.
+- **[AiiDA-FEFF](https://github.com/stfc/aiida-feff)**: AiiDA plugin for provenance tracking, multi-node HPC daemon scheduling and batch orchestration.
+- **[AiiDAlab-EXAFS](https://github.com/stfc/aiidalab-exafs)**: Interactive browser interface inside Jupyter and AiiDAlab.
 
-## Quick Start
+---
 
-### Getting the code
+## Capabilities
 
-You can get the code by cloning the repository or downloading it as a ZIP file.
+The package implements the physical and numerical routines required to bridge thermal configurations and experimental absorption spectra:
 
-#### Clone the repository (recommended)
+- **Exact EXAFS reconstruction**: Evaluates the EXAFS equation for individual scattering paths using the complex electron momentum $p = \mathrm{rep} + i/\lambda$, matching Larch and FEFF conventions.
+- **Shard-and-stream batch execution**: Runs FEFF in bounded chunks across available CPU cores, streams calculated spectra and per-path parameters directly into HDF5 shards (`batch_shard.h5`), and prunes scratch directories immediately to keep disk usage within fixed bounds.
+- **Hybrid path storage**: Stores raw 6-column FEFF scattering parameters on native grids for per-frame paths to permit post-hoc adjustment of $S_0^2$, $\sigma^2$, or $\Delta E_0$, while pre-evaluating fine-grid $\chi(k)$ and $|\tilde{\chi}(R)|$ for the dominant composite ensemble paths.
+- **Debye–Waller and ADP extraction**: Extracts path variances ($\sigma^2$), third and fourth cumulants ($C_3, C_4$), autocorrelation sample corrections ($N_\text{eff}$), and atomic displacement parameter (ADP) CIF models directly from trajectories, with support for non-orthogonal periodic cells.
+- **Per-frame absorber resolution**: Supports element labels, explicit index lists, and element-relative indexing (`"Cu:0,2"`), validating chemical species consistency across static and permuted topologies.
+- **Experimental alignment**: Imports beamline ASCII columns and Athena projects (`.prj`), applying $\Delta E_0$ threshold shifts and $S_0^2$ scaling on common wavenumber grids.
+- **Headless visualisation**: Generates standard Altair spectral charts and 3D scattering vectors for WEAS-widget without framework dependencies.
+
+---
+
+## Installation
+
+### From source
 
 ```bash
 git clone https://github.com/stfc/alc-dls-exafs.git
 cd alc-dls-exafs
+
+# Core engine (zero CLI or plotting dependencies)
+pip install -e .
+
+# With command-line interface (typer, rich, matplotlib)
+pip install -e ".[cli]"
+
+# Full installation including interactive notebooks (marimo, weas-widget, altair)
+pip install -e ".[cli,notebooks]"
 ```
 
-#### Download ZIP file
+Using `uv`:
+```bash
+uv pip install -e ".[cli,notebooks]"
+```
+
+---
+
+## Command-line interface
+
+The CLI is available as `md-exafs`. The legacy alias `larch-cli` remains available for transition.
+
+### 1. Full pipeline execution
+The `pipeline` command coordinates input generation, parallel FEFF execution, HDF5 archiving, and ensemble spectral averaging in a single run.
 
 ```bash
-curl -LO https://github.com/stfc/alc-dls-exafs/archive/refs/heads/main.zip
-unzip main.zip
-cd alc-dls-exafs-main
+# Single structure (K-edge, first absorber site)
+md-exafs pipeline structure.cif Cu
+
+# Trajectory run: process all Cu sites across all frames into HDF5
+md-exafs pipeline trajectory.xyz Cu --all-sites --all-frames --hdf5 --keep-paths
+
+# Precompute potentials on the representative structure to accelerate trajectory runs
+md-exafs pipeline trajectory.xyz Cu --all-sites --all-frames --hdf5 --reuse-potentials --parallel --workers 8
+
+# Sub-sample trajectory frames (e.g. every 5th frame)
+md-exafs pipeline trajectory.xyz Cu --ase-kwargs '{"index": "::5"}'
 ```
 
-You can also get it by going to GitHub: https://github.com/stfc/alc-dls-exafs, clicking on the green "Code" button, and then selecting "Download ZIP".
-
-### Installation
-
-#### Linux/macOS
+### 2. Spectral and path analysis
+The `analyze` command evaluates and plots simulated spectra and path contributions from an existing HDF5 archive (`results.h5` or `ensemble_results.h5`):
 
 ```bash
-# Install with pip (recommended). Run this from within the project directory
-pip install .
+# Plot ensemble average and path decomposition
+md-exafs analyze results.h5 --plot-include average,paths --show
+
+# Prune negligible paths (e.g. keep paths with at least 5% of peak amplitude)
+md-exafs analyze results.h5 --plot-include average,paths --min-cw-ratio 5.0 --max-paths 20
+
+# Compare against experimental data with an energy shift and amplitude factor
+md-exafs analyze results.h5 --experimental measurement.dat --e0-shift 2.5 --s02 0.85
 ```
 
-#### Windows
-
-```powershell
-# Install with pip (recommended). Run this from within the project directory
-pip install .
-```
-
-Note that if you don't have `git` available, you can download the package directly from GitHub (https://github.com/stfc/alc-dls-exafs) and then follow the above steps. Alternatively, you can install the package directly from GitHub like this:
+### 3. Debye–Waller extraction
+Extract path variances ($\sigma^2$), cumulants ($C_3, C_4$), and ADP tensors directly from molecular dynamics configurations:
 
 ```bash
-# Install with pip directly from git archive
-pip install https://github.com/stfc/alc-dls-exafs/archive/refs/heads/main.zip
+# Calculate MSRD up to 5.0 Å from Cu absorbing sites
+md-exafs debye-waller trajectory.xyz --prefix cu_dw --site-spec Cu --cutoff 5.0
 
+# Export an average CIF structure with anisotropic thermal ellipsoids
+md-exafs debye-waller trajectory.xyz --prefix cu_dw --adp-cif
 ```
 
-### Running the Interactive App
-
-Launch the interactive Marimo application for a web-based EXAFS processing experience:
+### 4. Modular workflow steps
 
 ```bash
-marimo run notebooks/exafs_pipeline.py
+# Step 1: Generate FEFF inputs only
+md-exafs generate structure.cif Cu --output feff_inputs/ --radius 6.0 --edge K
+
+# Step 2: Run FEFF across generated input directories
+md-exafs run-feff feff_inputs/ --parallel --workers 4
+
+# Step 3: Analyse results
+md-exafs analyze feff_inputs/ --output plots/ --plot-include sites --show
 ```
 
-This will open a web interface in your browser where you can:
-- Upload structure files (CIF, XYZ, POSCAR, etc.)
-- Configure FEFF parameters interactively
-- Process single structures or trajectories
-- Visualize results with interactive plots
-- Export data and figures
+---
 
-If you want to edit the notebook, you can do so instead using:
+## Python API quickstart
 
-```bash
-marimo edit notebooks/exafs_pipeline.py
+The `md_exafs` package can be imported directly in Python scripts and computational notebooks.
+
+### Building FEFF inputs
+```python
+from ase.build import bulk
+from md_exafs.feff_input import FeffConfig, build_feff_inp
+
+atoms = bulk("Cu", "fcc", a=3.61)
+config = FeffConfig.from_preset("quick")
+config.radius = 5.5
+
+feff_inp = build_feff_inp(atoms, config=config, absorber_idx=0)
 ```
 
-### Command Line Usage
+### Evaluating individual scattering paths
+```python
+import numpy as np
+from md_exafs.paths import path_chi
 
-The CLI provides a streamlined interface for batch processing:
-
-#### Available Commands
-
-```bash
-# Show system information and check dependencies
-larch-cli info
-
-# Create example configuration file
-larch-cli config-example --output my_config.yaml --preset publication
-
-# Generate FEFF input files only
-larch-cli generate structure.cif Fe --output feff_inputs/
-
-# Run FEFF calculations in directories
-larch-cli run-feff feff_inputs/ --parallel --workers 4
-
-# Analyze existing FEFF outputs and create plots
-larch-cli analyze outputs/ --plot-include frames --show
-
-# Run complete pipeline (generate + run + analyze)
-larch-cli pipeline structure.cif Fe --output results/
-
-# Manage cache
-larch-cli cache info
-larch-cli cache clear
+# Calculate chi(k) from raw 6-column FEFF scattering factors
+k_out = np.linspace(2.0, 16.0, 141)
+chi = path_chi(
+    k_native=k_coarse,
+    feff_data=feff_data_6cols,
+    r_eff=2.55,
+    degeneracy=12.0,
+    k_out=k_out,
+    sigma2=0.005,
+    s02=0.9,
+    e0_shift=1.5,
+)
 ```
 
-#### Detailed Examples
+### Batch execution and shard aggregation
+```python
+from pathlib import Path
+from md_exafs.execution import BatchExecutor, FeffTask, merge_shards
+from md_exafs.hdf5 import ArchiveReader
 
-##### Complete Pipeline Processing
+tasks = [
+    FeffTask(frame_idx=0, site_idx=0, input_dir=Path("run_0000"), absorber_element="Cu"),
+    FeffTask(frame_idx=0, site_idx=1, input_dir=Path("run_0001"), absorber_element="Cu"),
+]
 
-```bash
-# Basic EXAFS processing (defaults to K-edge, first site)
-larch-cli pipeline structure.cif Fe
+# Run chunked execution into a self-contained shard
+executor = BatchExecutor(tasks, output_h5="batch_shard_0.h5", chunk_size=128, n_workers=4)
+executor.run()
 
-# Process all Fe sites in structure with custom settings
-larch-cli pipeline structure.cif Fe --all-sites --kmax 15 --radius 8.0
+# Merge multiple shards into an ensemble archive
+ensemble_file = merge_shards(
+    shard_paths=["batch_shard_0.h5", "batch_shard_1.h5"],
+    ensemble_path="ensemble_results.h5",
+)
 
-# Process trajectory with parallel execution
-larch-cli pipeline trajectory.xyz Fe --all-frames --parallel --workers 4
-
-# Sample every 5th frame in a trajectory
-larch-cli pipeline trajectory.xyz Fe --ase-kwargs '{"index": "::5"}'
-
-# Publication-quality processing with custom output
-larch-cli pipeline structure.cif Fe --preset publication --output results/ --style publication
+# Inspect results through the unified archive reader
+reader = ArchiveReader(ensemble_file)
+print(f"Grand average chi points: {len(reader.chi)}")
 ```
 
-##### Step-by-Step Processing
+### In-memory Debye–Waller screening
+```python
+from ase.io import read
+from md_exafs.debye_waller import calculate_grouped_msrd
 
-```bash
-# Step 1: Generate FEFF input files
-larch-cli generate structure.cif Fe --output feff_inputs/ --radius 6.0 --edge K
+trajectory = read("trajectory.xyz", index=":")
+msrd_results = calculate_grouped_msrd(trajectory, site_spec="Cu", max_reff=5.0)
 
-# Step 2: Run FEFF calculations
-larch-cli run-feff feff_inputs/ --parallel --workers 2
-
-# Step 3: Analyze results and create plots
-larch-cli analyze feff_inputs/ --output plots/ --plot-include sites --show
+for path in msrd_results["paths"][:5]:
+    print(f"{path['label']}: R_eff = {path['r_eff']:.3f} Å, σ² = {path['sigma2']:.5f} Å²")
 ```
 
-##### Storing Results in HDF5
+---
 
-The pipeline can write all per-site spectra and path contributions to a single
-HDF5 file, which is more convenient for later re-analysis than individual ASCII
-files.
+## Documentation
 
-```bash
-# Run pipeline and write results to an HDF5 file
-larch-cli pipeline trajectory.xyz Cu --all-frames --hdf5 --keep-paths \
-    --output pipeline_output/
+- [System architecture](docs/architecture.md): Description of the shard-and-stream and hybrid storage models.
+- [CLI reference](docs/cli.md): Command documentation and parameter descriptions.
+- [Python API reference](docs/python_api.md): Function and class signatures for library modules.
+- [Ecosystem integration](docs/ecosystem.md): Details on coupling with `AiiDA-FEFF` and `AiiDAlab-EXAFS`.
 
-# Re-analyze from the HDF5 file with different FT parameters
-larch-cli analyze pipeline_output/results.h5 --kmax 16 --dk 2 \
-    --plot-include average,paths
-```
-
-If you already have a `pipeline_output/` directory from a previous run (without
-`--hdf5`), use the bundled helper script to pack it directly — no FEFF
-re-execution or caching involved:
-
-```bash
-# Pack chi.dat files only
-python scripts/pack_output_to_hdf5.py pipeline_output/
-
-# Also include per-path contributions (needed for --plot-include paths)
-python scripts/pack_output_to_hdf5.py pipeline_output/ --keep-paths
-
-# Limit the number of paths stored per site (None = all paths, default)
-python scripts/pack_output_to_hdf5.py pipeline_output/ --keep-paths --max-paths 50
-
-# The HDF5 file is written to pipeline_output/results.h5 by default
-# Analyze with path contributions and filter weak paths
-larch-cli analyze pipeline_output/results.h5 \
-    --plot-include average,paths \
-    --min-cw-ratio 5.0
-```
-
-You can also limit how many path contributions are displayed when plotting:
-
-```bash
-larch-cli analyze pipeline_output/results.h5 \
-    --plot-include average,paths \
-    --max-paths 20 \
-    --min-cw-ratio 5.0
-```
-
-You can also specify a custom path for the HDF5 file:
-
-```bash
-larch-cli pipeline trajectory.xyz Cu --all-frames \
-    --output pipeline_output/ --hdf5 --hdf5-file cu_trajectory.h5
-larch-cli analyze cu_trajectory.h5 --plot-include average,paths --show
-```
-
-##### Advanced Options
-
-```bash
-# Process specific sites by index
-larch-cli pipeline structure.cif "0,1,2" --output multi_site/
-
-# Use custom configuration file
-larch-cli pipeline structure.cif Fe --config my_config.yaml
-
-# Force recalculation and keep intermediate files
-larch-cli pipeline structure.cif Fe --force --no-cleanup
-
-# Different plot components and styles
-larch-cli analyze outputs/ --plot-include average --style presentation
-larch-cli analyze outputs/ --plot-include frames --with-phase
-larch-cli analyze outputs/ --plot-include sites --kweight 3
-```
-
-### Configuration Files
-
-Use presets or create custom YAML configs. Priority: **Built-in defaults** < **Preset/Config** < **CLI options**.
-
-**Generate config from preset:**
-```bash
-larch-cli config-example --output my_config.yaml --preset publication
-```
-
-**Example config (my_config.yaml):**
-```yaml
-spectrum_type: EXAFS
-edge: K
-radius: 8.0
-
-# FEFF cards
-control: "1 1 1 1 1 1"
-s02: 1.0
-scf: "4.5 0 30 .2 1"  # or null to disable SCF
-exchange: 0
-
-# Fourier Transform
-kmin: 3
-kmax: 18
-kweight: 2
-dk: 4.0
-window: hanning
-
-# Processing
-parallel: true
-n_workers: null
-```
-
-**Use config file or preset, override with CLI options:**
-```bash
-# Use config file
-larch-cli pipeline structure.cif Fe --config my_config.yaml
-
-# Use preset
-larch-cli pipeline structure.cif Fe --preset quick
-
-# Override specific parameters
-larch-cli pipeline structure.cif Fe --preset quick --radius 6.0 --kmax 16
-```
-
-**Available presets:** `quick` (fast), `nscf` (no SCF), `publication` (high-quality)
-
-## Dependencies
-
-### Core Requirements
-- **Python** ≥ 3.10
-- **xraylarch** ≥ 0.9.47 - EXAFS analysis library
-- **typer** ≥ 0.12.0 - CLI framework
-- **rich** - Terminal formatting
-- **matplotlib** ≥ 3.5 - Plotting
-- **marimo** ≥ 0.14.16 - Interactive notebooks
-- **ase** ≥ 3.22.1 - Atomic structure handling
-- **pymatgen** ≥ 2025.1.24 -  FEFF input generator
-
-## Contributing
-
-We welcome contributions! Here's how to get started:
-
-### Development Setup
-
-1. **Fork and clone the repository:**
-```bash
-git clone https://github.com/your-username/alc-dls-exafs.git
-cd alc-dls-exafs
-```
-
-2. **Create a virtual environment:**
-```bash
-# Using conda (recommended)
-conda create -n exafs-dev python=3.12 --channel conda-forge
-conda activate exafs-dev
-
-# Alternative: Using micromamba
-micromamba create -n exafs-dev python=3.12 --channel conda-forge
-micromamba activate exafs-dev
-```
-
-
-3. **Install in development mode:**
-```bash
-uv pip install -e ".[dev]"
-
-# Or without uv
-pip install -e ".[dev]"
-```
-
-### Development Workflow
-
-1. **Create a feature branch:**
-```bash
-git checkout -b feature/your-feature-name
-```
-
-2. **Make changes and add tests:**
-```bash
-# Run tests
-pytest tests/
-
-# Run linting and formatting
-ruff check src/ tests/
-ruff format src/ tests/
-
-# Type checking
-mypy src/
-```
-
-3. **Commit and push:**
-```bash
-git add .
-git commit -m "Add your feature description"
-git push origin feature/your-feature-name
-```
-
-4. **Create a Pull Request** on GitHub
-
-### Code Style
-
-- Follow [PEP 8](https://pep8.org/) for Python code style
-- Use [Ruff](https://docs.astral.sh/ruff/) for linting and code formatting
-- Add type hints where appropriate
-- Write docstrings for all public functions and classes
-- Include tests for new functionality
-
-### Testing
-
-Run the test suite:
-```bash
-# All tests
-pytest
-
-# Specific test file
-pytest tests/test_wrapper.py
-
-# With coverage
-pytest --cov=larch_cli_wrapper
-```
-
-### Documentation
-
-TODO
-
-<!-- Update documentation when adding features:
-- Update relevant files in `docs/`
-- Update this README if needed
-- Add docstrings to new functions/classes -->
-
-## Docker/Podman images
-
-You can use `alc-dls-exafs_` in a marimo environment using [docker](https://www.docker.com) or [podman](https://podman.io/).
-We provide regularly updated docker/podman images, which can be dowloaded by running:
-
-```shell
-docker pull ghcr.io/stfc/alc-dls-exafs/marimo:amd64-latest
-```
-or using podman
-
-```shell
-podman pull ghcr.io/stfc/alc-dls-exafs/marimo-amd64:latest
-```
-
-for amd64 architecture, if you require arm64 replace amd64 with arm64 above, and next instructions.
-
-To start, for marimo run:
-
-```shell
-
-podman run --rm --security-opt seccomp=unconfined -p 8842:8842 ghcr.io/stfc/alc-dls-exafs/marimo:amd64-latest
-
-```
-
-For more details on how to share your filesystem and so on you can refer to this documentation: https://summer.ccp5.ac.uk/introduction.html#run-locally.
-
-
-
-## License
-
-This project is licensed under the BSD-3 License. See the [LICENSE](LICENSE) file for details.
-
-## Support
-
-- **Documentation**: TODO
-- **Issues**: Report bugs and request features on [GitHub Issues](https://github.com/stfc/alc-dls-exafs/issues)
-- **Discussions**: Join discussions on the project's GitHub page
+---
 
 ## Citation
 
-TODO
+If you use `md-exafs` in your research, please cite:
 
+```bibtex
+@software{md_exafs,
+  author       = {Kane Shenton and Joshua Elliott and Alin M. Elena},
+  title        = {MD-EXAFS: Ensemble-Averaged EXAFS Spectroscopy from Molecular Dynamics Trajectories},
+  year         = {2026},
+  publisher    = {GitHub},
+  journal      = {GitHub repository},
+  howpublished = {\url{https://github.com/stfc/alc-dls-exafs}}
+}
+```
+
+See [`CITATION.cff`](CITATION.cff) for full citation metadata.
+
+---
+
+## License
+
+This project is licensed under the BSD-3-Clause License. See [LICENSE](LICENSE) for details.
+
+---
 
 ## Acknowledgments
 
 - Built on top of the excellent [Larch](https://xraypy.github.io/xraylarch/) project
 - FEFF calculations powered by the [FEFF Project](https://feff.phys.washington.edu/). Specifically, the Open Source version of FEFF8 (FEFF8L) is used by default.
 - Structure handling via [ASE](https://wiki.fysik.dtu.dk/ase/) and [pymatgen](https://pymatgen.org/)
+- Trajectory-based ensemble analysis inspired by EDACA, which pioneered the software methodology and served as an invaluable reference during pipeline validation.

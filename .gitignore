@@ -165,6 +165,10 @@ outputs/*
 test_outputs/*
 !test_outputs/.gitkeep
 
+# Sphinx and documentation builds
+docs/_build/
+_site/
+
 # Marimo files
 notebooks/__marimo__
 
