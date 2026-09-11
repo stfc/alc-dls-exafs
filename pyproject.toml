@@ -65,6 +65,12 @@ dev = [
     "types-setuptools",
     "types-PyYAML",
     "types-tqdm",
+    "typer<1.0.0,>=0.17.3",
+    "rich<14.0.0,>=13.9.1",
+    "matplotlib>=3.5",
+    "marimo>=0.16.4",
+    "weas-widget>=0.1.26",
+    "altair>=5.0",
 ]
 
 pre-commit = [

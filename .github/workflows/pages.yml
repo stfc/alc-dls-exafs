@@ -42,7 +42,7 @@ jobs:
 
       - name: Install documentation and notebook dependencies
         run: |
-          uv pip install -e ".[docs,notebooks]"
+          uv pip install -e ".[docs,notebooks,cli]"
 
       - name: Build Sphinx documentation
         run: |
