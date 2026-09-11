@@ -187,7 +187,7 @@ def _(find_mic, logger, np):
     from collections import defaultdict
 
     try:
-        from larch_cli_wrapper.debye_waller_core import (
+        from md_exafs.debye_waller import (
             _max_safe_mic_cutoff,
             calculate_grouped_msrd,
             compute_adp_results,
@@ -197,12 +197,23 @@ def _(find_mic, logger, np):
             unwrap_positions_pbc,
         )
     except ImportError:
-        # ---------------------------------------------------------------------------
-        # Fallback: functions inlined from larch_cli_wrapper.debye_waller_core
-        # so that this notebook works in WASM / sandbox mode without the local
-        # package on sys.path.
-        # ---------------------------------------------------------------------------
-        from ase.cell import Cell
+        try:
+            from larch_cli_wrapper.debye_waller_core import (
+                _max_safe_mic_cutoff,
+                calculate_grouped_msrd,
+                compute_adp_results,
+                kabsch_align,
+                parse_site_specification,
+                save_cif_with_adp,
+                unwrap_positions_pbc,
+            )
+        except ImportError:
+            # ---------------------------------------------------------------------------
+            # Fallback: functions inlined from md_exafs.debye_waller
+            # so that this notebook works in WASM / sandbox mode without the local
+            # package on sys.path.
+            # ---------------------------------------------------------------------------
+            from ase.cell import Cell
 
         def _max_safe_mic_cutoff(cell):
             """Return the largest sphere radius that fits inside a parallelepiped cell."""
