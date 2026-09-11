@@ -159,3 +159,73 @@ def test_read_path_contributions_with_max_paths(feff_dir):
     # Limit to 2 paths
     results = _read_path_contributions_from_dir(feff_dir, max_paths=2)
     assert len(results) == 2
+
+
+def test_2body_path_has_no_angle(feff_dir):
+    """The 2-leg fixture path has no meaningful 3-body angle."""
+    from larch_cli_wrapper.hdf5_store import _read_path_contributions_from_dir
+
+    results = _read_path_contributions_from_dir(feff_dir)
+    assert results[0]["angle"] is None
+
+
+def _make_3leg_feff_dat(path: Path) -> None:
+    """Write a minimal, synthetic 3-leg (triangular) feffNNNN.dat file.
+
+    Absorber (K) at the origin, N at (2, 0, 0), C at (0, 2, 0). This gives a
+    45-degree angle at N (the first non-absorber leg) between N->absorber
+    and N->C, and reff = (2 + sqrt(8) + 2) / 2 = 3.4142.
+    """
+    lines = [
+        " comment: synthetic 3-leg test fixture             Feff8L (EXAFS)       0.1",
+        " Source:",
+        " Structure Summary:  Test",
+        " space group: (P1), space number:  (1)",
+        " abc:  10.0 10.0 10.0",
+        " angles: 90.0 90.0 90.0",
+        " sites: 3",
+        " POT  SCF  30  4.0000   0, core-hole, AFOLP (folp(0)= 1.150)",
+        " Abs   Z=19 Rmt= 2.232 Rnm= 2.257 K  shell",
+        " Pot 1 Z= 7 Rmt= 0.701 Rnm= 1.029",
+        " Pot 2 Z= 6 Rmt= 0.749 Rnm= 1.019",
+        " Gam_ch=6.796E-01 H-L exch",
+        " Mu=-1.236E+01 kf=2.747E+00 Vint=-2.078E+01 Rs_int= 1.320",
+        " PATH  Rmax= 4.000,  Keep_limit= 0.00, Heap_limit 0.00  Pwcrit= 0.00%",
+        " Path    1      icalc       2",
+        " -----------------------------------------------------------------------",
+        "   3   1.000   3.4142    1.9836  -12.36283 nleg, deg, reff, rnrmav(bohr), edge",  # noqa: E501
+        "        x         y         z   pot at#",
+        "     0.0000    0.0000    0.0000  0  19 K        absorbing atom",
+        "     2.0000    0.0000    0.0000  1   7 N",
+        "     0.0000    2.0000    0.0000  2   6 C",
+        "    k   real[2*phc]   mag[feff]  phase[feff] red factor   lambda     real[p]@#",  # noqa: E501
+    ]
+    for i in range(15):
+        k = i * 0.5
+        lines.append(f"  {k:.3f}  1.0E+01  1.0E-01 -1.0E+01  1.0E+00  3.0E+01  1.5E+00")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_3body_angle_computed_from_geometry(tmp_path):
+    """A 3-leg path's angle is computed from the absorber/leg geometry."""
+    from larch_cli_wrapper.hdf5_store import _read_path_contributions_from_dir
+
+    _make_3leg_feff_dat(tmp_path / "feff0001.dat")
+    results = _read_path_contributions_from_dir(tmp_path)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r["nlegs"] == 3
+    assert r["angle"] is not None
+    assert abs(r["angle"] - 45.0) < 0.5
+
+
+def test_3body_scatterer_label_is_canonicalized(tmp_path):
+    """Scatterer label is sorted regardless of the atom-listing order in the
+    path file, so 'N-C' and 'C-N' from different frames compare equal."""
+    from larch_cli_wrapper.hdf5_store import _read_path_contributions_from_dir
+
+    _make_3leg_feff_dat(tmp_path / "feff0001.dat")
+    results = _read_path_contributions_from_dir(tmp_path)
+
+    assert results[0]["scatterer"] == "C-N"

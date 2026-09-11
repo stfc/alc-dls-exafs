@@ -285,6 +285,36 @@ class FeffConfig:
     keep_path_files: bool = False
     # Maximum number of path contributions to store in HDF5.
     max_paths: int | None = None
+    # Number of calculation directories to run before their per-path
+    # feffNNNN.dat files are parsed, written to HDF5, and deleted.  This bounds
+    # peak on-disk usage to roughly one chunk of directories instead of letting
+    # every task's path files accumulate before any are read (which fills the
+    # disk on large trajectories).  ``None`` or <= 0 processes all tasks in a
+    # single chunk (legacy behavior).
+    stream_chunk_size: int | None = 256
+    # How precomputed potential files (phase.pad, pot.pad, JSONs) are placed
+    # into each frame's task directory when --reuse-potentials is used:
+    #   "copy"     - independent copies (safest, most disk/time)
+    #   "hardlink" - hard links to the precomputed files (near-instant, no
+    #                extra disk; same filesystem only, falls back to copy)
+    #   "symlink"  - symbolic links (near-instant, no extra disk)
+    # The large binary potentials are read-only during path-only FEFF runs
+    # (CONTROL 0 0 0 1 1 1), so linking is safe and dramatically faster for
+    # large trajectories.
+    potential_link_mode: str = "copy"
+    # Persist the raw per-path FEFF parameters (amp/pha/lam/rep on the coarse
+    # native k-grid) in the results HDF5.  These roughly double the per-path
+    # storage but are averaged-then-discarded by the averaged-paths output, so
+    # they have no effect on the primary result; keep off to save disk.  Enable
+    # only if you need to re-grid individual path chi(k) later (e.g. the
+    # interactive paths-explorer notebook).
+    store_path_params: bool = False
+    # Drop stored path contributions whose curved-wave amplitude ratio (0-100,
+    # relative to the strongest path in the same calculation) is below this
+    # threshold.  Most FEFF paths are negligible; pruning them at write time can
+    # shrink the results file several-fold.  ``None`` keeps all paths.  NOTE:
+    # this changes the averaged result by excluding weak paths.
+    store_min_cw_ratio: float | None = None
 
     # Get dictionary of the FT parameters
     @property

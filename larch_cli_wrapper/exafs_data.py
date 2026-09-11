@@ -28,6 +28,7 @@ __all__ = [
     "prepare_exafs_data_collection",
     "PathContribution",
     "PathAggregator",
+    "aggregate_store_paths",
     "filter_path_contributions",
     "make_path_key",
     "PlotConfig",
@@ -646,11 +647,30 @@ class EXAFSDataCollection:
 # ---------------------------------------------------------------------------
 
 
-def make_path_key(scatterer: str, nlegs: int, r_eff: float, r_bin: float = 0.15) -> str:
-    """Create a stable string key that groups FEFF paths across MD frames.
+def _has_angle(sample: dict) -> bool:
+    """True if ``sample["angle"]`` is a usable (non-``None``, non-NaN) value.
 
-    Paths with the same scatterer element chain, number of legs, and
-    ``r_eff`` within the same 0.15 Å bin are considered equivalent.
+    HDF5 float datasets have no native "missing" value, so ``angle`` is
+    stored on disk as NaN for 2-/4-leg paths and converted back to Python
+    ``None`` by ``ExafsHDF5Store.iter_path_contributions``. This helper
+    treats both representations as "no angle" so any caller that bypasses
+    that conversion still degrades gracefully instead of treating NaN as a
+    real angle value (which would silently poison downstream clustering —
+    every comparison against NaN is False).
+    """
+    angle = sample.get("angle")
+    return bool(angle is not None and np.isfinite(angle))
+
+
+def make_path_key(scatterer: str, nlegs: int, r_eff: float, r_bin: float = 0.15) -> str:
+    """Create a display label for a (already-pooled) FEFF path population.
+
+    This is now purely a *labeling* helper — the actual pooling of raw
+    per-frame FEFF paths into populations is done by
+    :meth:`PathAggregator.finalize` using proper clustering (see
+    :func:`larch_cli_wrapper.debye_waller_core.cluster_1d_sorted`), not by
+    rounding ``r_eff`` into a fixed-width bin. This function just formats a
+    stable-looking label from the *already-clustered* mean ``r_eff``.
 
     Examples::
 
@@ -662,10 +682,11 @@ def make_path_key(scatterer: str, nlegs: int, r_eff: float, r_bin: float = 0.15)
         scatterer: Scatterer element string (e.g. ``"Cl"`` or ``"Cl-K"``)
         nlegs: Number of scattering legs (2 = single-scattering)
         r_eff: Effective path length in ångströms
-        r_bin: Bin width for R binning (default 0.15 Å)
+        r_bin: Bin width used only for rounding the displayed label
+            (default 0.15 Å) — has no effect on grouping.
 
     Returns:
-        Key string suitable for dict lookup
+        Key string suitable for dict lookup / display.
     """
     prefix = "SS" if nlegs == 2 else f"MS{nlegs}"
     r_binned = round(round(r_eff / r_bin) * r_bin, 3)
@@ -702,6 +723,17 @@ class PathContribution:
     chir_im: np.ndarray = field(default_factory=lambda: np.array([]))
     cw_ratio: float = 0.0
     """Mean curved-wave chi amplitude ratio (0–100, relative to strongest path)."""
+    angle: float | None = None
+    """Mean 3-body scattering angle in degrees, or ``None`` for 2-/4-leg
+    paths (or older data predating angle extraction)."""
+    r_eff_std: float = 0.0
+    """Standard deviation of ``r_eff`` across the samples pooled into this
+    path (Å) — a pooling-quality diagnostic: how tightly did the per-frame
+    FEFF geometries that were merged into this population actually agree.
+    ``0.0`` for a single-sample population."""
+    angle_std: float | None = None
+    """Standard deviation of the 3-body angle across pooled samples
+    (degrees), or ``None`` for 2-/4-leg paths (or no usable angle samples)."""
     source_frames: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=np.int64)
     )
@@ -736,27 +768,94 @@ class PathAggregator:
         #                                   "nlegs": ..., "degeneracy": ...,
         #                                   "scatterer": ...}}
         path_contribs = agg.finalize(fourier_params)
+
+    Internally, samples are bucketed by a *canonical* category
+    (``(sorted scatterer elements, nlegs)``) rather than by the caller-
+    supplied key, then split into physically-distinct path populations by
+    clustering on effective distance (and, for 3-leg paths, angle) in
+    :meth:`finalize`. This avoids two failure modes of a fixed-width R-bin
+    key: (1) the same physical path landing in different bins purely from
+    r_eff straddling a bin edge across frames, and (2) two geometrically
+    distinct 3-body paths (different angle) at a coincidentally similar
+    r_eff being silently averaged together, corrupting the averaged chi(k).
     """
 
-    def __init__(self, r_bin: float = 0.15) -> None:
-        """Initialize the PathAggregator with a given r_bin width."""
+    def __init__(self, r_bin: float = 0.15, angle_tol: float = 15.0) -> None:
+        """Initialize the PathAggregator with clustering tolerances.
+
+        Args:
+            r_bin: Distance clustering tolerance (Å). Kept as the
+                historical parameter name for backward compatibility;
+                despite the name this is now a clustering tolerance (see
+                :func:`larch_cli_wrapper.debye_waller_core.cluster_1d_sorted`),
+                not a fixed bin width.
+            angle_tol: Angle clustering tolerance (degrees) for 3-leg paths.
+        """
         self._r_bin = r_bin
-        # key -> list of sample dicts
-        self._samples: dict[str, list[dict]] = {}
+        self._angle_tol = angle_tol
+        # (canonical_scatterer, nlegs) -> list of sample dicts
+        self._samples: dict[tuple[tuple[str, ...], int], list[dict]] = {}
 
     def add(self, paths_dict: dict[str, dict]) -> None:
         """Accumulate path samples from one FEFF calculation.
 
+        The caller-supplied key is not used for grouping (grouping is
+        determined internally from each sample's own ``scatterer``/``nlegs``
+        plus clustering at :meth:`finalize` time); it is accepted purely for
+        backward API compatibility with existing call sites.
+
         Args:
-            paths_dict: Maps path_key to a dict with keys:
+            paths_dict: Maps an arbitrary label to a dict with keys:
                 ``k``, ``chi`` (arrays) and ``r_eff``, ``nlegs``,
-                ``degeneracy``, ``scatterer`` (scalars).
+                ``degeneracy``, ``scatterer`` (scalars), optionally ``angle``.
         """
-        for key, info in paths_dict.items():
-            self._samples.setdefault(key, []).append(info)
+        from .debye_waller_core import canonical_scatterer_key
+
+        for info in paths_dict.values():
+            cat = (
+                canonical_scatterer_key(str(info.get("scatterer", "?"))),
+                int(info.get("nlegs", 2)),
+            )
+            self._samples.setdefault(cat, []).append(info)
+
+    def _cluster_category(self, nlegs: int, samples: list[dict]) -> list[list[dict]]:
+        """Split one (scatterer, nlegs) category's samples into path populations."""
+        from .debye_waller_core import cluster_1d_sorted
+
+        if nlegs != 3:
+            r_effs = np.array([float(s["r_eff"]) for s in samples])
+            return [
+                [samples[i] for i in idx_arr]
+                for idx_arr in cluster_1d_sorted(r_effs, self._r_bin)
+            ]
+
+        # 3-leg paths: cluster by angle first, then by r_eff within each
+        # angle cluster (mirroring the MD-side 3-body clustering in
+        # calculate_grouped_msrd). Samples without a usable angle (e.g. from
+        # older/failed geometry extraction) fall back to distance-only
+        # clustering as their own sub-population. ``_has_angle`` treats both
+        # a missing/None value and a stray NaN (the on-disk HDF5 sentinel,
+        # which should normally already be converted to None by
+        # ``iter_path_contributions`` before reaching here) as "no angle".
+        with_angle = [s for s in samples if _has_angle(s)]
+        without_angle = [s for s in samples if not _has_angle(s)]
+
+        clusters: list[list[dict]] = []
+        if with_angle:
+            angles = np.array([float(s["angle"]) for s in with_angle])
+            for angle_idx_arr in cluster_1d_sorted(angles, self._angle_tol):
+                angle_cluster = [with_angle[i] for i in angle_idx_arr]
+                r_effs = np.array([float(s["r_eff"]) for s in angle_cluster])
+                for dist_idx_arr in cluster_1d_sorted(r_effs, self._r_bin):
+                    clusters.append([angle_cluster[i] for i in dist_idx_arr])
+        if without_angle:
+            r_effs = np.array([float(s["r_eff"]) for s in without_angle])
+            for idx_arr in cluster_1d_sorted(r_effs, self._r_bin):
+                clusters.append([without_angle[i] for i in idx_arr])
+        return clusters
 
     def finalize(self, fourier_params: dict) -> dict[str, PathContribution]:
-        """Average accumulated path samples and compute Fourier transforms.
+        """Cluster, average, and Fourier-transform accumulated path samples.
 
         The chi(R) data is derived from ``xftf`` applied to the *averaged*
         chi(k), not from averaging individual chi(R) arrays.
@@ -765,111 +864,135 @@ class PathAggregator:
             fourier_params: Parameters forwarded to :func:`larch.xafs.xftf`.
 
         Returns:
-            ``{path_key: PathContribution}`` sorted by mean ``r_eff``.
+            ``{path_key: PathContribution}`` sorted by mean ``r_eff``, where
+            ``path_key`` is a display label generated (post-clustering) by
+            :func:`make_path_key`.
         """
-        from .feff_utils import average_chi_spectra
-
         result: dict[str, PathContribution] = {}
 
-        for key, samples in self._samples.items():
-            if not samples:
+        for (canon_scatterer, nlegs), cat_samples in self._samples.items():
+            if not cat_samples:
                 continue
-
-            k_arrays = [np.asarray(s["k"], dtype=np.float64) for s in samples]
-            chi_arrays = [np.asarray(s["chi"], dtype=np.float64) for s in samples]
-            r_effs = [float(s["r_eff"]) for s in samples]
-            degs = [float(s["degeneracy"]) for s in samples]
-
-            chi_avg, k_common = average_chi_spectra(
-                k_arrays,
-                chi_arrays,
-                restrict_to_common_range=True,
-            )
-
-            # Apply xftf once to the averaged chi(k)
-            g = Group(k=k_common, chi=chi_avg)
-            xftf(g, **fourier_params)
-
-            first = samples[0]
-            # Store *unique* contributing indices — one entry per distinct
-            # frame/site rather than one per sample.  This is 100× smaller
-            # for high-degeneracy paths while still giving full provenance.
-            source_frames = np.unique(
-                np.array(
-                    [
-                        int(s.get("frame_index", -1))
-                        for s in samples
-                        if s.get("frame_index", -1) >= 0
-                    ],
-                    dtype=np.int64,
+            scatterer_label = "-".join(canon_scatterer)
+            for samples in self._cluster_category(nlegs, cat_samples):
+                if not samples:
+                    continue
+                mean_reff = float(np.mean([s["r_eff"] for s in samples]))
+                key = make_path_key(scatterer_label, nlegs, mean_reff, self._r_bin)
+                # Disambiguate labels in the rare case two clusters round to
+                # the same display key (e.g. two very close but genuinely
+                # distinct populations).
+                if key in result:
+                    key = f"{key}_{len(result)}"
+                self._finalize_one(
+                    key, scatterer_label, nlegs, samples, fourier_params, result
                 )
-            )
-            source_sites = np.unique(
-                np.array(
-                    [
-                        int(s.get("site_index", -1))
-                        for s in samples
-                        if s.get("site_index", -1) >= 0
-                    ],
-                    dtype=np.int64,
-                )
-            )
-
-            # Average raw FEFF parameters for on-the-fly χ recomputation
-            _param_names = ("amp", "pha", "lam", "rep")
-            _param_avgs: dict[str, np.ndarray] = {}
-            _k_param: np.ndarray = np.array([])
-            for _pname in _param_names:
-                _parrays = [
-                    np.asarray(s[_pname], dtype=np.float64)
-                    for s in samples
-                    if _pname in s
-                ]
-                if _parrays:
-                    _param_avgs[_pname] = np.mean(_parrays, axis=0)
-            # k_param is the native coarse FEFF grid; all paths share it
-            if "k_param" in first:
-                _k_param = np.asarray(first["k_param"], dtype=np.float64)
-            elif "k" in first and _param_avgs:
-                _k = np.asarray(first["k"], dtype=np.float64)
-                _first_amp = _param_avgs.get("amp")
-                if _first_amp is not None and len(_k) == len(_first_amp):
-                    _k_param = _k
-
-            pc = PathContribution(
-                path_key=key,
-                scatterer=str(first.get("scatterer", "?")),
-                nlegs=int(first.get("nlegs", 2)),
-                r_eff=float(np.mean(r_effs)),
-                degeneracy=float(np.mean(degs)),
-                n_samples=len(samples),
-                k=k_common,
-                chi=chi_avg,
-                r=np.asarray(g.r) if hasattr(g, "r") else np.array([]),
-                chir_mag=np.asarray(g.chir_mag)
-                if hasattr(g, "chir_mag")
-                else np.array([]),
-                chir_re=np.asarray(g.chir_re)
-                if hasattr(g, "chir_re")
-                else np.array([]),
-                chir_im=np.asarray(g.chir_im)
-                if hasattr(g, "chir_im")
-                else np.array([]),
-                cw_ratio=float(
-                    np.mean([s["cw_ratio"] for s in samples]) if samples else 0.0
-                ),
-                source_frames=source_frames,
-                source_sites=source_sites,
-                amp=_param_avgs.get("amp", np.array([])),
-                pha=_param_avgs.get("pha", np.array([])),
-                lam=_param_avgs.get("lam", np.array([])),
-                rep=_param_avgs.get("rep", np.array([])),
-                k_param=_k_param,
-            )
-            result[key] = pc
 
         # Sort by mean r_eff
         return dict(sorted(result.items(), key=lambda kv: kv[1].r_eff))
+
+    def _finalize_one(
+        self,
+        key: str,
+        scatterer_label: str,
+        nlegs: int,
+        samples: list[dict],
+        fourier_params: dict,
+        result: dict[str, PathContribution],
+    ) -> None:
+        """Build and store one :class:`PathContribution` from a clustered population."""
+        from .feff_utils import average_chi_spectra
+
+        k_arrays = [np.asarray(s["k"], dtype=np.float64) for s in samples]
+        chi_arrays = [np.asarray(s["chi"], dtype=np.float64) for s in samples]
+        r_effs = [float(s["r_eff"]) for s in samples]
+        degs = [float(s["degeneracy"]) for s in samples]
+        angles = [float(s["angle"]) for s in samples if _has_angle(s)]
+
+        chi_avg, k_common = average_chi_spectra(
+            k_arrays,
+            chi_arrays,
+            restrict_to_common_range=True,
+        )
+
+        # Apply xftf once to the averaged chi(k)
+        g = Group(k=k_common, chi=chi_avg)
+        xftf(g, **fourier_params)
+
+        first = samples[0]
+        # Store *unique* contributing indices — one entry per distinct
+        # frame/site rather than one per sample.  This is 100× smaller
+        # for high-degeneracy paths while still giving full provenance.
+        source_frames = np.unique(
+            np.array(
+                [
+                    int(s.get("frame_index", -1))
+                    for s in samples
+                    if s.get("frame_index", -1) >= 0
+                ],
+                dtype=np.int64,
+            )
+        )
+        source_sites = np.unique(
+            np.array(
+                [
+                    int(s.get("site_index", -1))
+                    for s in samples
+                    if s.get("site_index", -1) >= 0
+                ],
+                dtype=np.int64,
+            )
+        )
+
+        # Average raw FEFF parameters for on-the-fly χ recomputation
+        _param_names = ("amp", "pha", "lam", "rep")
+        _param_avgs: dict[str, np.ndarray] = {}
+        _k_param: np.ndarray = np.array([])
+        for _pname in _param_names:
+            _parrays = [
+                np.asarray(s[_pname], dtype=np.float64) for s in samples if _pname in s
+            ]
+            if _parrays:
+                _param_avgs[_pname] = np.mean(_parrays, axis=0)
+        # k_param is the native coarse FEFF grid; all paths share it
+        if "k_param" in first:
+            _k_param = np.asarray(first["k_param"], dtype=np.float64)
+        elif "k" in first and _param_avgs:
+            _k = np.asarray(first["k"], dtype=np.float64)
+            _first_amp = _param_avgs.get("amp")
+            if _first_amp is not None and len(_k) == len(_first_amp):
+                _k_param = _k
+
+        pc = PathContribution(
+            path_key=key,
+            scatterer=scatterer_label,
+            nlegs=nlegs,
+            r_eff=float(np.mean(r_effs)),
+            degeneracy=float(np.mean(degs)),
+            n_samples=len(samples),
+            k=k_common,
+            chi=chi_avg,
+            r=np.asarray(g.r) if hasattr(g, "r") else np.array([]),
+            chir_mag=np.asarray(g.chir_mag) if hasattr(g, "chir_mag") else np.array([]),
+            chir_re=np.asarray(g.chir_re) if hasattr(g, "chir_re") else np.array([]),
+            chir_im=np.asarray(g.chir_im) if hasattr(g, "chir_im") else np.array([]),
+            cw_ratio=float(
+                np.mean([s["cw_ratio"] for s in samples]) if samples else 0.0
+            ),
+            angle=float(np.mean(angles)) if angles else None,
+            r_eff_std=float(np.std(r_effs)) if len(r_effs) > 1 else 0.0,
+            angle_std=float(np.std(angles))
+            if len(angles) > 1
+            else (0.0 if angles else None),
+            source_frames=source_frames,
+            source_sites=source_sites,
+            amp=_param_avgs.get("amp", np.array([])),
+            pha=_param_avgs.get("pha", np.array([])),
+            lam=_param_avgs.get("lam", np.array([])),
+            rep=_param_avgs.get("rep", np.array([])),
+            k_param=_k_param,
+        )
+        result[key] = pc
 
 
 def filter_path_contributions(
@@ -915,6 +1038,492 @@ def filter_path_contributions(
     # Restore r_eff ordering among survivors
     surviving_keys = {pc.path_key for pc in ranked}
     return {k: v for k, v in contribs.items() if k in surviving_keys}
+
+
+# ---------------------------------------------------------------------------
+# Fast vectorized / parallel path aggregation
+#
+# ``PathAggregator`` builds one Python dict per stored path row and averages
+# per-cluster Python lists of arrays, which is prohibitively slow for large
+# trajectories (hundreds of thousands to millions of path rows).  The routines
+# below reproduce its clustering/averaging semantics exactly but:
+#   * assign clusters with vectorized numpy grouping (no per-row dicts),
+#   * stream the large chi/amp/pha/lam/rep arrays from HDF5 in worker
+#     *processes* (h5py holds the GIL during gzip decompression, so process
+#     parallelism is required to use multiple cores), and
+#   * accumulate per-cluster sums in the workers, returning only the small
+#     reduced arrays.
+# The result is numerically identical to ``PathAggregator.finalize`` (verified
+# per-cluster to full float precision on real data).
+# ---------------------------------------------------------------------------
+
+_PATH_ARRAY_NAMES = ("chi", "amp", "pha", "lam", "rep")
+
+# Upper bound on aggregation worker processes.  Beyond a handful of concurrent
+# readers the shared-file HDF5 reads saturate and extra processes only add
+# scheduler/lock contention, so a large FEFF ``-w`` must not propagate here.
+_AGG_MAX_WORKERS = 8
+
+
+def _assign_path_clusters(
+    canon_codes: np.ndarray,
+    nlegs: np.ndarray,
+    r_eff: np.ndarray,
+    angle: np.ndarray,
+    pool_idx: np.ndarray,
+    r_bin: float,
+    angle_tol: float,
+) -> tuple[np.ndarray, int]:
+    """Assign a local cluster id to every row in ``pool_idx``.
+
+    Reproduces :meth:`PathAggregator._cluster_category`: rows are first grouped
+    by canonical ``(scatterer, nlegs)`` category, then clustered by ``r_eff``
+    (and, for 3-leg paths, by ``angle`` first, then ``r_eff``) using
+    :func:`~larch_cli_wrapper.debye_waller_core.cluster_1d_sorted`.
+
+    Args:
+        canon_codes: Integer code of the canonical scatterer label per global
+            row (dense codes ``0..n_canon-1``); avoids per-row Python strings.
+        nlegs: Number of legs per global row.
+        r_eff: Effective path length per global row.
+        angle: 3-body angle per global row (NaN where absent).
+        pool_idx: Sorted global row indices to cluster (all rows, or one site).
+        r_bin: Distance clustering tolerance (Å).
+        angle_tol: Angle clustering tolerance (degrees).
+
+    Returns:
+        ``(local_ids, n_clusters)`` where ``local_ids[j]`` is the cluster id of
+        ``pool_idx[j]`` (contiguous ids ``0..n_clusters-1``).
+    """
+    from .debye_waller_core import cluster_1d_sorted
+
+    out = np.full(len(pool_idx), -1, dtype=np.int64)
+    n_clusters = 0
+
+    # Combine (canon_code, nlegs) into a single integer category key instead of
+    # building an object array of ``"canon|nlegs"`` strings per row.
+    nl_mult = int(nlegs.max()) + 1 if len(nlegs) else 1
+    keys = canon_codes[pool_idx].astype(np.int64) * nl_mult + nlegs[pool_idx]
+    uniq_keys, inv = np.unique(keys, return_inverse=True)
+    order = np.argsort(inv, kind="stable")
+    inv_sorted = inv[order]
+    bounds = np.searchsorted(inv_sorted, np.arange(len(uniq_keys) + 1))
+
+    for ui in range(len(uniq_keys)):
+        local_pos = order[bounds[ui] : bounds[ui + 1]]
+        grp = pool_idx[local_pos]
+        nl = int(nlegs[grp[0]])
+        if nl != 3:
+            for cl in cluster_1d_sorted(r_eff[grp], r_bin):
+                out[local_pos[cl]] = n_clusters
+                n_clusters += 1
+        else:
+            ang = angle[grp]
+            has = np.isfinite(ang)
+            wa = np.where(has)[0]
+            wo = np.where(~has)[0]
+            if len(wa):
+                for acl in cluster_1d_sorted(ang[wa], angle_tol):
+                    sub = wa[acl]
+                    for dcl in cluster_1d_sorted(r_eff[grp[sub]], r_bin):
+                        out[local_pos[sub[dcl]]] = n_clusters
+                        n_clusters += 1
+            if len(wo):
+                for dcl in cluster_1d_sorted(r_eff[grp[wo]], r_bin):
+                    out[local_pos[wo[dcl]]] = n_clusters
+                    n_clusters += 1
+
+    return out, n_clusters
+
+
+def _limit_native_threads() -> None:
+    """Pin BLAS/OpenMP thread pools to a single thread in this process.
+
+    Aggregation workers are I/O- and lock-bound, not BLAS-bound.  Without this,
+    each worker process lets numpy's native backend open one thread *per core*,
+    so ``N`` worker processes on a ``C``-core box create ``N * C`` threads that
+    fight over the scheduler.  On large machines that pushes the load average
+    into the thousands and makes the box appear hung even though little real
+    work is happening.  Setting the env vars covers ``spawn``-started workers;
+    ``threadpoolctl`` (if importable) additionally clamps an already-imported
+    numpy backend in ``fork``-started workers.
+    """
+    import os
+
+    for _var in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    ):
+        os.environ.setdefault(_var, "1")
+    try:
+        import threadpoolctl
+
+        threadpoolctl.threadpool_limits(1)
+    except Exception:  # noqa: BLE001, S110 - best effort; env vars still apply
+        pass
+
+
+def _sum_path_arrays_worker(args: tuple) -> tuple[dict, dict]:
+    """Worker: stream a row-range from HDF5 and accumulate per-cluster sums.
+
+    Runs in a separate process.  Reads the large path arrays block-wise (each
+    gzip chunk is decompressed exactly once) and scatters them into overall and
+    per-site cluster accumulators.  Only the small reduced arrays are returned.
+    """
+    import h5py
+    import numpy as np
+
+    _limit_native_threads()
+
+    path, start, end, oid_chunk, sid_chunk, n_over, n_site, array_names = args
+    with h5py.File(path, "r", locking=False) as f:
+        pr = f["path_results"]
+        widths = {a: pr[a].shape[1] for a in array_names}
+        o_acc = {a: np.zeros((n_over, widths[a])) for a in array_names}
+        s_acc = {a: np.zeros((n_site, widths[a])) for a in array_names}
+        blk = pr["chi"].chunks[0] if pr["chi"].chunks else 1024
+        for s in range(start, end, blk):
+            e = min(s + blk, end)
+            o = oid_chunk[s - start : e - start]
+            si = sid_chunk[s - start : e - start]
+            for a in array_names:
+                d = pr[a][s:e]
+                np.add.at(o_acc[a], o, d)
+                np.add.at(s_acc[a], si, d)
+    return o_acc, s_acc
+
+
+def _reduce_group_metadata(
+    sort_order: np.ndarray,
+    bounds: np.ndarray,
+    n_clusters: int,
+    *,
+    r_eff: np.ndarray,
+    degeneracy: np.ndarray,
+    cw_ratio: np.ndarray,
+    angle: np.ndarray,
+    frame_index: np.ndarray,
+    site_index: np.ndarray,
+    canon_codes: np.ndarray,
+    canon_labels: np.ndarray,
+    nlegs: np.ndarray,
+) -> list[dict]:
+    """Compute per-cluster scalar/metadata reductions via sorted-group slices.
+
+    Iterating clusters with a fresh boolean mask over all rows would be
+    O(n_rows * n_clusters); instead rows are pre-sorted by cluster id once and
+    each cluster is a contiguous slice.
+    """
+    meta: list[dict] = [{} for _ in range(n_clusters)]
+    for c in range(n_clusters):
+        rows = sort_order[bounds[c] : bounds[c + 1]]
+        if len(rows) == 0:
+            continue
+        re = r_eff[rows]
+        ang = angle[rows]
+        ang = ang[np.isfinite(ang)]
+        meta[c] = {
+            "rows": rows,
+            "n_samples": int(len(rows)),
+            "r_eff": float(re.mean()),
+            "r_eff_std": float(re.std()) if len(re) > 1 else 0.0,
+            "degeneracy": float(degeneracy[rows].mean()),
+            "cw_ratio": float(cw_ratio[rows].mean()),
+            "angle": float(ang.mean()) if len(ang) else None,
+            "angle_std": (
+                float(ang.std()) if len(ang) > 1 else (0.0 if len(ang) else None)
+            ),
+            "source_frames": np.unique(frame_index[rows]).astype(np.int64),
+            "source_sites": np.unique(site_index[rows]).astype(np.int64),
+            "scatterer": str(canon_labels[canon_codes[rows[0]]]),
+            "nlegs": int(nlegs[rows[0]]),
+        }
+    return meta
+
+
+def _build_contributions(
+    meta: list[dict],
+    sums: dict[str, np.ndarray],
+    counts: np.ndarray,
+    k_paths: np.ndarray,
+    k_param: np.ndarray,
+    fourier_params: dict,
+    r_bin: float,
+) -> dict[str, PathContribution]:
+    """Turn per-cluster sums + metadata into a ``{key: PathContribution}`` dict."""
+    result: dict[str, PathContribution] = {}
+    order = sorted(
+        range(len(meta)),
+        key=lambda c: meta[c].get("r_eff", np.inf) if meta[c] else np.inf,
+    )
+    for c in order:
+        m = meta[c]
+        if not m:
+            continue
+        n = counts[c]
+        if n <= 0:
+            continue
+        chi_avg = sums["chi"][c] / n
+        g = Group(k=k_paths, chi=chi_avg)
+        xftf(g, **fourier_params)
+
+        key = make_path_key(m["scatterer"], m["nlegs"], m["r_eff"], r_bin)
+        if key in result:
+            key = f"{key}_{len(result)}"
+
+        result[key] = PathContribution(
+            path_key=key,
+            scatterer=m["scatterer"],
+            nlegs=m["nlegs"],
+            r_eff=m["r_eff"],
+            degeneracy=m["degeneracy"],
+            n_samples=m["n_samples"],
+            k=k_paths,
+            chi=chi_avg,
+            r=np.asarray(g.r) if hasattr(g, "r") else np.array([]),
+            chir_mag=np.asarray(g.chir_mag) if hasattr(g, "chir_mag") else np.array([]),
+            chir_re=np.asarray(g.chir_re) if hasattr(g, "chir_re") else np.array([]),
+            chir_im=np.asarray(g.chir_im) if hasattr(g, "chir_im") else np.array([]),
+            cw_ratio=m["cw_ratio"],
+            angle=m["angle"],
+            r_eff_std=m["r_eff_std"],
+            angle_std=m["angle_std"],
+            source_frames=m["source_frames"],
+            source_sites=m["source_sites"],
+            amp=(sums["amp"][c] / n) if "amp" in sums else np.array([]),
+            pha=(sums["pha"][c] / n) if "pha" in sums else np.array([]),
+            lam=(sums["lam"][c] / n) if "lam" in sums else np.array([]),
+            rep=(sums["rep"][c] / n) if "rep" in sums else np.array([]),
+            k_param=k_param,
+        )
+    return result
+
+
+def aggregate_store_paths(
+    h5_path,
+    fourier_params: dict,
+    *,
+    r_bin: float = 0.15,
+    angle_tol: float = 15.0,
+    max_workers: int | None = None,
+    progress_callback=None,
+) -> tuple[dict[str, PathContribution], dict[int, dict[str, PathContribution]]]:
+    """Aggregate all stored per-path contributions into averaged paths.
+
+    Fast, vectorized, process-parallel replacement for feeding
+    :class:`PathAggregator` from :meth:`ExafsHDF5Store.iter_path_contributions`.
+    Produces the overall average and per-site averages in a single read pass.
+
+    Args:
+        h5_path: Path to the results HDF5 file (with a ``path_results`` group).
+        fourier_params: Parameters forwarded to :func:`larch.xafs.xftf`.
+        r_bin: Distance clustering tolerance (Å).
+        angle_tol: Angle clustering tolerance (degrees) for 3-leg paths.
+        max_workers: Number of worker processes for the streaming sum. ``None``
+            or ``<=1`` runs serially in-process.
+        progress_callback: Optional ``(completed, total, phase)`` callback.
+
+    Returns:
+        ``(overall, per_site)`` where ``overall`` is ``{key: PathContribution}``
+        and ``per_site`` is ``{site_index: {key: PathContribution}}``.
+    """
+    import h5py
+
+    from .debye_waller_core import canonical_scatterer_key
+
+    h5_path = str(h5_path)
+    with h5py.File(h5_path, "r", locking=False) as f:
+        pr = f.get("path_results")
+        if pr is None or "chi" not in pr:
+            return {}, {}
+        n = pr["frame_index"].shape[0]
+        if n == 0:
+            return {}, {}
+        r_eff = pr["r_eff"][:]
+        nlegs = pr["nlegs"][:].astype(np.int64)
+        angle = (
+            pr["angle"][:] if "angle" in pr else np.full(n, np.nan, dtype=np.float64)
+        )
+        site_index = pr["site_index"][:].astype(np.int64)
+        frame_index = pr["frame_index"][:].astype(np.int64)
+        degeneracy = pr["degeneracy"][:]
+        cw_ratio = pr["cw_ratio"][:]
+        scat_raw = pr["scatterer"][:]
+        k_paths = pr["k_grid_paths"][:]
+        k_param = pr["k_grid_params"][:] if "k_grid_params" in pr else np.array([])
+        array_names = [a for a in _PATH_ARRAY_NAMES if a in pr]
+
+    if progress_callback:
+        progress_callback(0, 1, "aggregating")
+
+    # Canonicalize scatterer labels over *unique* labels only, then represent
+    # every row by a small integer code into ``canon_labels`` rather than an
+    # object array of one Python string per row (which, for millions of rows,
+    # dominates memory and is slow to build/index).
+    uniq_scat, inv_scat = np.unique(scat_raw, return_inverse=True)
+    uniq_canon = np.array(
+        [
+            "-".join(
+                canonical_scatterer_key(
+                    s.decode("utf-8") if isinstance(s, bytes) else str(s)
+                )
+            )
+            for s in uniq_scat
+        ],
+        dtype=object,
+    )
+    # Distinct canonical labels get dense codes; several raw labels may collapse
+    # onto the same canonical label.
+    canon_labels, canon_of_uniqscat = np.unique(uniq_canon, return_inverse=True)
+    canon_codes = canon_of_uniqscat[inv_scat].astype(np.int64)
+
+    all_idx = np.arange(n)
+    oid, n_over = _assign_path_clusters(
+        canon_codes, nlegs, r_eff, angle, all_idx, r_bin, angle_tol
+    )
+
+    # Per-site cluster ids, globally unique, plus the site value per site-cluster.
+    sid = np.full(n, -1, dtype=np.int64)
+    n_site = 0
+    site_of_cluster: list[int] = []
+    for sv in np.unique(site_index):
+        pool = np.where(site_index == sv)[0]
+        sub, nc = _assign_path_clusters(
+            canon_codes, nlegs, r_eff, angle, pool, r_bin, angle_tol
+        )
+        sid[pool] = sub + n_site
+        n_site += nc
+        site_of_cluster.extend([int(sv)] * nc)
+
+    # Streaming per-cluster sums (optionally across worker processes).
+    def _width(a: str) -> int:
+        return k_paths.shape[0] if a == "chi" else k_param.shape[0]
+
+    o_sums = {a: np.zeros((n_over, _width(a))) for a in array_names}
+    s_sums = {a: np.zeros((n_site, _width(a))) for a in array_names}
+
+    import os
+
+    # Aggregation is I/O- and lock-bound (every worker reopens and reads the
+    # *same* HDF5 file), not compute-bound, so a large FEFF ``-w`` does more
+    # harm than good here: too many processes oversubscribe cores and contend
+    # on HDF5 file locks.  Cap the pool independently of the FEFF worker count.
+    cpu = os.cpu_count() or 2
+    if max_workers is None:
+        n_workers = max(1, min(cpu // 2, _AGG_MAX_WORKERS))
+    else:
+        n_workers = max(1, min(int(max_workers), cpu, _AGG_MAX_WORKERS))
+    n_workers = max(1, min(n_workers, n))
+    step = (n + n_workers - 1) // n_workers
+    ranges = [
+        (
+            h5_path,
+            s,
+            min(s + step, n),
+            oid[s : min(s + step, n)],
+            sid[s : min(s + step, n)],
+            n_over,
+            n_site,
+            array_names,
+        )
+        for s in range(0, n, step)
+    ]
+
+    done_frac = 0
+    total_frac = len(ranges)
+    if n_workers == 1:
+        for r in ranges:
+            o_acc, s_acc = _sum_path_arrays_worker(r)
+            for a in array_names:
+                o_sums[a] += o_acc[a]
+                s_sums[a] += s_acc[a]
+            done_frac += 1
+            if progress_callback:
+                progress_callback(done_frac, total_frac, "aggregating")
+    else:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        try:
+            with ProcessPoolExecutor(max_workers=n_workers) as ex:
+                futs = [ex.submit(_sum_path_arrays_worker, r) for r in ranges]
+                for fut in as_completed(futs):
+                    o_acc, s_acc = fut.result()
+                    for a in array_names:
+                        o_sums[a] += o_acc[a]
+                        s_sums[a] += s_acc[a]
+                    done_frac += 1
+                    if progress_callback:
+                        progress_callback(done_frac, total_frac, "aggregating")
+        except Exception:  # noqa: BLE001 - fall back to serial on any pool failure
+            for a in array_names:
+                o_sums[a][:] = 0
+                s_sums[a][:] = 0
+            for r in ranges:
+                o_acc, s_acc = _sum_path_arrays_worker(r)
+                for a in array_names:
+                    o_sums[a] += o_acc[a]
+                    s_sums[a] += s_acc[a]
+
+    # Per-cluster counts and metadata via sorted-group slices.
+    o_order = np.argsort(oid, kind="stable")
+    o_bounds = np.searchsorted(oid[o_order], np.arange(n_over + 1))
+    o_counts = np.diff(o_bounds)
+    o_meta = _reduce_group_metadata(
+        o_order,
+        o_bounds,
+        n_over,
+        r_eff=r_eff,
+        degeneracy=degeneracy,
+        cw_ratio=cw_ratio,
+        angle=angle,
+        frame_index=frame_index,
+        site_index=site_index,
+        canon_codes=canon_codes,
+        canon_labels=canon_labels,
+        nlegs=nlegs,
+    )
+    overall = _build_contributions(
+        o_meta, o_sums, o_counts, k_paths, k_param, fourier_params, r_bin
+    )
+
+    s_order = np.argsort(sid, kind="stable")
+    s_bounds = np.searchsorted(sid[s_order], np.arange(n_site + 1))
+    s_counts = np.diff(s_bounds)
+    s_meta = _reduce_group_metadata(
+        s_order,
+        s_bounds,
+        n_site,
+        r_eff=r_eff,
+        degeneracy=degeneracy,
+        cw_ratio=cw_ratio,
+        angle=angle,
+        frame_index=frame_index,
+        site_index=site_index,
+        canon_codes=canon_codes,
+        canon_labels=canon_labels,
+        nlegs=nlegs,
+    )
+
+    # Split site-clusters back out by their originating site value.
+    per_site: dict[int, list[int]] = {}
+    for c in range(n_site):
+        per_site.setdefault(site_of_cluster[c], []).append(c)
+    per_site_result: dict[int, dict[str, PathContribution]] = {}
+    for sv, cluster_ids in per_site.items():
+        sub_meta = [s_meta[c] for c in cluster_ids]
+        sub_sums = {a: s_sums[a][cluster_ids] for a in array_names}
+        sub_counts = s_counts[cluster_ids]
+        per_site_result[sv] = _build_contributions(
+            sub_meta, sub_sums, sub_counts, k_paths, k_param, fourier_params, r_bin
+        )
+
+    if progress_callback:
+        progress_callback(total_frac, total_frac, "aggregating")
+
+    return overall, per_site_result
 
 
 # ---------------------------------------------------------------------------
