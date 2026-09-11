@@ -819,8 +819,8 @@ O  0.0 2.0 0.0
 
     def test_cli_app_configuration(self):
         """Test that the Typer app is configured correctly."""
-        assert app.info.name == "larch-cli"
-        assert "EXAFS processing" in app.info.help
+        assert app.info.name == "md-exafs"
+        assert "EXAFS" in app.info.help
         assert app.info.invoke_without_command is True
         assert app.info.no_args_is_help is True
 
