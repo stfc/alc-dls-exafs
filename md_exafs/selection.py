@@ -22,12 +22,19 @@ def resolve_frame_absorbers(
             - int: Single atom index.
             - list[int] / tuple[int, ...]: Explicit list of atom indices.
 
+            Absolute indices may be negative, with Python semantics (``-1`` is the
+            last atom). Element-relative indices (the part after ``:``) may not.
+            Callers that need the stored specification to match the resolved index
+            exactly — e.g. provenance-tracking front-ends — should reject negative
+            values before calling.
+
     Returns:
-        List of 0-based atom indices for absorbing atoms.
+        List of 0-based atom indices for absorbing atoms, sorted and de-duplicated.
 
     Raises:
         ValueError: If indices are out of bounds, species are mixed,
             or element is not found.
+        TypeError: If ``spec`` is not a str, int, list or tuple.
     """
     n_atoms = len(symbols)
     if n_atoms == 0:

@@ -122,8 +122,24 @@ def _to_str_tokens(value: Any) -> list[str]:
     return value.split() if isinstance(value, str) else [str(value)]
 
 
-def _normalize_tag(name: str, value: Any) -> str:
-    """Normalize a FEFF card value to a space-separated string."""
+def normalize_tag(name: str, value: Any) -> str:
+    """Normalize a FEFF card value to the space-separated string FEFF expects.
+
+    Public API: front-ends that accept user-supplied card values (e.g. the
+    ``aiida-feff`` ``FeffParameters`` node) call this so that validation and
+    formatting of a card is identical whether the value reaches FEFF through
+    this library or through a wrapper.
+
+    Args:
+        name: FEFF card name, case-insensitive (e.g. ``"s02"``, ``"SCF"``).
+        value: Scalar, string, or sequence of tokens.
+
+    Returns:
+        The card's value rendered as a single space-separated string.
+
+    Raises:
+        ValueError: If the value is outside the range FEFF accepts for that card.
+    """
     key = name.strip().upper()
     tokens = _to_str_tokens(value)
 
@@ -289,7 +305,7 @@ class FeffConfig:
         }
         for name, val in cards.items():
             if val is not None:
-                user_tags[name] = _normalize_tag(name, val)
+                user_tags[name] = normalize_tag(name, val)
 
         del_list: list[str] = []
         if isinstance(self.delete_tags, str):
@@ -444,4 +460,5 @@ __all__ = [
     "make_potentials_feff_config",
     "make_paths_feff_config",
     "build_feff_inp",
+    "normalize_tag",
 ]

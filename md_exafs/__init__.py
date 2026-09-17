@@ -4,7 +4,7 @@ from pathlib import Path
 
 from .constants import ETOK, HBAR2_OVER_2M_EV_ANGSTROM2
 from .exafs_data import PathAggregator, PathContribution
-from .feff_input import FeffConfig, build_feff_inp
+from .feff_input import FeffConfig, build_feff_inp, normalize_tag
 from .hdf5 import (
     ArchiveReader,
     BatchShardReader,
@@ -34,6 +34,7 @@ __all__ = [
     "ETOK",
     "FeffConfig",
     "build_feff_inp",
+    "normalize_tag",
     "PathResult",
     "path_chi",
     "make_path_key",
