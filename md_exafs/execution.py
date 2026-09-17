@@ -13,7 +13,7 @@ import logging
 import os
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -345,7 +345,7 @@ class BatchExecutor:
 
 
 def merge_shards(
-    shard_paths: list[Path | str],
+    shard_paths: Sequence[Path | str],
     ensemble_path: Path | str,
     fourier_params: dict[str, Any] | None = None,
     top_n_paths: int = 25,
