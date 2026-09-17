@@ -1517,25 +1517,30 @@ def plot_bfactors(
     unique_elements = sorted(set(atom_names))
 
     def jmol_rgb(sym: str) -> tuple[float, float, float]:
+        if sym == "H":
+            # Off-white / light silver so H is visible on a white background
+            return (0.82, 0.85, 0.88)
         z = atomic_numbers.get(sym, 0)
         return tuple(jmol_colors[z])  # type: ignore[return-value]
 
     fig, ax = plt.subplots(figsize=(10, 4))
     for element in unique_elements:
         mask = np.array([n == element for n in atom_names])
+        is_h = element == "H"
         ax.scatter(
             atom_indices[mask],
             b_factors[mask],
             s=20,
-            alpha=0.7,
+            alpha=0.7 if not is_h else 0.85,
             color=jmol_rgb(element),
+            edgecolors="#708090" if is_h else "none",
+            linewidth=0.6 if is_h else 0,
             label=element,
             zorder=3,
         )
         mean_b = float(np.mean(b_factors[mask]))
-        ax.axhline(
-            mean_b, color=jmol_rgb(element), linestyle="--", linewidth=1, alpha=0.6
-        )
+        line_color = "#708090" if is_h else jmol_rgb(element)
+        ax.axhline(mean_b, color=line_color, linestyle="--", linewidth=1, alpha=0.6)
 
     ax.set_xlabel("Atom index")
     ax.set_ylabel("B-factor (Å²)")
