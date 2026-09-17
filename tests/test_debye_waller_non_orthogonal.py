@@ -273,3 +273,90 @@ def test_unwrapped_b_factors_non_orthogonal_cell():
 
     # B-factors must remain physically reasonable (< 2.0 Å²), not inflated to >100 Å²
     assert mean_b < 2.0
+
+
+def _parse_cif_loops(cif_text):
+    """Return (frac_positions, aniso_U_rows) parsed from save_cif_with_adp output."""
+    lines = [ln.strip() for ln in cif_text.splitlines() if ln.strip()]
+    frac, aniso = [], []
+    section = None
+    for ln in lines:
+        if ln.startswith("_atom_site_B_iso_or_equiv"):
+            section = "sites"
+            continue
+        if ln.startswith("_atom_site_aniso_U_12"):
+            section = "aniso"
+            continue
+        if ln.startswith(("_", "loop_", "data_")):
+            continue
+        tokens = ln.split()
+        if section == "sites":
+            frac.append([float(x) for x in tokens[2:5]])
+        elif section == "aniso":
+            # U11 U22 U33 U23 U13 U12
+            aniso.append([float(x) for x in tokens[1:7]])
+    return np.array(frac), np.array(aniso)
+
+
+def test_cif_adp_convention_non_orthogonal():
+    """CIF output uses the crystal-axes U convention and correct fractional coords.
+
+    Oracle: the CIF convention satisfies U_cart = A N U_cif N A^T with A the
+    column-vector cell matrix and N = diag(a*_i), so reconstructing U_cart
+    from the written values must recover the input tensor.
+    """
+    from larch_cli_wrapper.debye_waller_core import save_cif_with_adp
+
+    cell = np.array(
+        [
+            [4.0, 0.0, 0.0],
+            [1.6, 3.7, 0.0],
+            [0.5, 0.9, 4.2],
+        ]
+    )
+    rng = np.random.default_rng(0)
+    pos = rng.uniform(0.5, 3.0, size=(2, 3))
+    # Symmetric positive-definite Cartesian U per atom
+    u_cart = np.empty((2, 3, 3))
+    for i in range(2):
+        m = rng.normal(0.0, 0.05, size=(3, 3))
+        u_cart[i] = m @ m.T + 0.01 * np.eye(3)
+
+    results = {
+        "avg_positions": pos,
+        "atom_names": ["Mn", "O"],
+        "u_tensor": u_cart,
+        "avg_cell": cell,
+        "b_factors": 8 * np.pi**2 * np.trace(u_cart, axis1=1, axis2=2) / 3,
+    }
+    frac, aniso = _parse_cif_loops(save_cif_with_adp(results))
+
+    # Fractional coordinates: r = f @ cell (ASE row-vector convention)
+    np.testing.assert_allclose(frac @ cell, pos, atol=5e-5)
+
+    # Reconstruct U_cart from the written CIF U^ij values
+    a_col = cell.T
+    a_star = np.linalg.norm(np.linalg.inv(cell), axis=0)
+    n_mat = np.diag(a_star)
+    for i in range(2):
+        u11, u22, u33, u23, u13, u12 = aniso[i]
+        u_cif = np.array(
+            [
+                [u11, u12, u13],
+                [u12, u22, u23],
+                [u13, u23, u33],
+            ]
+        )
+        reconstructed = a_col @ n_mat @ u_cif @ n_mat @ a_col.T
+        np.testing.assert_allclose(reconstructed, u_cart[i], atol=5e-4)
+
+
+def test_cif_adp_convention_orthogonal_noop():
+    """For a diagonal cell the CIF U values equal the Cartesian tensor."""
+    from larch_cli_wrapper.debye_waller_core import cartesian_u_to_cif
+
+    cell = np.diag([4.0, 5.0, 6.0])
+    u_cart = np.array(
+        [[[0.02, 0.003, 0.001], [0.003, 0.03, 0.002], [0.001, 0.002, 0.04]]]
+    )
+    np.testing.assert_allclose(cartesian_u_to_cif(u_cart, cell), u_cart, atol=1e-12)

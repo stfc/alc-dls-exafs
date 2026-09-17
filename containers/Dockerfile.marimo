@@ -62,6 +62,6 @@ RUN uv pip install  --no-cache-dir cuequivariance==0.6.1 \
   pymatgen \
   pymatviz
 
-RUN uv pip install --no-cache-dir 'git+https://github.com/stfc/alc-dls-exafs.git@main'
+RUN uv pip install --no-cache-dir 'md-exafs[cli,notebooks]@git+https://github.com/stfc/alc-dls-exafs.git@main'
 
 CMD ["/bin/sh", "-c", "exec marimo run notebooks/exafs_pipeline.py --no-token -p $PORT --host $HOST"]

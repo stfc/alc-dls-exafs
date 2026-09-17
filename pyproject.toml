@@ -1,48 +1,62 @@
 [project]
-name = "larch-cli-wrapper"
-version = "0.1.0"
+name = "md-exafs"
+version = "0.2.0"
 authors = [
     { name = "Kane Shenton", email = "jkshenton@gmail.com" },
 ]
-description = "A CLI wrapper for larch EXAFS processing"
+description = "Core engine and CLI for ensemble-averaged EXAFS spectroscopy from MD trajectories"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Physics",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
-keywords = ["xafs", "exafs", "spectroscopy", "larch", "feff", "materials-science"]
+keywords = ["xafs", "exafs", "spectroscopy", "feff", "molecular-dynamics", "materials-science"]
 dependencies = [
     "ase<4.0,>=3.25",
-    "numpy<3.0.0,>=1.26.4",
+    "numpy<3.0.0,>=1.22",
     "scipy>=1.11",
     "xraylarch>=0.9.47",
+    "pymatgen<2026.0,>=2024.1",
+    "h5py>=3.0",
+]
+
+[project.optional-dependencies]
+cli = [
     "typer<1.0.0,>=0.17.3",
     "rich<14.0.0,>=13.9.1",
     "matplotlib>=3.5",
-    "larixite>=0.1.0",
+]
+notebooks = [
     "marimo>=0.16.4",
     "weas-widget>=0.1.26",
-    "pymatgen<2026.0,>=2025.1.24",
-    "altair>=6.0.0",
+    "altair>=5.0",
 ]
-
+docs = [
+    "sphinx>=7.0",
+    "sphinx-book-theme>=1.1.0",
+    "myst-parser>=3.0",
+    "sphinx-copybutton>=0.5",
+    "sphinx-design>=0.5",
+]
 
 [project.urls]
 Homepage = "https://github.com/stfc/alc-dls-exafs"
 Repository = "https://github.com/stfc/alc-dls-exafs"
-Documentation = "https://github.com/stfc/alc-dls-exafs/tree/main/docs"
+Documentation = "https://github.com/stfc/alc-dls-exafs#readme"
 "Bug Tracker" = "https://github.com/stfc/alc-dls-exafs/issues"
 
 [project.scripts]
-larch-cli = "larch_cli_wrapper.cli:app"
+md-exafs = "md_exafs.cli:app"
+larch-cli = "md_exafs.cli:app"
 
 [dependency-groups]
 dev = [
@@ -52,6 +66,12 @@ dev = [
     "types-setuptools",
     "types-PyYAML",
     "types-tqdm",
+    "typer<1.0.0,>=0.17.3",
+    "rich<14.0.0,>=13.9.1",
+    "matplotlib>=3.5",
+    "marimo>=0.16.4",
+    "weas-widget>=0.1.26",
+    "altair>=5.0",
 ]
 
 pre-commit = [
@@ -69,11 +89,11 @@ requires = ["uv_build>=0.8.4,<0.9.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = "larch_cli_wrapper"
+module-name = "md_exafs"
 module-root = ""
 source-include = [
-    "larch_cli_wrapper/feff_configs/*.yaml",
-    "larch_cli_wrapper/styles/*.mplstyle",
+    "md_exafs/feff_configs/*.yaml",
+    "md_exafs/styles/*.mplstyle",
 ]
 
 
@@ -95,6 +115,7 @@ exclude = [
     "build",
     "dist",
     "scripts",
+    "examples",
     "__pypackages__",
 ]
 
@@ -117,10 +138,19 @@ select = [
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-'tests/**/*' = ['D', 'S101']
-'**/test_*.py' = ['D', 'S101']
+'tests/**/*' = ['D', 'S101', 'S108']
+'**/test_*.py' = ['D', 'S101', 'S108']
 '__init__.py' = ['D', 'F401']
-'larch_cli_wrapper/cli.py' = ['B008']
+'md_exafs/cli.py' = ['B008', 'E501', 'BLE001']
+'md_exafs/execution.py' = ['S603', 'BLE001', 'E501']
+'md_exafs/potentials.py' = ['S603', 'E501']
+'md_exafs/paths.py' = ['BLE001', 'S110', 'E501']
+'md_exafs/hdf5.py' = ['BLE001', 'S110', 'E501']
+'md_exafs/experimental.py' = ['BLE001', 'E501']
+'md_exafs/feff_input.py' = ['E501']
+'md_exafs/selection.py' = ['E501']
+'md_exafs/spectra.py' = ['E501']
+'larch_cli_wrapper/**/*.py' = ['D', 'F401', 'F403']
 'notebooks/*.py' = ['F841', 'B018', 'E501', 'BLE001', 'S110', 'D']
 
 
