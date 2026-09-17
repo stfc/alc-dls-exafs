@@ -4,7 +4,13 @@ from pathlib import Path
 
 import numpy as np
 
-from md_exafs.execution import FeffTask, merge_shards
+from md_exafs.execution import (
+    DEFAULT_K_GRID,
+    FeffTask,
+    merge_shards,
+    parse_task_outputs,
+    write_batch_shard,
+)
 from md_exafs.hdf5 import ArchiveReader, BatchShardWriter
 from md_exafs.paths import PathResult
 
@@ -66,3 +72,96 @@ def test_merge_shards(tmp_path: Path):
 
     frame_1 = reader.get_frame_average(1)
     assert np.allclose(frame_1["chi"], chi2, atol=1e-5)
+
+
+def _write_chi_dat(directory: Path, k: np.ndarray, chi: np.ndarray) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    np.savetxt(directory / "chi.dat", np.column_stack([k, chi]), header="k chi")
+
+
+def test_write_batch_shard_collects_completed_runs(tmp_path: Path):
+    """A driver that ran FEFF itself can serialise the results via the public API."""
+    k_native = np.linspace(0.05, 19.95, 200)
+    chi_a = np.sin(k_native)
+    chi_b = np.cos(k_native)
+
+    _write_chi_dat(tmp_path / "snap_a", k_native, chi_a)
+    _write_chi_dat(tmp_path / "snap_b", k_native, chi_b)
+
+    tasks = [
+        FeffTask(
+            frame_idx=0,
+            site_idx=0,
+            input_dir=tmp_path / "snap_a",
+            absorber_element="Cu",
+        ),
+        FeffTask(
+            frame_idx=1,
+            site_idx=0,
+            input_dir=tmp_path / "snap_b",
+            absorber_element="Cu",
+        ),
+    ]
+
+    out, n_written = write_batch_shard(
+        tasks, tmp_path / "batch_shard.h5", store_paths=False
+    )
+
+    assert n_written == 2
+    reader = ArchiveReader(out)
+    assert reader.is_shard
+    assert np.allclose(reader.k, DEFAULT_K_GRID)
+    expected = np.mean(
+        [
+            np.interp(DEFAULT_K_GRID, k_native, chi_a, left=0.0, right=0.0),
+            np.interp(DEFAULT_K_GRID, k_native, chi_b, left=0.0, right=0.0),
+        ],
+        axis=0,
+    )
+    assert np.allclose(reader.chi, expected, atol=1e-5)
+
+
+def test_write_batch_shard_omits_unparseable_tasks(tmp_path: Path):
+    """A task with no usable chi.dat must be omitted, never zero-filled.
+
+    A zero spectrum is indistinguishable from a real result once averaged, so
+    writing one would silently bias the ensemble mean toward zero.
+    """
+    k_native = np.linspace(0.05, 19.95, 200)
+    chi = np.sin(k_native)
+    _write_chi_dat(tmp_path / "snap_ok", k_native, chi)
+    (tmp_path / "snap_broken").mkdir()  # ran, but produced no chi.dat
+
+    tasks = [
+        FeffTask(
+            frame_idx=0,
+            site_idx=0,
+            input_dir=tmp_path / "snap_ok",
+            absorber_element="Cu",
+        ),
+        FeffTask(
+            frame_idx=1,
+            site_idx=0,
+            input_dir=tmp_path / "snap_broken",
+            absorber_element="Cu",
+        ),
+    ]
+
+    out, n_written = write_batch_shard(
+        tasks, tmp_path / "batch_shard.h5", store_paths=False
+    )
+
+    assert n_written == 1
+    reader = ArchiveReader(out)
+    # The shard mean must equal the one good spectrum, not half of it.
+    expected = np.interp(DEFAULT_K_GRID, k_native, chi, left=0.0, right=0.0)
+    assert np.allclose(reader.chi, expected, atol=1e-5)
+
+
+def test_parse_task_outputs_reports_missing_chi(tmp_path: Path):
+    (tmp_path / "snap").mkdir()
+    task = FeffTask(frame_idx=0, site_idx=0, input_dir=tmp_path / "snap")
+    k, chi, paths = parse_task_outputs(task, store_paths=False)
+    assert k is None
+    assert chi is None
+    assert paths == []
