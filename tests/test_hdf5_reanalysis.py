@@ -22,7 +22,11 @@ import pytest
 
 from larch_cli_wrapper.feff_utils import FeffConfig, WindowType
 from larch_cli_wrapper.hdf5_store import ExafsHDF5Store
-from larch_cli_wrapper.pipeline import load_results_from_hdf5
+from larch_cli_wrapper.pipeline import (
+    fourier_config_from_hdf5,
+    load_results_from_hdf5,
+    write_results_to_hdf5,
+)
 
 NOTEBOOK = Path(__file__).resolve().parents[1] / "notebooks" / "exafs_pipeline.py"
 
@@ -140,6 +144,108 @@ def test_single_frame_still_produces_an_overall_average(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The archive records the settings it was made with
+# ---------------------------------------------------------------------------
+
+
+def test_fourier_config_is_recovered_from_the_archive(tmp_path):
+    h5 = tmp_path / "results.h5"
+    _write_results(h5, n_frames=1, n_sites=1)
+    written = FeffConfig(
+        kmin=3.5, kmax=9.0, dk=2.0, kweight=3, window=WindowType.PARZEN
+    )
+    with ExafsHDF5Store(h5, config=written, mode="a"):
+        pass  # rewrites meta/feff_config
+
+    recovered = fourier_config_from_hdf5(h5)
+    for field in ("kmin", "kmax", "dk", "kweight", "window"):
+        assert getattr(recovered, field) == getattr(written, field)
+
+
+def test_fourier_config_leaves_non_fourier_fields_alone(tmp_path):
+    """Only the FT fields are replayable; the rest describe the FEFF run."""
+    h5 = tmp_path / "results.h5"
+    _write_results(h5, n_frames=1, n_sites=1)
+    base = FeffConfig(radius=9.9, n_workers=7, edge="L3")
+
+    recovered = fourier_config_from_hdf5(h5, base=base)
+
+    assert recovered.radius == 9.9
+    assert recovered.n_workers == 7
+    assert recovered.edge == "L3"
+
+
+def test_default_reload_reproduces_the_original_transform(tmp_path):
+    """Re-analysis must not silently swap in library defaults.
+
+    ``FeffConfig()`` defaults to kmin=2.0, but chi(k) diverges below roughly
+    2 A^-1 where the EXAFS approximation breaks down.  Reloading an archive
+    written with a higher kmin under the default config lets that region back
+    through the window and inflates chi(R), so the file's own settings win
+    unless a config is passed explicitly.
+    """
+    h5 = tmp_path / "results.h5"
+    written = FeffConfig(kmin=3.0, kmax=12.0)
+    _write_results(h5, n_frames=1, n_sites=1)
+    with ExafsHDF5Store(h5, config=written, mode="a"):
+        pass
+
+    from_file = load_results_from_hdf5(h5)
+    explicit = load_results_from_hdf5(h5, written)
+    defaults = load_results_from_hdf5(h5, FeffConfig())
+
+    a = from_file.groups["frame_0000_site_0000"].chir_mag
+    b = explicit.groups["frame_0000_site_0000"].chir_mag
+    c = defaults.groups["frame_0000_site_0000"].chir_mag
+    np.testing.assert_allclose(a, b, rtol=0, atol=0)
+    # And the default really would have differed, so the test has teeth.
+    assert not np.allclose(a, c)
+
+
+def test_write_then_load_round_trip(tmp_path):
+    """``write_results_to_hdf5`` and ``load_results_from_hdf5`` are a pair."""
+    from larch import Group
+    from larch.xafs import xftf
+
+    from larch_cli_wrapper.exafs_data import create_averaged_group
+
+    cfg = FeffConfig(kmin=3.0, kmax=9.5, dk=2.0, kweight=3, window=WindowType.KAISER)
+    k = np.linspace(0.0, 15.0, 300)
+    groups = {}
+    for frame in range(2):
+        for site in range(2):
+            g = Group()
+            g.k = k
+            g.chi = np.sin((4 + site) * k) * np.exp(-k / 9) * (1 + 0.1 * frame)
+            xftf(g, **cfg.fourier_params)
+            g.frame_idx, g.site_idx = frame, site
+            g.absorber_element = "Fe"
+            g.task_id = f"frame_{frame:04d}_site_{site:04d}"
+            groups[g.task_id] = g
+    overall = create_averaged_group(list(groups.values()), cfg.fourier_params)
+
+    out = tmp_path / "nested" / "results.h5"
+    assert write_results_to_hdf5(out, cfg, groups, {}, {}, overall) == out
+    assert out.exists()
+
+    back = load_results_from_hdf5(out)
+
+    assert set(back.groups) == set(groups)
+    assert back.overall_average is not None
+    for task_id, original in groups.items():
+        # chi(k) is stored as float32, hence the tolerance.
+        np.testing.assert_allclose(
+            back.groups[task_id].chi, original.chi, rtol=0, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            back.groups[task_id].chir_mag, original.chir_mag, rtol=0, atol=1e-4
+        )
+    np.testing.assert_allclose(
+        back.overall_average.chir_mag, overall.chir_mag, rtol=0, atol=1e-4
+    )
+
+
+# ---------------------------------------------------------------------------
 # Notebook form wiring
 # ---------------------------------------------------------------------------
 
@@ -173,7 +279,7 @@ def test_analysis_form_ft_keys_match_feffconfig_fields():
     """
     config_fields = {f.name for f in fields(FeffConfig)}
     # Keys that intentionally do not map onto FeffConfig.
-    non_config_keys = {"hdf5_path"}
+    non_config_keys = {"hdf5_path", "use_stored_ft", "save_archive"}
 
     keys = _analysis_form_batch_keys()
     unmapped = keys - config_fields - non_config_keys

@@ -483,14 +483,25 @@ def _(dk_input, k_weight, kmax_input, kmin_input, mo, window_type):
           {kmax}
         </div>
 
-        **Already have results?** Point `results.h5` below at an HDF5 file from
-        a previous run to skip Stages A and B entirely. Only χ(k) is stored, so
-        the Fourier transforms are recomputed from the settings above — change
-        them and re-run as often as you like, no FEFF calculations needed.
+        Results are saved to `results.h5` in the output directory. That archive
+        is the durable artefact of the run: it holds every per-site χ(k) plus
+        the averages, and records the settings above, so the scratch FEFF
+        directories can be deleted and the spectra still re-analysed later.
+
+        **Already have results?** Point `results.h5` below at an archive from a
+        previous run to skip Stages A and B entirely. Only χ(k) is stored, so
+        the Fourier transforms are recomputed — no FEFF calculations needed.
         Leave it empty to analyse the Stage B results instead.
+
+        By default the file's own Fourier settings are reused, reproducing the
+        original run. Untick to apply the settings above instead. Mind `kmin`:
+        χ(k) diverges below ≈2 Å⁻¹ where the EXAFS approximation breaks down,
+        and letting that region through the window inflates and shifts χ(R).
 
         <div class="settings-grid">
           {hdf5_path}
+          {use_stored_ft}
+          {save_archive}
         </div>
         """)
         .batch(
@@ -502,11 +513,19 @@ def _(dk_input, k_weight, kmax_input, kmin_input, mo, window_type):
             dk=dk_input,  # renamed to match FeffConfig
             kmin=kmin_input,  # renamed to match FeffConfig
             kmax=kmax_input,  # renamed to match FeffConfig
-            # Not a FeffConfig field, so create_feff_config() ignores it.
+            # Not FeffConfig fields, so create_feff_config() ignores them.
             hdf5_path=mo.ui.text(
                 label="Existing results HDF5 (optional)",
                 placeholder="/path/to/results.h5",
                 full_width=True,
+            ),
+            use_stored_ft=mo.ui.checkbox(
+                label="Reuse the Fourier settings stored in that file",
+                value=True,
+            ),
+            save_archive=mo.ui.checkbox(
+                label="Save results.h5 archive (Stage B results only)",
+                value=True,
             ),
         )
         .form(
@@ -1039,6 +1058,7 @@ def _(PipelineProcessor, mo, traceback):
         task_results,
         config,
         cache_dir=None,
+        save_archive=True,
     ):
         """Stage C: Analyze results using PipelineProcessor."""
         try:
@@ -1087,6 +1107,27 @@ def _(PipelineProcessor, mo, traceback):
                     kweight_used=config.kweight,
                     fourier_params=config.fourier_params,
                 )
+                # Persist the run as a single archive.  Everything needed is
+                # already in memory here, so this needs no second pass over the
+                # FEFF output directories.
+                archive_line = "not saved"
+                if save_archive and groups:
+                    from larch_cli_wrapper.pipeline import write_results_to_hdf5
+
+                    bar.update(increment=0, subtitle="Writing results.h5...")
+                    try:
+                        archive_line = str(
+                            write_results_to_hdf5(
+                                batch.output_dir / "results.h5",
+                                config,
+                                groups,
+                                frame_averages,
+                                site_averages,
+                                overall_average,
+                            )
+                        )
+                    except (OSError, ValueError) as exc:
+                        archive_line = f"⚠️ failed to write ({exc})"
                 bar.update(increment=20, subtitle="Complete!")
 
                 # Prepare result summary
@@ -1100,6 +1141,7 @@ def _(PipelineProcessor, mo, traceback):
                     - **Frames:** {n_frames}
                     - **Sites:** {n_sites}
                     - **k-weighting:** {config.kweight}
+                    - **Archive:** {archive_line}
                     - **Source:** FEFF results from Stage B
 
                     Data collection created successfully!
@@ -1114,12 +1156,15 @@ def _(PipelineProcessor, mo, traceback):
                 ```
                 """), None
 
-    def run_analysis_from_hdf5(hdf5_path, config, want_paths=False):
+    def run_analysis_from_hdf5(hdf5_path, config, want_paths=False, use_stored_ft=True):
         """Stage C: Analyse an existing results HDF5 without re-running FEFF.
 
-        Only chi(k) is stored per site, so the Fourier transforms are redone
-        from the current settings. Changing kweight, window, dk, kmin or kmax
-        and re-running is therefore cheap and needs no FEFF calculations.
+        Only chi(k) is stored per site, so the Fourier transforms are redone.
+        Changing kweight, window, dk, kmin or kmax and re-running is therefore
+        cheap and needs no FEFF calculations.
+
+        With ``use_stored_ft`` the settings recorded in the file are used, so
+        the reload reproduces the original run.  Otherwise ``config`` wins.
         """
         from pathlib import Path
 
@@ -1132,11 +1177,17 @@ def _(PipelineProcessor, mo, traceback):
                 remove_on_exit=True,
             ) as bar:
                 from larch_cli_wrapper.exafs_data import EXAFSDataCollection
-                from larch_cli_wrapper.pipeline import load_results_from_hdf5
+                from larch_cli_wrapper.pipeline import (
+                    fourier_config_from_hdf5,
+                    load_results_from_hdf5,
+                )
 
                 bar.update(increment=20, subtitle="Reading site spectra...")
+                path = Path(hdf5_path).expanduser()
+                if use_stored_ft:
+                    config = fourier_config_from_hdf5(path, base=config)
                 loaded = load_results_from_hdf5(
-                    Path(hdf5_path).expanduser(),
+                    path,
                     config,
                     want_paths=want_paths,
                 )
@@ -1162,7 +1213,8 @@ def _(PipelineProcessor, mo, traceback):
                     - **k-weighting:** {config.kweight}
                     - **Fourier transform:** window={ft.get("window")},
                       k=[{ft.get("kmin")}, {ft.get("kmax")}] Å⁻¹,
-                      dk={ft.get("dk")} (recomputed from stored χ(k))
+                      dk={ft.get("dk")} —
+                      {"as stored in the file" if use_stored_ft else "from the settings above"}
                     - **Source:** {hdf5_path}
 
                     Data collection created successfully!
@@ -1427,6 +1479,7 @@ def _(
                 message, result = run_analysis_from_hdf5(
                     hdf5_path=hdf5_path,
                     config=config,
+                    use_stored_ft=bool(analysis_settings.get("use_stored_ft", True)),
                 )
             else:
                 # Extract batch and task_results from feff_result
@@ -1436,6 +1489,7 @@ def _(
                     task_results=task_results,
                     config=config,
                     cache_dir=DEFAULT_CACHE_DIR,
+                    save_archive=bool(analysis_settings.get("save_archive", True)),
                 )
         except (OSError, ValueError, RuntimeError) as e:
             message = mo.md(f"""

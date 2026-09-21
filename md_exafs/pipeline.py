@@ -8,7 +8,7 @@ This module implements a clean separation of concerns:
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from shutil import copy2
 from typing import NamedTuple
@@ -20,6 +20,7 @@ from larch import Group
 
 from .feff_utils import (
     FeffConfig,
+    WindowType,
     cleanup_feff_output,
     generate_multi_site_feff_inputs,
     normalize_absorbers,
@@ -36,7 +37,9 @@ __all__ = [
     "ResultProcessor",
     "PipelineProcessor",
     "LoadedResults",
+    "fourier_config_from_hdf5",
     "load_results_from_hdf5",
+    "write_results_to_hdf5",
 ]
 
 
@@ -1548,9 +1551,136 @@ class LoadedResults(NamedTuple):
     path_contributions: dict
 
 
-def load_results_from_hdf5(
+def write_results_to_hdf5(
     hdf5_path: Path,
     config: FeffConfig,
+    groups: dict[str, Group],
+    frame_averages: dict[int, Group],
+    site_averages: dict[int, Group],
+    overall_average: Group | None,
+) -> Path:
+    """Write per-site spectra and averages to a results HDF5 archive.
+
+    This is the inverse of :func:`load_results_from_hdf5`, and the two are
+    meant to stay a matched pair: anything written here must be readable back.
+    The archive is the durable artefact of a run -- the scratch FEFF
+    directories can be deleted afterwards, and the spectra can still be
+    re-analysed with different Fourier settings.
+
+    The config is recorded in the file's metadata, so a later reload knows the
+    k-range and window the spectra were produced with.
+
+    Path contributions are not written; they are only available when the run
+    kept per-path files, which the staged notebook workflow does not do.
+
+    Args:
+        hdf5_path: Destination file.  Created if absent, appended to if not.
+        config: The configuration the spectra were produced with.
+        groups: Per-site larch groups, keyed by task id.
+        frame_averages: Frame-averaged groups, keyed by frame index.
+        site_averages: Site-averaged groups, keyed by site index.
+        overall_average: The ensemble average, if one could be formed.
+
+    Returns:
+        The path written to, for convenience in reporting.
+    """
+    from .hdf5_store import ExafsHDF5Store
+
+    hdf5_path = Path(hdf5_path)
+    hdf5_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with ExafsHDF5Store(hdf5_path, config=config, store_paths=False) as store:
+        store.write_site_results_batch(
+            [
+                {
+                    "frame_index": group.frame_idx,
+                    "site_index": group.site_idx,
+                    "k": np.asarray(group.k),
+                    "chi": np.asarray(group.chi),
+                    "absorber_element": getattr(group, "absorber_element", ""),
+                    "success": True,
+                    "path_contributions": None,
+                }
+                for group in groups.values()
+            ]
+        )
+        if overall_average is not None:
+            store.write_overall_average(overall_average, n_components=len(groups))
+        for frame_idx, group in frame_averages.items():
+            store.write_frame_average(
+                frame_idx, group, n_components=getattr(group, "n_components", 1)
+            )
+        for site_idx, group in site_averages.items():
+            store.write_site_average(
+                site_idx, group, n_components=getattr(group, "n_components", 1)
+            )
+    return hdf5_path
+
+
+#: FeffConfig fields that control the Fourier transform, and nothing else.
+#: These are the only settings that can be changed when re-analysing a finished
+#: run, since chi(k) is already fixed by the FEFF calculations.
+_FOURIER_FIELDS = (
+    "kmin",
+    "kmax",
+    "kweight",
+    "dk",
+    "dk2",
+    "window",
+    "with_phase",
+    "rmax_out",
+    "nfft",
+    "kstep",
+)
+
+
+def fourier_config_from_hdf5(
+    hdf5_path: Path, base: FeffConfig | None = None
+) -> FeffConfig:
+    """Return ``base`` with the FT parameters recorded in a results archive.
+
+    Every run stores the config it used, so the archive knows the k-range and
+    window its spectra were produced with.  Re-analysing with different values
+    is legitimate, but it should be a deliberate act: silently falling back to
+    library defaults can quietly change the answer, since a too-low ``kmin``
+    admits the non-physical low-k divergence of chi(k) and inflates chi(R).
+
+    Only the Fourier fields are taken from the file.  The rest of the stored
+    config describes how the FEFF calculations were run and cannot be replayed.
+
+    Args:
+        hdf5_path: A results HDF5 file written by the pipeline.
+        base: Config supplying every non-Fourier field.  Defaults to
+            ``FeffConfig()``.
+
+    Returns:
+        A new config.  If the file records no usable Fourier settings, ``base``
+        is returned unchanged.
+    """
+    from .hdf5_store import ExafsHDF5Store
+
+    hdf5_path = Path(hdf5_path)
+    if not hdf5_path.exists():
+        raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
+
+    base = base or FeffConfig()
+    with ExafsHDF5Store(hdf5_path, mode="r") as store:
+        stored = store.read_metadata().get("feff_config")
+    if not isinstance(stored, dict):
+        return base
+
+    overrides = {f: stored[f] for f in _FOURIER_FIELDS if f in stored}
+    if "window" in overrides:
+        try:
+            overrides["window"] = WindowType(overrides["window"])
+        except ValueError:
+            del overrides["window"]
+    return replace(base, **overrides) if overrides else base
+
+
+def load_results_from_hdf5(
+    hdf5_path: Path,
+    config: FeffConfig | None = None,
     *,
     want_paths: bool = False,
     min_cw_ratio: float | None = None,
@@ -1567,6 +1697,8 @@ def load_results_from_hdf5(
         hdf5_path: A ``results.h5`` written by the pipeline with HDF5 output
             enabled.
         config: Configuration supplying the Fourier transform parameters.
+            Defaults to the parameters recorded in the file itself, so that
+            re-analysis reproduces the original run unless asked otherwise.
         want_paths: Also re-aggregate the stored per-path contributions.
             Requires the original run to have kept path files.
         min_cw_ratio: Drop aggregated paths whose curved-wave amplitude ratio
@@ -1589,6 +1721,8 @@ def load_results_from_hdf5(
     hdf5_path = Path(hdf5_path)
     if not hdf5_path.exists():
         raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
+    if config is None:
+        config = fourier_config_from_hdf5(hdf5_path)
 
     groups: dict[str, Group] = {}
     tasks: list[FeffTask] = []
