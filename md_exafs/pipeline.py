@@ -477,6 +477,13 @@ class FeffExecutor:
         "POTENTIALS",
     )
 
+    # Subset of ``_POTENTIAL_FILES`` without which a path-only run (CONTROL
+    # 0 0 0 1 1 1) cannot start at all: FEFF aborts with
+    # "#ERROR STOP cannot find phase.pad in rdxsph".  A site missing either of
+    # these has no usable potentials, regardless of what the precompute run
+    # reported.
+    _REQUIRED_POTENTIAL_FILES = ("phase.pad", "pot.pad")
+
     def _place_potential_file(self, src: Path, dst: Path, mode: str) -> bool:
         """Place a single potential file at ``dst`` using copy/hardlink/symlink.
 
@@ -503,11 +510,42 @@ class FeffExecutor:
             self.logger.error(f"Failed to place {src.name} -> {dst}: {e}")
             return False
 
+    def _sites_with_potentials(
+        self, batch: FeffBatch, candidate_sites: set[int]
+    ) -> set[int]:
+        """Return the subset of ``candidate_sites`` with usable potentials.
+
+        Potentials are precomputed per absorber site and are entirely
+        independent of one another, so this is checked site by site: a site is
+        usable only if its precompute directory holds every file in
+        ``_REQUIRED_POTENTIAL_FILES``.  This catches both sites whose FEFF
+        precompute run failed and sites that reported success but whose output
+        went missing afterwards.
+        """
+        precompute_dir = batch.output_dir / "precomputed_potentials"
+        usable = set()
+        for site_index in candidate_sites:
+            site_dir = precompute_dir / f"site_{site_index:04d}"
+            missing = [
+                filename
+                for filename in self._REQUIRED_POTENTIAL_FILES
+                if not (site_dir / filename).exists()
+            ]
+            if missing:
+                self.logger.warning(
+                    f"Site {site_index}: precomputed potentials unusable, "
+                    f"missing {', '.join(missing)} in {site_dir}"
+                )
+            else:
+                usable.add(site_index)
+        return usable
+
     def _distribute_potentials(
         self,
         batch: FeffBatch,
         parallel: bool = True,
         progress_callback: callable = None,
+        valid_sites: set[int] | None = None,
     ) -> int:
         """Distribute precomputed potential files to every main task directory.
 
@@ -518,11 +556,25 @@ class FeffExecutor:
         uses no extra disk because the potentials are read-only during
         path-only FEFF runs.
 
+        Args:
+            batch: Batch whose tasks should receive the potentials.
+            parallel: Whether to place files using a thread pool.
+            progress_callback: Optional callback ``(completed, total)``.
+            valid_sites: If given, only tasks whose ``site_index`` is in this
+                set are provisioned.  Potentials are per-site and independent,
+                so a site whose precompute run failed must not block the sites
+                that succeeded.  ``None`` provisions every task.
+
         Returns the number of files successfully placed.
         """
         mode = getattr(batch.config, "potential_link_mode", "copy") or "copy"
         precompute_dir = batch.output_dir / "precomputed_potentials"
-        n_tasks = len(batch.tasks)
+        tasks = [
+            task
+            for task in batch.tasks
+            if valid_sites is None or task.site_index in valid_sites
+        ]
+        n_tasks = len(tasks)
 
         self.logger.info(
             f"Distributing precomputed potential files to {n_tasks} task "
@@ -531,7 +583,7 @@ class FeffExecutor:
 
         # Build the list of (src, dst) placements up front.
         placements: list[tuple[Path, Path]] = []
-        for task in batch.tasks:
+        for task in tasks:
             precompute_site_dir = precompute_dir / f"site_{task.site_index:04d}"
             if not precompute_site_dir.exists():
                 self.logger.warning(
@@ -613,12 +665,24 @@ class FeffExecutor:
 
         Returns:
             Dict mapping task_id to success status
+
+        Raises:
+            RuntimeError: If potentials were precomputed for every site but
+                none of them are usable, so no task could possibly succeed.
+
+        Note:
+            When precomputing potentials, tasks belonging to sites whose
+            precompute run failed are removed from ``batch.tasks`` (and
+            reported as failed) so that the remaining sites still run.
         """
         self.logger.info(
             f"Executing {len(batch.tasks)} FEFF calculations"
             f"{' in parallel' if parallel and len(batch.tasks) > 1 else ''}"
             f"{' with caching' if self.cache_dir else ''}"
         )
+
+        # Tasks dropped because their site has no usable precomputed potentials.
+        skipped_task_results: dict[str, bool] = {}
 
         # Execute precompute tasks first if they exist
         if batch.precompute_tasks:
@@ -640,23 +704,67 @@ class FeffExecutor:
                 require_chi=False,  # Precompute: phase.pad+pot.pad only, not chi.dat
             )
 
-            # Check all precompute tasks succeeded
-            all_succeeded = all(success for _, success in precompute_results)
-            if not all_succeeded:
-                failed_count = sum(
-                    1 for _, success in precompute_results if not success
+            # Resolve the outcome per absorber site.  ``precompute_results`` is
+            # returned in the same order as ``input_files``, i.e. the order of
+            # ``batch.precompute_tasks``.
+            all_sites = {task.site_index for task in batch.precompute_tasks}
+            reported_ok = {
+                task.site_index
+                for task, (_feff_dir, success) in zip(
+                    batch.precompute_tasks, precompute_results, strict=False
                 )
+                if success
+            }
+            # Trust the files on disk, not just the reported exit status.
+            usable_sites = self._sites_with_potentials(batch, reported_ok)
+            unusable_sites = all_sites - usable_sites
+
+            if unusable_sites:
                 self.logger.error(
-                    f"{failed_count} precompute tasks failed - "
-                    "main calculations may fail"
+                    f"Precompute failed for {len(unusable_sites)} of "
+                    f"{len(all_sites)} sites: {sorted(unusable_sites)}. "
+                    "These sites cannot reuse potentials and will be skipped."
                 )
             else:
                 self.logger.info("All precompute tasks completed successfully")
-                self._distribute_potentials(
-                    batch,
-                    parallel=parallel,
-                    progress_callback=copy_progress_callback,
+
+            # Sites are independent: provision every site that succeeded, even
+            # when others failed.  Doing this all-or-nothing used to leave every
+            # task directory without phase.pad/pot.pad, so *all* path-only runs
+            # aborted with "cannot find phase.pad in rdxsph".
+            self._distribute_potentials(
+                batch,
+                parallel=parallel,
+                progress_callback=copy_progress_callback,
+                valid_sites=usable_sites,
+            )
+
+            if unusable_sites:
+                skipped = [
+                    task for task in batch.tasks if task.site_index in unusable_sites
+                ]
+                runnable = [
+                    task
+                    for task in batch.tasks
+                    if task.site_index not in unusable_sites
+                ]
+                if batch.tasks and not runnable:
+                    raise RuntimeError(
+                        "Potential precomputation failed for every absorber "
+                        f"site ({sorted(unusable_sites)}); no trajectory frame "
+                        "can reuse potentials. Aborting before running "
+                        f"{len(batch.tasks)} doomed FEFF calculations."
+                    )
+                self.logger.warning(
+                    f"Skipping {len(skipped)} of {len(batch.tasks)} tasks "
+                    f"belonging to sites {sorted(unusable_sites)}; the ensemble "
+                    f"average will be built from the remaining "
+                    f"{len(usable_sites)} sites."
                 )
+                # Mark skipped tasks as failed so the result stage ignores them.
+                for task in skipped:
+                    skipped_task_results[task.task_id] = False
+                batch.tasks = runnable
 
         total_tasks = len(batch.tasks)
         completed_tasks = 0
@@ -920,7 +1028,9 @@ class FeffExecutor:
                     if hdf5_progress_callback:
                         hdf5_progress_callback(1, 1)
 
-        return cached_results
+        # Skipped tasks are merged in last so they never inflate the progress
+        # accounting above, which is based on ``len(batch.tasks)``.
+        return {**skipped_task_results, **cached_results}
 
 
 class ResultProcessor:
