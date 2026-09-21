@@ -856,9 +856,14 @@ def _(PipelineProcessor, mo, traceback):
         if batch is None or not batch.tasks:
             return mo.md("### ❌ FEFF Execution Failed: No input tasks provided."), None
 
+        # execute_batch() drops tasks whose site has no usable precomputed
+        # potentials, so snapshot what was requested before it mutates the batch.
+        requested_tasks = list(batch.tasks)
+        requested_sites = {task.site_index for task in requested_tasks}
+
         try:
             with mo.status.progress_bar(
-                total=len(batch.tasks),
+                total=len(requested_tasks),
                 title="Running FEFF Calculations...",
                 subtitle="Initializing...",
                 completion_title="✅ FEFF Execution Complete",
@@ -895,23 +900,41 @@ def _(PipelineProcessor, mo, traceback):
                     progress_callback=progress_callback,
                 )
 
-                # Final update
-                bar.update(increment=0, subtitle="Complete!")
+                # Tasks skipped before execution never reach the progress
+                # callback, so close the remaining gap ourselves.
+                bar.update(
+                    increment=len(requested_tasks)
+                    - getattr(progress_callback, "_current", 0),
+                    subtitle="Complete!",
+                )
 
                 # Count successful calculations
                 successful_tasks = sum(
                     1 for success in task_results.values() if success
                 )
 
-                # Get batch information for display
+                # Get batch information for display.  batch.tasks now holds
+                # only the tasks that were actually run.
+                n_requested = len(requested_tasks)
                 frames = len({task.frame_index for task in batch.tasks})
-                sites = len({task.site_index for task in batch.tasks})
+                sites = {task.site_index for task in batch.tasks}
+                skipped_sites = requested_sites - sites
+                # Kept on the existing bullet rather than injected as a new
+                # line: mo.md dedents on the common leading whitespace, so a
+                # flush-left line would render the whole block as code.
+                sites_line = str(len(sites))
+                if skipped_sites:
+                    sites_line += (
+                        f" — ⚠️ {len(skipped_sites)} of {len(requested_sites)} "
+                        f"skipped ({sorted(skipped_sites)}): no usable "
+                        "precomputed potentials, excluded from the average"
+                    )
 
                 return mo.md(f"""
                     ### ✅ FEFF Execution Complete
-                    - **Processed:** {successful_tasks}/{len(batch.tasks)} calculations
+                    - **Processed:** {successful_tasks}/{n_requested} calculations
                     - **Frames:** {frames}
-                    - **Sites:** {sites}
+                    - **Sites:** {sites_line}
                     - **Parallel:** {"Yes" if parallel else "No"}
                     - **Cache:** {
                     "Enabled" if processor.feff_executor.cache_dir else "Disabled"
