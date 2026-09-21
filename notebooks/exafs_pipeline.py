@@ -297,7 +297,18 @@ def _(
           {output_dir_ui}
           {all_sites}
           {all_frames}
+          {reuse_potentials}
+          {potentials_structure}
         </div>
+
+        **Reusing potentials** computes the scattering potentials once per
+        absorber site from a single reference structure, then reuses them for
+        every frame. This is much faster for trajectories, but it overrides the
+        CONTROL tag below (`1 1 1 0 0 0` for the potentials, `0 0 0 1 1 1` for
+        the frames) and assumes the potentials do not change appreciably across
+        the trajectory. Note that the *average* structure is only meaningful
+        when atoms stay near their mean positions — pick a single frame instead
+        for diffusive systems.
 
                 <details class="advanced-panel">
                     <summary>Advanced FEFF Tags</summary>
@@ -331,6 +342,14 @@ def _(
             ),
             all_frames=mo.ui.checkbox(
                 label="Process all frames (for trajectories)", value=True
+            ),
+            reuse_potentials=mo.ui.checkbox(
+                label="Reuse precomputed potentials across frames", value=False
+            ),
+            potentials_structure=mo.ui.dropdown(
+                options=["Average structure", "First frame", "Last frame"],
+                value="Average structure",
+                label="Reference structure for potentials",
             ),
             # Advanced FEFF tag inputs
             # Use normalized FEFF strings from the selected preset when available
@@ -776,9 +795,23 @@ def _(FeffConfig, selected_preset):
 @app.cell
 def _(PipelineProcessor, mo, traceback):
     def run_input_generation_only(
-        structures, config, output_dir, absorber, all_sites, all_frames, cache_dir=None
+        structures,
+        config,
+        output_dir,
+        absorber,
+        all_sites,
+        all_frames,
+        cache_dir=None,
+        precompute_potentials=False,
+        precompute_potentials_structure=None,
     ):
-        """Stage A: Generate FEFF input files using PipelineProcessor."""
+        """Stage A: Generate FEFF input files using PipelineProcessor.
+
+        When ``precompute_potentials`` is set, one potentials-only task is
+        created per absorber site from ``precompute_potentials_structure``
+        (the average of ``structures`` if None), and every frame task is
+        switched to path-only mode so it reuses them.
+        """
         try:
             with mo.status.progress_bar(
                 total=100,
@@ -810,7 +843,12 @@ def _(PipelineProcessor, mo, traceback):
                 )
 
                 # Determine structure type and generate inputs
-                if len(structures) == 1 and not all_frames:
+                single_structure = len(structures) == 1 and not all_frames
+                # Potentials are precomputed once and reused across frames, so
+                # there is nothing to reuse them for in a single-structure run.
+                precompute = precompute_potentials and not single_structure
+
+                if single_structure:
                     # Single structure
                     batch = processor.input_generator.generate_single_site_inputs(
                         structure=structures[0],
@@ -822,20 +860,43 @@ def _(PipelineProcessor, mo, traceback):
                     )
                 else:
                     # Trajectory or multiple frames
+                    if precompute:
+                        bar.update(
+                            increment=0, subtitle="Building potentials reference..."
+                        )
                     batch = processor.input_generator.generate_trajectory_inputs(
                         structures=structures,
                         absorber=absorber_spec["absorber"],
                         output_dir=output_dir,
+                        precompute_potentials=precompute,
+                        precompute_potentials_structure=(
+                            precompute_potentials_structure if precompute else None
+                        ),
                     )
                     bar.update(increment=50, subtitle="Generated trajectory inputs...")
 
                 bar.update(increment=20, subtitle="Complete!")
+
+                n_precompute = len(batch.get_precompute_tasks())
+                if precompute:
+                    potentials_line = (
+                        f"{n_precompute} potentials-only tasks "
+                        "(frames run path-only and reuse them)"
+                    )
+                elif precompute_potentials:
+                    potentials_line = (
+                        "⚠️ requested but skipped — nothing to reuse across "
+                        "a single structure"
+                    )
+                else:
+                    potentials_line = "Off (each frame computes its own)"
 
                 return mo.md(f"""
                     ### ✅ Input Generation Complete
                     - **Generated:** {len(batch.tasks)} FEFF input files
                     - **Frames:** {len(structures)}
                     - **Sites:** {len({task.site_index for task in batch.tasks})}
+                    - **Reuse potentials:** {potentials_line}
                     - **Output:** {output_dir}
                     - **Absorber:** {absorber_spec["description"]}
 
@@ -1154,6 +1215,19 @@ def _(
         all_sites = input_settings.get("all_sites", True)
         all_frames = input_settings.get("all_frames", True)
 
+        # Resolve the potentials reference to an Atoms object.  None means
+        # "average of the input structures", which the pipeline computes
+        # itself.  Every choice comes from the loaded trajectory, so the atom
+        # ordering always matches the frames the potentials are reused for.
+        reuse_potentials = input_settings.get("reuse_potentials", False)
+        reference_choice = input_settings.get(
+            "potentials_structure", "Average structure"
+        )
+        potentials_structure = {
+            "First frame": structure_list[0],
+            "Last frame": structure_list[-1],
+        }.get(reference_choice)
+
         try:
             message, result = run_input_generation_only(
                 structures=structure_list,
@@ -1163,6 +1237,8 @@ def _(
                 all_sites=all_sites,
                 all_frames=all_frames,
                 cache_dir=DEFAULT_CACHE_DIR,
+                precompute_potentials=reuse_potentials,
+                precompute_potentials_structure=potentials_structure,
             )
         except (OSError, ValueError, RuntimeError) as e:
             message = mo.md(f"""
