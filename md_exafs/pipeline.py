@@ -11,6 +11,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import copy2
+from typing import NamedTuple
 
 import numpy as np
 from ase import Atoms
@@ -34,6 +35,8 @@ __all__ = [
     "FeffExecutor",
     "ResultProcessor",
     "PipelineProcessor",
+    "LoadedResults",
+    "load_results_from_hdf5",
 ]
 
 
@@ -1076,8 +1079,13 @@ class ResultProcessor:
                     group.k = k
                     group.chi = chi
 
-                    # Apply Fourier transform
-                    xftf(k, chi, group=group, kweight=self.config.kweight)
+                    # Apply Fourier transform with the *full* configured
+                    # parameters.  Passing only kweight left every individual
+                    # spectrum on larch's built-in window/kmin/kmax defaults,
+                    # so they were transformed differently from the averages
+                    # (which use config.fourier_params) and silently ignored
+                    # the window, kmin, kmax and dk settings.
+                    xftf(group, **self.config.fourier_params)
 
                     # Add metadata
                     group.site_idx = task.site_index
@@ -1528,6 +1536,132 @@ class PipelineProcessor:
             "cache_files": cache_info["files"],
             "cache_size_mb": cache_info["size_mb"],
         }
+
+
+class LoadedResults(NamedTuple):
+    """Spectra and averages reconstructed from a results HDF5 archive."""
+
+    groups: dict[str, Group]
+    frame_averages: dict[int, Group]
+    site_averages: dict[int, Group]
+    overall_average: Group | None
+    path_contributions: dict
+
+
+def load_results_from_hdf5(
+    hdf5_path: Path,
+    config: FeffConfig,
+    *,
+    want_paths: bool = False,
+    min_cw_ratio: float | None = None,
+    output_dir: Path | None = None,
+) -> LoadedResults:
+    """Rebuild EXAFS spectra and averages from an existing results HDF5 file.
+
+    Only chi(k) is persisted per site, so every Fourier transform is redone
+    here using ``config.fourier_params``.  That is what makes it possible to
+    re-analyse a finished run with different FT settings (window, kmin, kmax,
+    dk, kweight) without re-running a single FEFF calculation.
+
+    Args:
+        hdf5_path: A ``results.h5`` written by the pipeline with HDF5 output
+            enabled.
+        config: Configuration supplying the Fourier transform parameters.
+        want_paths: Also re-aggregate the stored per-path contributions.
+            Requires the original run to have kept path files.
+        min_cw_ratio: Drop aggregated paths whose curved-wave amplitude ratio
+            is below this threshold.  ``None`` keeps all of them.
+        output_dir: Directory recorded on the synthesised batch, for
+            bookkeeping only; nothing is written to it.
+
+    Returns:
+        A :class:`LoadedResults` holding the per-site groups, the frame, site
+        and overall averages, and the aggregated path contributions.
+
+    Raises:
+        FileNotFoundError: If ``hdf5_path`` does not exist.
+        ValueError: If the file holds no per-site spectra.
+    """
+    from larch.xafs import xftf
+
+    from .hdf5_store import ExafsHDF5Store
+
+    hdf5_path = Path(hdf5_path)
+    if not hdf5_path.exists():
+        raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
+
+    groups: dict[str, Group] = {}
+    tasks: list[FeffTask] = []
+    path_contributions: dict = {}
+
+    with ExafsHDF5Store(hdf5_path, mode="r") as store:
+        for site_result in store.iter_site_results():
+            fidx = site_result.frame_index
+            sidx = site_result.site_index
+
+            group = Group()
+            group.k = np.array(site_result.k)
+            group.chi = np.array(site_result.chi)
+            # (Re)apply the Fourier transform with the active parameters.
+            xftf(group, **config.fourier_params)
+            group.frame_idx = fidx
+            group.site_idx = sidx
+            group.absorber_element = site_result.absorber_element
+            task_id = f"frame_{fidx:04d}_site_{sidx:04d}"
+            group.task_id = task_id
+            groups[task_id] = group
+            tasks.append(
+                FeffTask(
+                    input_file=Path("/dev/null"),
+                    site_index=sidx,
+                    frame_index=fidx,
+                    absorber_element=group.absorber_element,
+                )
+            )
+
+        if want_paths:
+            try:
+                from .exafs_data import PathAggregator, filter_path_contributions
+
+                aggregator = PathAggregator()
+                n_path_records = 0
+                for (
+                    path_key,
+                    info,
+                    frame_idx,
+                    site_idx,
+                ) in store.iter_path_contributions():
+                    info = dict(info)
+                    info["frame_index"] = frame_idx
+                    info["site_index"] = site_idx
+                    aggregator.add({path_key: info})
+                    n_path_records += 1
+                if n_path_records > 0:
+                    path_contributions = aggregator.finalize(config.fourier_params)
+                    if min_cw_ratio is not None:
+                        path_contributions = filter_path_contributions(
+                            path_contributions, min_cw_ratio=min_cw_ratio
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Could not load path contributions: {exc}")
+
+    if not groups:
+        raise ValueError(
+            f"No per-site data found in {hdf5_path}. "
+            "Was the pipeline run with HDF5 output enabled?"
+        )
+
+    batch = FeffBatch(
+        tasks=tasks, output_dir=output_dir or hdf5_path.parent, config=config
+    )
+    processor = ResultProcessor(config)
+    return LoadedResults(
+        groups=groups,
+        frame_averages=processor.create_frame_averages(groups, batch),
+        site_averages=processor.create_site_averages(groups, batch),
+        overall_average=processor.create_overall_average(list(groups.values())),
+        path_contributions=path_contributions,
+    )
 
 
 def average_structure(structures: list[Atoms]) -> Atoms:

@@ -461,7 +461,7 @@ def _(feff_form, mo, run_feff_execution):
 
 
 @app.cell
-def _(dk_input, feff_form, k_weight, kmax_input, kmin_input, mo, window_type):
+def _(dk_input, k_weight, kmax_input, kmin_input, mo, window_type):
     # Stage C: Analysis Form
     analysis_form = (
         mo.md(r"""
@@ -477,24 +477,44 @@ def _(dk_input, feff_form, k_weight, kmax_input, kmin_input, mo, window_type):
 
         <div class="settings-grid">
           {kweight}
-          {window_type}
+          {window}
           {dk}
           {kmin}
           {kmax}
         </div>
+
+        **Already have results?** Point `results.h5` below at an HDF5 file from
+        a previous run to skip Stages A and B entirely. Only χ(k) is stored, so
+        the Fourier transforms are recomputed from the settings above — change
+        them and re-run as often as you like, no FEFF calculations needed.
+        Leave it empty to analyse the Stage B results instead.
+
+        <div class="settings-grid">
+          {hdf5_path}
+        </div>
         """)
         .batch(
-            # Fourier transform parameters
+            # Fourier transform parameters.  Every key here must match a
+            # FeffConfig field name: create_feff_config() silently drops
+            # anything else, which is how the window selector used to be inert.
             kweight=k_weight,  # renamed to match FeffConfig
-            window_type=window_type,
+            window=window_type,  # renamed to match FeffConfig
             dk=dk_input,  # renamed to match FeffConfig
             kmin=kmin_input,  # renamed to match FeffConfig
             kmax=kmax_input,  # renamed to match FeffConfig
+            # Not a FeffConfig field, so create_feff_config() ignores it.
+            hdf5_path=mo.ui.text(
+                label="Existing results HDF5 (optional)",
+                placeholder="/path/to/results.h5",
+                full_width=True,
+            ),
         )
         .form(
             submit_button_label="📊 Analyze Results",
             bordered=True,
-            submit_button_disabled=feff_form.value is None,
+            # Deliberately always enabled: an existing HDF5 file can be
+            # analysed without having run Stage B in this session.
+            submit_button_disabled=False,
         )
     )
     return (analysis_form,)
@@ -1094,7 +1114,71 @@ def _(PipelineProcessor, mo, traceback):
                 ```
                 """), None
 
+    def run_analysis_from_hdf5(hdf5_path, config, want_paths=False):
+        """Stage C: Analyse an existing results HDF5 without re-running FEFF.
+
+        Only chi(k) is stored per site, so the Fourier transforms are redone
+        from the current settings. Changing kweight, window, dk, kmin or kmax
+        and re-running is therefore cheap and needs no FEFF calculations.
+        """
+        from pathlib import Path
+
+        try:
+            with mo.status.progress_bar(
+                total=100,
+                title="Analyzing Existing Results...",
+                subtitle=f"Reading {hdf5_path}...",
+                completion_title="✅ Analysis Complete",
+                remove_on_exit=True,
+            ) as bar:
+                from larch_cli_wrapper.exafs_data import EXAFSDataCollection
+                from larch_cli_wrapper.pipeline import load_results_from_hdf5
+
+                bar.update(increment=20, subtitle="Reading site spectra...")
+                loaded = load_results_from_hdf5(
+                    Path(hdf5_path).expanduser(),
+                    config,
+                    want_paths=want_paths,
+                )
+                bar.update(increment=50, subtitle="Creating averages...")
+
+                data_collection = EXAFSDataCollection(
+                    individual_spectra=list(loaded.groups.values()),
+                    overall_average=loaded.overall_average,
+                    frame_averages=loaded.frame_averages,
+                    site_averages=loaded.site_averages,
+                    path_contributions=loaded.path_contributions,
+                    kweight_used=config.kweight,
+                    fourier_params=config.fourier_params,
+                )
+                bar.update(increment=30, subtitle="Complete!")
+
+                ft = config.fourier_params
+                return mo.md(f"""
+                    ### ✅ Analysis Complete
+                    - **Loaded:** {len(loaded.groups)} site spectra
+                    - **Frames:** {len(loaded.frame_averages)}
+                    - **Sites:** {len(loaded.site_averages)}
+                    - **k-weighting:** {config.kweight}
+                    - **Fourier transform:** window={ft.get("window")},
+                      k=[{ft.get("kmin")}, {ft.get("kmax")}] Å⁻¹,
+                      dk={ft.get("dk")} (recomputed from stored χ(k))
+                    - **Source:** {hdf5_path}
+
+                    Data collection created successfully!
+                    """), data_collection
+
+        except (OSError, ValueError, KeyError) as e:
+            return mo.md(f"""
+                ### ❌ Analysis Failed
+                **Error:** {str(e)}
+                ```
+                {traceback.format_exc()}
+                ```
+                """), None
+
     return (
+        run_analysis_from_hdf5,
         run_analysis_only,
         run_feff_execution_only,
         run_input_generation_only,
@@ -1313,32 +1397,46 @@ def _(
     create_feff_config,
     feff_result,
     mo,
+    run_analysis_from_hdf5,
     run_analysis_only,
     traceback,
 ):
     def run_analysis():
-        """Stage C: Analyze FEFF results and create plots."""
-        if not analysis_form or not feff_result:
-            return mo.md(
-                "### ❌ Analysis Failed: Missing FEFF results. Please run "
-                "Stage B (FEFF Execution) first."
-            ), None
+        """Stage C: Analyze results from Stage B, or from an existing HDF5."""
+        if not analysis_form:
+            return mo.md("### ❌ Analysis Failed: Missing analysis settings."), None
 
         analysis_settings = analysis_form.value or {}
 
         # Create configuration from settings
         config = create_feff_config(analysis_settings)
 
-        # Extract batch and task_results from feff_result
-        batch, task_results = feff_result
+        # An explicit HDF5 path wins: it lets you analyse a finished run
+        # without having executed Stages A and B in this session.
+        hdf5_path = (analysis_settings.get("hdf5_path") or "").strip()
+
+        if not hdf5_path and not feff_result:
+            return mo.md(
+                "### ❌ Analysis Failed: Nothing to analyse. Either run "
+                "Stage B (FEFF Execution) first, or give the path to an "
+                "existing results HDF5 file in the analysis form."
+            ), None
 
         try:
-            message, result = run_analysis_only(
-                batch=batch,
-                task_results=task_results,
-                config=config,
-                cache_dir=DEFAULT_CACHE_DIR,
-            )
+            if hdf5_path:
+                message, result = run_analysis_from_hdf5(
+                    hdf5_path=hdf5_path,
+                    config=config,
+                )
+            else:
+                # Extract batch and task_results from feff_result
+                batch, task_results = feff_result
+                message, result = run_analysis_only(
+                    batch=batch,
+                    task_results=task_results,
+                    config=config,
+                    cache_dir=DEFAULT_CACHE_DIR,
+                )
         except (OSError, ValueError, RuntimeError) as e:
             message = mo.md(f"""
                 ### ❌ Analysis Failed
