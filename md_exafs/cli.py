@@ -4,7 +4,6 @@
 from enum import Enum
 from pathlib import Path
 
-import numpy as np
 import typer
 from ase import Atoms
 from ase.io import read as ase_read
@@ -924,79 +923,29 @@ def analyze_feff_outputs(
 
             console.print(f"[cyan]Loading EXAFS data from {hdf5_path}...[/cyan]")
 
-            from larch import Group
-            from larch.xafs import xftf
+            from .pipeline import load_results_from_hdf5
 
-            from .exafs_data import PathAggregator
-            from .hdf5_store import ExafsHDF5Store
-
-            groups: dict[str, Group] = {}
-            tasks: list[FeffTask] = []
-            path_contributions: dict = {}
-
-            with ExafsHDF5Store(hdf5_path, mode="r") as store:
-                # Load per-site k/chi from flat site_results and reapply FTs
-                for site_result in store.iter_site_results():
-                    fidx = site_result.frame_index
-                    sidx = site_result.site_index
-
-                    g = Group()
-                    g.k = np.array(site_result.k)
-                    g.chi = np.array(site_result.chi)
-                    # (Re)apply Fourier transform with active params
-                    xftf(g, **config.fourier_params)
-                    g.frame_idx = fidx
-                    g.site_idx = sidx
-                    g.absorber_element = site_result.absorber_element
-                    task_id = f"frame_{fidx:04d}_site_{sidx:04d}"
-                    g.task_id = task_id
-                    groups[task_id] = g
-                    tasks.append(
-                        FeffTask(
-                            input_file=Path("/dev/null"),
-                            site_index=sidx,
-                            frame_index=fidx,
-                            absorber_element=g.absorber_element,
-                        )
-                    )
-
-                # Load path contributions if requested
-                if want_paths:
-                    try:
-                        from .exafs_data import filter_path_contributions
-
-                        agg = PathAggregator()
-                        n_path_records = 0
-                        for (
-                            path_key,
-                            info,
-                            frame_idx,
-                            site_idx,
-                        ) in store.iter_path_contributions():
-                            info = dict(info)
-                            info["frame_index"] = frame_idx
-                            info["site_index"] = site_idx
-                            agg.add({path_key: info})
-                            n_path_records += 1
-                        if n_path_records > 0:
-                            path_contributions = agg.finalize(config.fourier_params)
-                            if min_cw_ratio is not None:
-                                path_contributions = filter_path_contributions(
-                                    path_contributions,
-                                    min_cw_ratio=min_cw_ratio,
-                                )
-                    except Exception as exc:  # noqa: BLE001
-                        console.print(
-                            "[yellow]Warning: Could not load path"
-                            f" contributions: {exc}[/yellow]"
-                        )
-
-            if not groups:
-                console.print(
-                    "[red]Error: No per-site data found in HDF5 file. "
-                    "Was the pipeline run with --hdf5?[/red]"
+            # Shared with the marimo notebook's "analyse an existing HDF5"
+            # entry point so the two cannot drift apart.
+            try:
+                loaded = load_results_from_hdf5(
+                    hdf5_path,
+                    config,
+                    want_paths=want_paths,
+                    min_cw_ratio=min_cw_ratio,
+                    output_dir=output_dir,
                 )
-                raise typer.Exit(1)
+            except ValueError as exc:
+                console.print(
+                    f"[red]Error: {exc} Was the pipeline run with --hdf5?[/red]"
+                )
+                raise typer.Exit(1) from exc
+
+            groups = loaded.groups
+            frame_averages = loaded.frame_averages
+            site_averages = loaded.site_averages
+            overall_average = loaded.overall_average
+            path_contributions = loaded.path_contributions
 
             console.print(f"[dim]Loaded {len(groups)} site spectra from HDF5[/dim]")
             if path_contributions:
@@ -1009,13 +958,6 @@ def analyze_feff_outputs(
                     "[yellow]Warning: No path contributions found in HDF5. "
                     "Re-run pipeline with --keep-paths to store them.[/yellow]"
                 )
-
-            # Compute averages
-            batch = FeffBatch(tasks=tasks, output_dir=output_dir, config=config)
-            rp = ResultProcessor(config)
-            frame_averages = rp.create_frame_averages(groups, batch)
-            site_averages = rp.create_site_averages(groups, batch)
-            overall_average = rp.create_overall_average(list(groups.values()))
 
             # Absorber/edge for plot labels (from HDF5 metadata if not overridden)
             plot_absorber = absorber or ""

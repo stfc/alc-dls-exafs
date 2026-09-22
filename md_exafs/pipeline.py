@@ -8,9 +8,10 @@ This module implements a clean separation of concerns:
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from shutil import copy2
+from typing import NamedTuple
 
 import numpy as np
 from ase import Atoms
@@ -19,6 +20,7 @@ from larch import Group
 
 from .feff_utils import (
     FeffConfig,
+    WindowType,
     cleanup_feff_output,
     generate_multi_site_feff_inputs,
     normalize_absorbers,
@@ -34,6 +36,10 @@ __all__ = [
     "FeffExecutor",
     "ResultProcessor",
     "PipelineProcessor",
+    "LoadedResults",
+    "fourier_config_from_hdf5",
+    "load_results_from_hdf5",
+    "write_results_to_hdf5",
 ]
 
 
@@ -477,6 +483,13 @@ class FeffExecutor:
         "POTENTIALS",
     )
 
+    # Subset of ``_POTENTIAL_FILES`` without which a path-only run (CONTROL
+    # 0 0 0 1 1 1) cannot start at all: FEFF aborts with
+    # "#ERROR STOP cannot find phase.pad in rdxsph".  A site missing either of
+    # these has no usable potentials, regardless of what the precompute run
+    # reported.
+    _REQUIRED_POTENTIAL_FILES = ("phase.pad", "pot.pad")
+
     def _place_potential_file(self, src: Path, dst: Path, mode: str) -> bool:
         """Place a single potential file at ``dst`` using copy/hardlink/symlink.
 
@@ -503,11 +516,42 @@ class FeffExecutor:
             self.logger.error(f"Failed to place {src.name} -> {dst}: {e}")
             return False
 
+    def _sites_with_potentials(
+        self, batch: FeffBatch, candidate_sites: set[int]
+    ) -> set[int]:
+        """Return the subset of ``candidate_sites`` with usable potentials.
+
+        Potentials are precomputed per absorber site and are entirely
+        independent of one another, so this is checked site by site: a site is
+        usable only if its precompute directory holds every file in
+        ``_REQUIRED_POTENTIAL_FILES``.  This catches both sites whose FEFF
+        precompute run failed and sites that reported success but whose output
+        went missing afterwards.
+        """
+        precompute_dir = batch.output_dir / "precomputed_potentials"
+        usable = set()
+        for site_index in candidate_sites:
+            site_dir = precompute_dir / f"site_{site_index:04d}"
+            missing = [
+                filename
+                for filename in self._REQUIRED_POTENTIAL_FILES
+                if not (site_dir / filename).exists()
+            ]
+            if missing:
+                self.logger.warning(
+                    f"Site {site_index}: precomputed potentials unusable, "
+                    f"missing {', '.join(missing)} in {site_dir}"
+                )
+            else:
+                usable.add(site_index)
+        return usable
+
     def _distribute_potentials(
         self,
         batch: FeffBatch,
         parallel: bool = True,
         progress_callback: callable = None,
+        valid_sites: set[int] | None = None,
     ) -> int:
         """Distribute precomputed potential files to every main task directory.
 
@@ -518,11 +562,25 @@ class FeffExecutor:
         uses no extra disk because the potentials are read-only during
         path-only FEFF runs.
 
+        Args:
+            batch: Batch whose tasks should receive the potentials.
+            parallel: Whether to place files using a thread pool.
+            progress_callback: Optional callback ``(completed, total)``.
+            valid_sites: If given, only tasks whose ``site_index`` is in this
+                set are provisioned.  Potentials are per-site and independent,
+                so a site whose precompute run failed must not block the sites
+                that succeeded.  ``None`` provisions every task.
+
         Returns the number of files successfully placed.
         """
         mode = getattr(batch.config, "potential_link_mode", "copy") or "copy"
         precompute_dir = batch.output_dir / "precomputed_potentials"
-        n_tasks = len(batch.tasks)
+        tasks = [
+            task
+            for task in batch.tasks
+            if valid_sites is None or task.site_index in valid_sites
+        ]
+        n_tasks = len(tasks)
 
         self.logger.info(
             f"Distributing precomputed potential files to {n_tasks} task "
@@ -531,7 +589,7 @@ class FeffExecutor:
 
         # Build the list of (src, dst) placements up front.
         placements: list[tuple[Path, Path]] = []
-        for task in batch.tasks:
+        for task in tasks:
             precompute_site_dir = precompute_dir / f"site_{task.site_index:04d}"
             if not precompute_site_dir.exists():
                 self.logger.warning(
@@ -613,12 +671,24 @@ class FeffExecutor:
 
         Returns:
             Dict mapping task_id to success status
+
+        Raises:
+            RuntimeError: If potentials were precomputed for every site but
+                none of them are usable, so no task could possibly succeed.
+
+        Note:
+            When precomputing potentials, tasks belonging to sites whose
+            precompute run failed are removed from ``batch.tasks`` (and
+            reported as failed) so that the remaining sites still run.
         """
         self.logger.info(
             f"Executing {len(batch.tasks)} FEFF calculations"
             f"{' in parallel' if parallel and len(batch.tasks) > 1 else ''}"
             f"{' with caching' if self.cache_dir else ''}"
         )
+
+        # Tasks dropped because their site has no usable precomputed potentials.
+        skipped_task_results: dict[str, bool] = {}
 
         # Execute precompute tasks first if they exist
         if batch.precompute_tasks:
@@ -640,23 +710,67 @@ class FeffExecutor:
                 require_chi=False,  # Precompute: phase.pad+pot.pad only, not chi.dat
             )
 
-            # Check all precompute tasks succeeded
-            all_succeeded = all(success for _, success in precompute_results)
-            if not all_succeeded:
-                failed_count = sum(
-                    1 for _, success in precompute_results if not success
+            # Resolve the outcome per absorber site.  ``precompute_results`` is
+            # returned in the same order as ``input_files``, i.e. the order of
+            # ``batch.precompute_tasks``.
+            all_sites = {task.site_index for task in batch.precompute_tasks}
+            reported_ok = {
+                task.site_index
+                for task, (_feff_dir, success) in zip(
+                    batch.precompute_tasks, precompute_results, strict=False
                 )
+                if success
+            }
+            # Trust the files on disk, not just the reported exit status.
+            usable_sites = self._sites_with_potentials(batch, reported_ok)
+            unusable_sites = all_sites - usable_sites
+
+            if unusable_sites:
                 self.logger.error(
-                    f"{failed_count} precompute tasks failed - "
-                    "main calculations may fail"
+                    f"Precompute failed for {len(unusable_sites)} of "
+                    f"{len(all_sites)} sites: {sorted(unusable_sites)}. "
+                    "These sites cannot reuse potentials and will be skipped."
                 )
             else:
                 self.logger.info("All precompute tasks completed successfully")
-                self._distribute_potentials(
-                    batch,
-                    parallel=parallel,
-                    progress_callback=copy_progress_callback,
+
+            # Sites are independent: provision every site that succeeded, even
+            # when others failed.  Doing this all-or-nothing used to leave every
+            # task directory without phase.pad/pot.pad, so *all* path-only runs
+            # aborted with "cannot find phase.pad in rdxsph".
+            self._distribute_potentials(
+                batch,
+                parallel=parallel,
+                progress_callback=copy_progress_callback,
+                valid_sites=usable_sites,
+            )
+
+            if unusable_sites:
+                skipped = [
+                    task for task in batch.tasks if task.site_index in unusable_sites
+                ]
+                runnable = [
+                    task
+                    for task in batch.tasks
+                    if task.site_index not in unusable_sites
+                ]
+                if batch.tasks and not runnable:
+                    raise RuntimeError(
+                        "Potential precomputation failed for every absorber "
+                        f"site ({sorted(unusable_sites)}); no trajectory frame "
+                        "can reuse potentials. Aborting before running "
+                        f"{len(batch.tasks)} doomed FEFF calculations."
+                    )
+                self.logger.warning(
+                    f"Skipping {len(skipped)} of {len(batch.tasks)} tasks "
+                    f"belonging to sites {sorted(unusable_sites)}; the ensemble "
+                    f"average will be built from the remaining "
+                    f"{len(usable_sites)} sites."
                 )
+                # Mark skipped tasks as failed so the result stage ignores them.
+                for task in skipped:
+                    skipped_task_results[task.task_id] = False
+                batch.tasks = runnable
 
         total_tasks = len(batch.tasks)
         completed_tasks = 0
@@ -920,7 +1034,9 @@ class FeffExecutor:
                     if hdf5_progress_callback:
                         hdf5_progress_callback(1, 1)
 
-        return cached_results
+        # Skipped tasks are merged in last so they never inflate the progress
+        # accounting above, which is based on ``len(batch.tasks)``.
+        return {**skipped_task_results, **cached_results}
 
 
 class ResultProcessor:
@@ -966,8 +1082,13 @@ class ResultProcessor:
                     group.k = k
                     group.chi = chi
 
-                    # Apply Fourier transform
-                    xftf(k, chi, group=group, kweight=self.config.kweight)
+                    # Apply Fourier transform with the *full* configured
+                    # parameters.  Passing only kweight left every individual
+                    # spectrum on larch's built-in window/kmin/kmax defaults,
+                    # so they were transformed differently from the averages
+                    # (which use config.fourier_params) and silently ignored
+                    # the window, kmin, kmax and dk settings.
+                    xftf(group, **self.config.fourier_params)
 
                     # Add metadata
                     group.site_idx = task.site_index
@@ -1418,6 +1539,263 @@ class PipelineProcessor:
             "cache_files": cache_info["files"],
             "cache_size_mb": cache_info["size_mb"],
         }
+
+
+class LoadedResults(NamedTuple):
+    """Spectra and averages reconstructed from a results HDF5 archive."""
+
+    groups: dict[str, Group]
+    frame_averages: dict[int, Group]
+    site_averages: dict[int, Group]
+    overall_average: Group | None
+    path_contributions: dict
+
+
+def write_results_to_hdf5(
+    hdf5_path: Path,
+    config: FeffConfig,
+    groups: dict[str, Group],
+    frame_averages: dict[int, Group],
+    site_averages: dict[int, Group],
+    overall_average: Group | None,
+) -> Path:
+    """Write per-site spectra and averages to a results HDF5 archive.
+
+    This is the inverse of :func:`load_results_from_hdf5`, and the two are
+    meant to stay a matched pair: anything written here must be readable back.
+    The archive is the durable artefact of a run -- the scratch FEFF
+    directories can be deleted afterwards, and the spectra can still be
+    re-analysed with different Fourier settings.
+
+    The config is recorded in the file's metadata, so a later reload knows the
+    k-range and window the spectra were produced with.
+
+    Path contributions are not written; they are only available when the run
+    kept per-path files, which the staged notebook workflow does not do.
+
+    Args:
+        hdf5_path: Destination file.  Created if absent, appended to if not.
+        config: The configuration the spectra were produced with.
+        groups: Per-site larch groups, keyed by task id.
+        frame_averages: Frame-averaged groups, keyed by frame index.
+        site_averages: Site-averaged groups, keyed by site index.
+        overall_average: The ensemble average, if one could be formed.
+
+    Returns:
+        The path written to, for convenience in reporting.
+    """
+    from .hdf5_store import ExafsHDF5Store
+
+    hdf5_path = Path(hdf5_path)
+    hdf5_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with ExafsHDF5Store(hdf5_path, config=config, store_paths=False) as store:
+        store.write_site_results_batch(
+            [
+                {
+                    "frame_index": group.frame_idx,
+                    "site_index": group.site_idx,
+                    "k": np.asarray(group.k),
+                    "chi": np.asarray(group.chi),
+                    "absorber_element": getattr(group, "absorber_element", ""),
+                    "success": True,
+                    "path_contributions": None,
+                }
+                for group in groups.values()
+            ]
+        )
+        if overall_average is not None:
+            store.write_overall_average(overall_average, n_components=len(groups))
+        for frame_idx, group in frame_averages.items():
+            store.write_frame_average(
+                frame_idx, group, n_components=getattr(group, "n_components", 1)
+            )
+        for site_idx, group in site_averages.items():
+            store.write_site_average(
+                site_idx, group, n_components=getattr(group, "n_components", 1)
+            )
+    return hdf5_path
+
+
+#: FeffConfig fields that control the Fourier transform, and nothing else.
+#: These are the only settings that can be changed when re-analysing a finished
+#: run, since chi(k) is already fixed by the FEFF calculations.
+_FOURIER_FIELDS = (
+    "kmin",
+    "kmax",
+    "kweight",
+    "dk",
+    "dk2",
+    "window",
+    "with_phase",
+    "rmax_out",
+    "nfft",
+    "kstep",
+)
+
+
+def fourier_config_from_hdf5(
+    hdf5_path: Path, base: FeffConfig | None = None
+) -> FeffConfig:
+    """Return ``base`` with the FT parameters recorded in a results archive.
+
+    Every run stores the config it used, so the archive knows the k-range and
+    window its spectra were produced with.  Re-analysing with different values
+    is legitimate, but it should be a deliberate act: silently falling back to
+    library defaults can quietly change the answer, since a too-low ``kmin``
+    admits the non-physical low-k divergence of chi(k) and inflates chi(R).
+
+    Only the Fourier fields are taken from the file.  The rest of the stored
+    config describes how the FEFF calculations were run and cannot be replayed.
+
+    Args:
+        hdf5_path: A results HDF5 file written by the pipeline.
+        base: Config supplying every non-Fourier field.  Defaults to
+            ``FeffConfig()``.
+
+    Returns:
+        A new config.  If the file records no usable Fourier settings, ``base``
+        is returned unchanged.
+    """
+    from .hdf5_store import ExafsHDF5Store
+
+    hdf5_path = Path(hdf5_path)
+    if not hdf5_path.exists():
+        raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
+
+    base = base or FeffConfig()
+    with ExafsHDF5Store(hdf5_path, mode="r") as store:
+        stored = store.read_metadata().get("feff_config")
+    if not isinstance(stored, dict):
+        return base
+
+    overrides = {f: stored[f] for f in _FOURIER_FIELDS if f in stored}
+    if "window" in overrides:
+        try:
+            overrides["window"] = WindowType(overrides["window"])
+        except ValueError:
+            del overrides["window"]
+    return replace(base, **overrides) if overrides else base
+
+
+def load_results_from_hdf5(
+    hdf5_path: Path,
+    config: FeffConfig | None = None,
+    *,
+    want_paths: bool = False,
+    min_cw_ratio: float | None = None,
+    output_dir: Path | None = None,
+) -> LoadedResults:
+    """Rebuild EXAFS spectra and averages from an existing results HDF5 file.
+
+    Only chi(k) is persisted per site, so every Fourier transform is redone
+    here using ``config.fourier_params``.  That is what makes it possible to
+    re-analyse a finished run with different FT settings (window, kmin, kmax,
+    dk, kweight) without re-running a single FEFF calculation.
+
+    Args:
+        hdf5_path: A ``results.h5`` written by the pipeline with HDF5 output
+            enabled.
+        config: Configuration supplying the Fourier transform parameters.
+            Defaults to the parameters recorded in the file itself, so that
+            re-analysis reproduces the original run unless asked otherwise.
+        want_paths: Also re-aggregate the stored per-path contributions.
+            Requires the original run to have kept path files.
+        min_cw_ratio: Drop aggregated paths whose curved-wave amplitude ratio
+            is below this threshold.  ``None`` keeps all of them.
+        output_dir: Directory recorded on the synthesised batch, for
+            bookkeeping only; nothing is written to it.
+
+    Returns:
+        A :class:`LoadedResults` holding the per-site groups, the frame, site
+        and overall averages, and the aggregated path contributions.
+
+    Raises:
+        FileNotFoundError: If ``hdf5_path`` does not exist.
+        ValueError: If the file holds no per-site spectra.
+    """
+    from larch.xafs import xftf
+
+    from .hdf5_store import ExafsHDF5Store
+
+    hdf5_path = Path(hdf5_path)
+    if not hdf5_path.exists():
+        raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
+    if config is None:
+        config = fourier_config_from_hdf5(hdf5_path)
+
+    groups: dict[str, Group] = {}
+    tasks: list[FeffTask] = []
+    path_contributions: dict = {}
+
+    with ExafsHDF5Store(hdf5_path, mode="r") as store:
+        for site_result in store.iter_site_results():
+            fidx = site_result.frame_index
+            sidx = site_result.site_index
+
+            group = Group()
+            group.k = np.array(site_result.k)
+            group.chi = np.array(site_result.chi)
+            # (Re)apply the Fourier transform with the active parameters.
+            xftf(group, **config.fourier_params)
+            group.frame_idx = fidx
+            group.site_idx = sidx
+            group.absorber_element = site_result.absorber_element
+            task_id = f"frame_{fidx:04d}_site_{sidx:04d}"
+            group.task_id = task_id
+            groups[task_id] = group
+            tasks.append(
+                FeffTask(
+                    input_file=Path("/dev/null"),
+                    site_index=sidx,
+                    frame_index=fidx,
+                    absorber_element=group.absorber_element,
+                )
+            )
+
+        if want_paths:
+            try:
+                from .exafs_data import PathAggregator, filter_path_contributions
+
+                aggregator = PathAggregator()
+                n_path_records = 0
+                for (
+                    path_key,
+                    info,
+                    frame_idx,
+                    site_idx,
+                ) in store.iter_path_contributions():
+                    info = dict(info)
+                    info["frame_index"] = frame_idx
+                    info["site_index"] = site_idx
+                    aggregator.add({path_key: info})
+                    n_path_records += 1
+                if n_path_records > 0:
+                    path_contributions = aggregator.finalize(config.fourier_params)
+                    if min_cw_ratio is not None:
+                        path_contributions = filter_path_contributions(
+                            path_contributions, min_cw_ratio=min_cw_ratio
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Could not load path contributions: {exc}")
+
+    if not groups:
+        raise ValueError(
+            f"No per-site data found in {hdf5_path}. "
+            "Was the pipeline run with HDF5 output enabled?"
+        )
+
+    batch = FeffBatch(
+        tasks=tasks, output_dir=output_dir or hdf5_path.parent, config=config
+    )
+    processor = ResultProcessor(config)
+    return LoadedResults(
+        groups=groups,
+        frame_averages=processor.create_frame_averages(groups, batch),
+        site_averages=processor.create_site_averages(groups, batch),
+        overall_average=processor.create_overall_average(list(groups.values())),
+        path_contributions=path_contributions,
+    )
 
 
 def average_structure(structures: list[Atoms]) -> Atoms:

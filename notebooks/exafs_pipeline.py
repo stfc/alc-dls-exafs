@@ -297,7 +297,18 @@ def _(
           {output_dir_ui}
           {all_sites}
           {all_frames}
+          {reuse_potentials}
+          {potentials_structure}
         </div>
+
+        **Reusing potentials** computes the scattering potentials once per
+        absorber site from a single reference structure, then reuses them for
+        every frame. This is much faster for trajectories, but it overrides the
+        CONTROL tag below (`1 1 1 0 0 0` for the potentials, `0 0 0 1 1 1` for
+        the frames) and assumes the potentials do not change appreciably across
+        the trajectory. Note that the *average* structure is only meaningful
+        when atoms stay near their mean positions — pick a single frame instead
+        for diffusive systems.
 
                 <details class="advanced-panel">
                     <summary>Advanced FEFF Tags</summary>
@@ -331,6 +342,14 @@ def _(
             ),
             all_frames=mo.ui.checkbox(
                 label="Process all frames (for trajectories)", value=True
+            ),
+            reuse_potentials=mo.ui.checkbox(
+                label="Reuse precomputed potentials across frames", value=False
+            ),
+            potentials_structure=mo.ui.dropdown(
+                options=["Average structure", "First frame", "Last frame"],
+                value="Average structure",
+                label="Reference structure for potentials",
             ),
             # Advanced FEFF tag inputs
             # Use normalized FEFF strings from the selected preset when available
@@ -442,7 +461,7 @@ def _(feff_form, mo, run_feff_execution):
 
 
 @app.cell
-def _(dk_input, feff_form, k_weight, kmax_input, kmin_input, mo, window_type):
+def _(dk_input, k_weight, kmax_input, kmin_input, mo, window_type):
     # Stage C: Analysis Form
     analysis_form = (
         mo.md(r"""
@@ -458,24 +477,63 @@ def _(dk_input, feff_form, k_weight, kmax_input, kmin_input, mo, window_type):
 
         <div class="settings-grid">
           {kweight}
-          {window_type}
+          {window}
           {dk}
           {kmin}
           {kmax}
         </div>
+
+        Results are saved to `results.h5` in the output directory. That archive
+        is the durable artefact of the run: it holds every per-site χ(k) plus
+        the averages, and records the settings above, so the scratch FEFF
+        directories can be deleted and the spectra still re-analysed later.
+
+        **Already have results?** Point `results.h5` below at an archive from a
+        previous run to skip Stages A and B entirely. Only χ(k) is stored, so
+        the Fourier transforms are recomputed — no FEFF calculations needed.
+        Leave it empty to analyse the Stage B results instead.
+
+        By default the file's own Fourier settings are reused, reproducing the
+        original run. Untick to apply the settings above instead. Mind `kmin`:
+        χ(k) diverges below ≈2 Å⁻¹ where the EXAFS approximation breaks down,
+        and letting that region through the window inflates and shifts χ(R).
+
+        <div class="settings-grid">
+          {hdf5_path}
+          {use_stored_ft}
+          {save_archive}
+        </div>
         """)
         .batch(
-            # Fourier transform parameters
+            # Fourier transform parameters.  Every key here must match a
+            # FeffConfig field name: create_feff_config() silently drops
+            # anything else, which is how the window selector used to be inert.
             kweight=k_weight,  # renamed to match FeffConfig
-            window_type=window_type,
+            window=window_type,  # renamed to match FeffConfig
             dk=dk_input,  # renamed to match FeffConfig
             kmin=kmin_input,  # renamed to match FeffConfig
             kmax=kmax_input,  # renamed to match FeffConfig
+            # Not FeffConfig fields, so create_feff_config() ignores them.
+            hdf5_path=mo.ui.text(
+                label="Existing results HDF5 (optional)",
+                placeholder="/path/to/results.h5",
+                full_width=True,
+            ),
+            use_stored_ft=mo.ui.checkbox(
+                label="Reuse the Fourier settings stored in that file",
+                value=True,
+            ),
+            save_archive=mo.ui.checkbox(
+                label="Save results.h5 archive (Stage B results only)",
+                value=True,
+            ),
         )
         .form(
             submit_button_label="📊 Analyze Results",
             bordered=True,
-            submit_button_disabled=feff_form.value is None,
+            # Deliberately always enabled: an existing HDF5 file can be
+            # analysed without having run Stage B in this session.
+            submit_button_disabled=False,
         )
     )
     return (analysis_form,)
@@ -776,9 +834,23 @@ def _(FeffConfig, selected_preset):
 @app.cell
 def _(PipelineProcessor, mo, traceback):
     def run_input_generation_only(
-        structures, config, output_dir, absorber, all_sites, all_frames, cache_dir=None
+        structures,
+        config,
+        output_dir,
+        absorber,
+        all_sites,
+        all_frames,
+        cache_dir=None,
+        precompute_potentials=False,
+        precompute_potentials_structure=None,
     ):
-        """Stage A: Generate FEFF input files using PipelineProcessor."""
+        """Stage A: Generate FEFF input files using PipelineProcessor.
+
+        When ``precompute_potentials`` is set, one potentials-only task is
+        created per absorber site from ``precompute_potentials_structure``
+        (the average of ``structures`` if None), and every frame task is
+        switched to path-only mode so it reuses them.
+        """
         try:
             with mo.status.progress_bar(
                 total=100,
@@ -810,7 +882,12 @@ def _(PipelineProcessor, mo, traceback):
                 )
 
                 # Determine structure type and generate inputs
-                if len(structures) == 1 and not all_frames:
+                single_structure = len(structures) == 1 and not all_frames
+                # Potentials are precomputed once and reused across frames, so
+                # there is nothing to reuse them for in a single-structure run.
+                precompute = precompute_potentials and not single_structure
+
+                if single_structure:
                     # Single structure
                     batch = processor.input_generator.generate_single_site_inputs(
                         structure=structures[0],
@@ -822,20 +899,43 @@ def _(PipelineProcessor, mo, traceback):
                     )
                 else:
                     # Trajectory or multiple frames
+                    if precompute:
+                        bar.update(
+                            increment=0, subtitle="Building potentials reference..."
+                        )
                     batch = processor.input_generator.generate_trajectory_inputs(
                         structures=structures,
                         absorber=absorber_spec["absorber"],
                         output_dir=output_dir,
+                        precompute_potentials=precompute,
+                        precompute_potentials_structure=(
+                            precompute_potentials_structure if precompute else None
+                        ),
                     )
                     bar.update(increment=50, subtitle="Generated trajectory inputs...")
 
                 bar.update(increment=20, subtitle="Complete!")
+
+                n_precompute = len(batch.get_precompute_tasks())
+                if precompute:
+                    potentials_line = (
+                        f"{n_precompute} potentials-only tasks "
+                        "(frames run path-only and reuse them)"
+                    )
+                elif precompute_potentials:
+                    potentials_line = (
+                        "⚠️ requested but skipped — nothing to reuse across "
+                        "a single structure"
+                    )
+                else:
+                    potentials_line = "Off (each frame computes its own)"
 
                 return mo.md(f"""
                     ### ✅ Input Generation Complete
                     - **Generated:** {len(batch.tasks)} FEFF input files
                     - **Frames:** {len(structures)}
                     - **Sites:** {len({task.site_index for task in batch.tasks})}
+                    - **Reuse potentials:** {potentials_line}
                     - **Output:** {output_dir}
                     - **Absorber:** {absorber_spec["description"]}
 
@@ -856,9 +956,14 @@ def _(PipelineProcessor, mo, traceback):
         if batch is None or not batch.tasks:
             return mo.md("### ❌ FEFF Execution Failed: No input tasks provided."), None
 
+        # execute_batch() drops tasks whose site has no usable precomputed
+        # potentials, so snapshot what was requested before it mutates the batch.
+        requested_tasks = list(batch.tasks)
+        requested_sites = {task.site_index for task in requested_tasks}
+
         try:
             with mo.status.progress_bar(
-                total=len(batch.tasks),
+                total=len(requested_tasks),
                 title="Running FEFF Calculations...",
                 subtitle="Initializing...",
                 completion_title="✅ FEFF Execution Complete",
@@ -895,23 +1000,41 @@ def _(PipelineProcessor, mo, traceback):
                     progress_callback=progress_callback,
                 )
 
-                # Final update
-                bar.update(increment=0, subtitle="Complete!")
+                # Tasks skipped before execution never reach the progress
+                # callback, so close the remaining gap ourselves.
+                bar.update(
+                    increment=len(requested_tasks)
+                    - getattr(progress_callback, "_current", 0),
+                    subtitle="Complete!",
+                )
 
                 # Count successful calculations
                 successful_tasks = sum(
                     1 for success in task_results.values() if success
                 )
 
-                # Get batch information for display
+                # Get batch information for display.  batch.tasks now holds
+                # only the tasks that were actually run.
+                n_requested = len(requested_tasks)
                 frames = len({task.frame_index for task in batch.tasks})
-                sites = len({task.site_index for task in batch.tasks})
+                sites = {task.site_index for task in batch.tasks}
+                skipped_sites = requested_sites - sites
+                # Kept on the existing bullet rather than injected as a new
+                # line: mo.md dedents on the common leading whitespace, so a
+                # flush-left line would render the whole block as code.
+                sites_line = str(len(sites))
+                if skipped_sites:
+                    sites_line += (
+                        f" — ⚠️ {len(skipped_sites)} of {len(requested_sites)} "
+                        f"skipped ({sorted(skipped_sites)}): no usable "
+                        "precomputed potentials, excluded from the average"
+                    )
 
                 return mo.md(f"""
                     ### ✅ FEFF Execution Complete
-                    - **Processed:** {successful_tasks}/{len(batch.tasks)} calculations
+                    - **Processed:** {successful_tasks}/{n_requested} calculations
                     - **Frames:** {frames}
-                    - **Sites:** {sites}
+                    - **Sites:** {sites_line}
                     - **Parallel:** {"Yes" if parallel else "No"}
                     - **Cache:** {
                     "Enabled" if processor.feff_executor.cache_dir else "Disabled"
@@ -935,6 +1058,7 @@ def _(PipelineProcessor, mo, traceback):
         task_results,
         config,
         cache_dir=None,
+        save_archive=True,
     ):
         """Stage C: Analyze results using PipelineProcessor."""
         try:
@@ -983,6 +1107,27 @@ def _(PipelineProcessor, mo, traceback):
                     kweight_used=config.kweight,
                     fourier_params=config.fourier_params,
                 )
+                # Persist the run as a single archive.  Everything needed is
+                # already in memory here, so this needs no second pass over the
+                # FEFF output directories.
+                archive_line = "not saved"
+                if save_archive and groups:
+                    from larch_cli_wrapper.pipeline import write_results_to_hdf5
+
+                    bar.update(increment=0, subtitle="Writing results.h5...")
+                    try:
+                        archive_line = str(
+                            write_results_to_hdf5(
+                                batch.output_dir / "results.h5",
+                                config,
+                                groups,
+                                frame_averages,
+                                site_averages,
+                                overall_average,
+                            )
+                        )
+                    except (OSError, ValueError) as exc:
+                        archive_line = f"⚠️ failed to write ({exc})"
                 bar.update(increment=20, subtitle="Complete!")
 
                 # Prepare result summary
@@ -996,6 +1141,7 @@ def _(PipelineProcessor, mo, traceback):
                     - **Frames:** {n_frames}
                     - **Sites:** {n_sites}
                     - **k-weighting:** {config.kweight}
+                    - **Archive:** {archive_line}
                     - **Source:** FEFF results from Stage B
 
                     Data collection created successfully!
@@ -1010,7 +1156,81 @@ def _(PipelineProcessor, mo, traceback):
                 ```
                 """), None
 
+    def run_analysis_from_hdf5(hdf5_path, config, want_paths=False, use_stored_ft=True):
+        """Stage C: Analyse an existing results HDF5 without re-running FEFF.
+
+        Only chi(k) is stored per site, so the Fourier transforms are redone.
+        Changing kweight, window, dk, kmin or kmax and re-running is therefore
+        cheap and needs no FEFF calculations.
+
+        With ``use_stored_ft`` the settings recorded in the file are used, so
+        the reload reproduces the original run.  Otherwise ``config`` wins.
+        """
+        from pathlib import Path
+
+        try:
+            with mo.status.progress_bar(
+                total=100,
+                title="Analyzing Existing Results...",
+                subtitle=f"Reading {hdf5_path}...",
+                completion_title="✅ Analysis Complete",
+                remove_on_exit=True,
+            ) as bar:
+                from larch_cli_wrapper.exafs_data import EXAFSDataCollection
+                from larch_cli_wrapper.pipeline import (
+                    fourier_config_from_hdf5,
+                    load_results_from_hdf5,
+                )
+
+                bar.update(increment=20, subtitle="Reading site spectra...")
+                path = Path(hdf5_path).expanduser()
+                if use_stored_ft:
+                    config = fourier_config_from_hdf5(path, base=config)
+                loaded = load_results_from_hdf5(
+                    path,
+                    config,
+                    want_paths=want_paths,
+                )
+                bar.update(increment=50, subtitle="Creating averages...")
+
+                data_collection = EXAFSDataCollection(
+                    individual_spectra=list(loaded.groups.values()),
+                    overall_average=loaded.overall_average,
+                    frame_averages=loaded.frame_averages,
+                    site_averages=loaded.site_averages,
+                    path_contributions=loaded.path_contributions,
+                    kweight_used=config.kweight,
+                    fourier_params=config.fourier_params,
+                )
+                bar.update(increment=30, subtitle="Complete!")
+
+                ft = config.fourier_params
+                return mo.md(f"""
+                    ### ✅ Analysis Complete
+                    - **Loaded:** {len(loaded.groups)} site spectra
+                    - **Frames:** {len(loaded.frame_averages)}
+                    - **Sites:** {len(loaded.site_averages)}
+                    - **k-weighting:** {config.kweight}
+                    - **Fourier transform:** window={ft.get("window")},
+                      k=[{ft.get("kmin")}, {ft.get("kmax")}] Å⁻¹,
+                      dk={ft.get("dk")} —
+                      {"as stored in the file" if use_stored_ft else "from the settings above"}
+                    - **Source:** {hdf5_path}
+
+                    Data collection created successfully!
+                    """), data_collection
+
+        except (OSError, ValueError, KeyError) as e:
+            return mo.md(f"""
+                ### ❌ Analysis Failed
+                **Error:** {str(e)}
+                ```
+                {traceback.format_exc()}
+                ```
+                """), None
+
     return (
+        run_analysis_from_hdf5,
         run_analysis_only,
         run_feff_execution_only,
         run_input_generation_only,
@@ -1131,6 +1351,19 @@ def _(
         all_sites = input_settings.get("all_sites", True)
         all_frames = input_settings.get("all_frames", True)
 
+        # Resolve the potentials reference to an Atoms object.  None means
+        # "average of the input structures", which the pipeline computes
+        # itself.  Every choice comes from the loaded trajectory, so the atom
+        # ordering always matches the frames the potentials are reused for.
+        reuse_potentials = input_settings.get("reuse_potentials", False)
+        reference_choice = input_settings.get(
+            "potentials_structure", "Average structure"
+        )
+        potentials_structure = {
+            "First frame": structure_list[0],
+            "Last frame": structure_list[-1],
+        }.get(reference_choice)
+
         try:
             message, result = run_input_generation_only(
                 structures=structure_list,
@@ -1140,6 +1373,8 @@ def _(
                 all_sites=all_sites,
                 all_frames=all_frames,
                 cache_dir=DEFAULT_CACHE_DIR,
+                precompute_potentials=reuse_potentials,
+                precompute_potentials_structure=potentials_structure,
             )
         except (OSError, ValueError, RuntimeError) as e:
             message = mo.md(f"""
@@ -1214,32 +1449,48 @@ def _(
     create_feff_config,
     feff_result,
     mo,
+    run_analysis_from_hdf5,
     run_analysis_only,
     traceback,
 ):
     def run_analysis():
-        """Stage C: Analyze FEFF results and create plots."""
-        if not analysis_form or not feff_result:
-            return mo.md(
-                "### ❌ Analysis Failed: Missing FEFF results. Please run "
-                "Stage B (FEFF Execution) first."
-            ), None
+        """Stage C: Analyze results from Stage B, or from an existing HDF5."""
+        if not analysis_form:
+            return mo.md("### ❌ Analysis Failed: Missing analysis settings."), None
 
         analysis_settings = analysis_form.value or {}
 
         # Create configuration from settings
         config = create_feff_config(analysis_settings)
 
-        # Extract batch and task_results from feff_result
-        batch, task_results = feff_result
+        # An explicit HDF5 path wins: it lets you analyse a finished run
+        # without having executed Stages A and B in this session.
+        hdf5_path = (analysis_settings.get("hdf5_path") or "").strip()
+
+        if not hdf5_path and not feff_result:
+            return mo.md(
+                "### ❌ Analysis Failed: Nothing to analyse. Either run "
+                "Stage B (FEFF Execution) first, or give the path to an "
+                "existing results HDF5 file in the analysis form."
+            ), None
 
         try:
-            message, result = run_analysis_only(
-                batch=batch,
-                task_results=task_results,
-                config=config,
-                cache_dir=DEFAULT_CACHE_DIR,
-            )
+            if hdf5_path:
+                message, result = run_analysis_from_hdf5(
+                    hdf5_path=hdf5_path,
+                    config=config,
+                    use_stored_ft=bool(analysis_settings.get("use_stored_ft", True)),
+                )
+            else:
+                # Extract batch and task_results from feff_result
+                batch, task_results = feff_result
+                message, result = run_analysis_only(
+                    batch=batch,
+                    task_results=task_results,
+                    config=config,
+                    cache_dir=DEFAULT_CACHE_DIR,
+                    save_archive=bool(analysis_settings.get("save_archive", True)),
+                )
         except (OSError, ValueError, RuntimeError) as e:
             message = mo.md(f"""
                 ### ❌ Analysis Failed

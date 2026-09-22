@@ -663,6 +663,43 @@ class TestResultProcessor:
         # Verify Fourier transform called
         mock_xftf.assert_called_once()
 
+    def test_load_successful_results_applies_full_fourier_params(self, tmp_path):
+        """Individual spectra must use the configured FT, not larch defaults.
+
+        This previously called ``xftf(k, chi, group=..., kweight=...)``, which
+        left every individual spectrum on larch's built-in window/kmin/kmax.
+        They were then transformed differently from the averages (which do use
+        ``config.fourier_params``), and the window/kmin/kmax/dk settings had no
+        effect on them at all.
+        """
+        from larch_cli_wrapper.feff_utils import FeffConfig, WindowType
+
+        from .conftest import write_valid_chi_dat
+
+        feff_dir = tmp_path / "frame_0000" / "site_0000"
+        write_valid_chi_dat(feff_dir)
+        task = FeffTask(
+            input_file=feff_dir / "feff.inp",
+            site_index=0,
+            frame_index=0,
+            absorber_element="Fe",
+        )
+        task_results = {task.task_id: True}
+
+        def _chir(config):
+            batch = FeffBatch(tasks=[task], output_dir=tmp_path, config=config)
+            groups = ResultProcessor(config).load_successful_results(
+                batch, task_results
+            )
+            return groups[task.task_id].chir_mag
+
+        hanning = _chir(FeffConfig(window=WindowType.HANNING))
+        kaiser = _chir(FeffConfig(window=WindowType.KAISER))
+        narrow = _chir(FeffConfig(window=WindowType.HANNING, kmin=5.0, kmax=9.0))
+
+        assert not np.allclose(hanning, kaiser), "window setting was ignored"
+        assert not np.allclose(hanning, narrow), "kmin/kmax settings were ignored"
+
     @patch("larch_cli_wrapper.feff_utils.read_feff_output")
     def test_load_successful_results_failed_task(
         self,
