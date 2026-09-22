@@ -1010,7 +1010,13 @@ class FeffExecutor:
                         g = self.hdf5_store.load_site_as_group(
                             task.frame_index, task.site_index
                         )
-                        self.loaded_groups[task.task_id] = g
+                        # The archive stores chi(k) only, so the r-space
+                        # transform has to be redone here -- the cached group is
+                        # otherwise indistinguishable from a freshly computed
+                        # one right up until something asks it for `r`.
+                        self.loaded_groups[task.task_id] = build_exafs_group(
+                            g.k, g.chi, task, batch.config.fourier_params
+                        )
                         if not clean_scratch_requested:
                             task.feff_dir.mkdir(parents=True, exist_ok=True)
                             chi_file = task.feff_dir / "chi.dat"
@@ -1370,8 +1376,6 @@ class ResultProcessor:
         Returns:
             Dict mapping task_id to Larch Group
         """
-        from larch.xafs import xftf
-
         from .feff_utils import read_feff_output
 
         groups: dict[str, Group] = {}
@@ -1391,17 +1395,11 @@ class ResultProcessor:
                     grp = hdf5_store.load_site_as_group(
                         task.frame_index, task.site_index
                     )
-                    # Only chi(k) is persisted, so the transform is (re)applied
-                    # here with the *full* configured parameters.  Passing only
-                    # kweight would leave the spectrum on larch's built-in
-                    # window/kmin/kmax defaults, transforming it differently
-                    # from the averages (which use config.fourier_params).
-                    xftf(grp, **self.config.fourier_params)
-                    grp.site_idx = task.site_index
-                    grp.frame_idx = task.frame_index
-                    grp.absorber_element = task.absorber_element
-                    grp.task_id = task.task_id
-                    groups[task.task_id] = grp
+                    # Only chi(k) is persisted, so the r-space transform is
+                    # redone here with the configured parameters.
+                    groups[task.task_id] = build_exafs_group(
+                        grp.k, grp.chi, task, self.config.fourier_params
+                    )
                     continue
                 except (KeyError, OSError, ValueError) as e:
                     self.logger.debug(

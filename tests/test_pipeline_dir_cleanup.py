@@ -528,6 +528,59 @@ def test_lazy_run_never_exceeds_one_chunk_of_directories(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
+def test_rerun_over_existing_archive_yields_transformed_groups(
+    tmp_path: Path, fake_feff, caplog
+):
+    """A re-run served from the archive must return fully formed groups.
+
+    Only chi(k) is persisted, so a group loaded back from HDF5 has no r-space
+    data until the transform is reapplied.  Such a group is indistinguishable
+    from a freshly computed one right up until something asks it for ``r``,
+    which is what plotting and the aggregate write both do.
+    """
+    out_dir = tmp_path / "rerun"
+    h5_path = out_dir / "results.h5"
+    structures = _make_atoms(3)
+
+    def _run():
+        cfg = FeffConfig(
+            cleanup_feff_files=True, clean_scratch=True, stream_chunk_size=2
+        )
+        proc = PipelineProcessor(cfg, max_workers=1, hdf5_path=h5_path)
+        with patch(MOCK_FEFF, fake_feff):
+            return proc.process_trajectory(
+                structures=structures,
+                absorber="Cu",
+                output_dir=out_dir,
+                parallel=False,
+            )
+
+    first_overall, _f, _s, first_individual = _run()
+
+    # Second run: every site is an HDF5 cache hit, so FEFF never runs.
+    with caplog.at_level("WARNING"):
+        second_overall, _f2, _s2, second_individual = _run()
+
+    assert len(second_individual) == 3
+    for group in second_individual:
+        assert hasattr(group, "r"), "cached group is missing its r-space grid"
+        assert hasattr(group, "chir_mag")
+        assert group.task_id is not None
+
+    # The cached run reproduces the original numbers, not just their shape.
+    # Tolerances allow for the archive storing chi as float32; everything
+    # downstream of the read is recomputed in double precision.
+    f32 = {"rtol": 1e-4, "atol": 1e-6}
+    np.testing.assert_allclose(first_overall.chi, second_overall.chi, **f32)
+    first_by_id = {g.task_id: g for g in first_individual}
+    for group in second_individual:
+        np.testing.assert_allclose(
+            group.chir_mag, first_by_id[group.task_id].chir_mag, **f32
+        )
+
+    assert "aggregate write failed" not in caplog.text
+
+
 def test_result_processor_prefers_in_memory_groups():
     """Stage C reuses Stage B's groups rather than re-reading chi.dat."""
     from larch import Group
