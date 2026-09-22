@@ -255,6 +255,7 @@ def update_config_from_cli_options(
     workers: int | None = None,
     force_recalculate: bool | None = None,
     cleanup: bool | None = None,
+    clean_scratch: bool | None = None,
 ) -> FeffConfig:
     """Update configuration with CLI options (only non-None values)."""
     from dataclasses import replace
@@ -299,6 +300,8 @@ def update_config_from_cli_options(
         updates["force_recalculate"] = force_recalculate
     if cleanup is not None:
         updates["cleanup_feff_files"] = cleanup
+    if clean_scratch is not None:
+        updates["clean_scratch"] = clean_scratch
 
     # Apply updates
     if updates:
@@ -1263,7 +1266,21 @@ def run_full_pipeline(
         help=(
             "Write per-site chi(k) and aggregates to a single HDF5 file "
             "instead of many ASCII .dat files. Implies --keep-paths when "
-            "'paths' is included in --plot-include."
+            "'paths' is included in --plot-include. (Default: True)"
+        ),
+    ),
+    clean_scratch: bool | None = typer.Option(
+        None,
+        "--clean-scratch/--no-clean-scratch",
+        help=(
+            "Remove each scratch calculation directory (frame_XXXX/site_YYYY) "
+            "as soon as its chi(k) is validated and committed to the HDF5 "
+            "archive, bounding the live directory count to --stream-chunk-size "
+            "rather than one per calculation. Directories for failed or "
+            "rejected calculations are always kept for inspection. Enabled by "
+            "default; requires --hdf5 and --cleanup, and is ignored without "
+            "them. Pass --no-clean-scratch to keep every directory and its "
+            "chi.dat on disk."
         ),
     ),
     hdf5_file: Path | None = typer.Option(
@@ -1473,7 +1490,10 @@ def run_full_pipeline(
         plot_include = _resolve_cli_arg(
             plot_include, _get_cli_default(_c, "plot_include"), "all"
         )
-        use_hdf5 = _resolve_cli_arg(use_hdf5, _get_cli_default(_c, "hdf5"), False)
+        use_hdf5 = _resolve_cli_arg(use_hdf5, _get_cli_default(_c, "hdf5"), True)
+        clean_scratch = _resolve_cli_arg(
+            clean_scratch, _get_cli_default(_c, "clean_scratch"), config.clean_scratch
+        )
         keep_path_files = _resolve_cli_arg(
             keep_path_files, _get_cli_default(_c, "keep_paths"), False
         )
@@ -1505,6 +1525,10 @@ def run_full_pipeline(
         cleanup = _resolve_cli_arg(
             cleanup, _get_cli_default(_c, "cleanup"), config.cleanup_feff_files
         )
+        # Evicting scratch directories is only safe when their results are being
+        # written somewhere durable first, so it is silently off without --hdf5
+        # and --cleanup rather than being an error.
+        clean_scratch = bool(clean_scratch and use_hdf5 and cleanup)
         force_recalculate = _resolve_cli_arg(
             force_recalculate,
             _get_cli_default(_c, "force_recalculate"),
@@ -1538,6 +1562,7 @@ def run_full_pipeline(
             workers=workers,
             force_recalculate=force_recalculate,
             cleanup=cleanup,
+            clean_scratch=clean_scratch,
         )
 
         # Parse ASE read kwargs if provided

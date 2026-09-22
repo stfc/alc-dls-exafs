@@ -52,6 +52,37 @@ def test_defaults_reach_config(runner, tmp_structure_file):
     assert cfg.potential_link_mode == "copy"
     assert cfg.store_path_params is False
     assert cfg.store_min_cw_ratio is None
+    assert cfg.clean_scratch is True
+
+
+@pytest.mark.parametrize("flag", ["--no-clean-scratch", "--no-hdf5", "--no-cleanup"])
+def test_clean_scratch_requires_hdf5_and_cleanup(runner, tmp_structure_file, flag):
+    """Eviction is off unless there is an archive to evict into."""
+    result, cfg = _invoke(runner, tmp_structure_file, [flag])
+    assert result.exit_code == 0, result.stdout
+    assert cfg.clean_scratch is False
+
+
+def test_clean_scratch_honours_config_file(runner, tmp_structure_file, tmp_path):
+    """A value in the config file is respected, not silently overwritten."""
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text("radius: 6.0\nclean_scratch: false\n")
+    result, cfg = _invoke(runner, tmp_structure_file, ["--config", str(cfg_file)])
+    assert result.exit_code == 0, result.stdout
+    assert cfg.clean_scratch is False
+
+
+def test_clean_scratch_cli_flag_overrides_config_file(
+    runner, tmp_structure_file, tmp_path
+):
+    """An explicit flag still wins over the config file."""
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text("radius: 6.0\nclean_scratch: false\n")
+    result, cfg = _invoke(
+        runner, tmp_structure_file, ["--config", str(cfg_file), "--clean-scratch"]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert cfg.clean_scratch is True
 
 
 def test_flags_reach_config(runner, tmp_structure_file):

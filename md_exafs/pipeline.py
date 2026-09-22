@@ -6,12 +6,15 @@ This module implements a clean separation of concerns:
 3. Result processing - Load, average, and plot results
 """
 
+from __future__ import annotations
+
 import logging
 import os
+import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
 from shutil import copy2
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 from ase import Atoms
@@ -25,9 +28,14 @@ from .feff_utils import (
     generate_multi_site_feff_inputs,
     normalize_absorbers,
     run_multi_site_feff_calculations,
+    validate_absorber_indices,
 )
 
 logger = logging.getLogger(__name__)
+
+#: Column header FEFF writes at the top of chi.dat, reproduced when a spectrum
+#: is restored from a cache rather than produced by a FEFF run.
+CHI_DAT_HEADER = "#       k          chi          mag           phase @#"
 
 __all__ = [
     "FeffTask",
@@ -51,6 +59,9 @@ class FeffTask:
     site_index: int
     frame_index: int = 0
     absorber_element: str = ""
+    #: Structure to generate ``feff.inp`` from on demand.  Only set for lazily
+    #: planned tasks, whose input file is written just before the task runs.
+    structure: Atoms | None = None
 
     @property
     def feff_dir(self) -> Path:
@@ -61,6 +72,38 @@ class FeffTask:
     def task_id(self) -> str:
         """Unique identifier for this task."""
         return f"frame_{self.frame_index:04d}_site_{self.site_index:04d}"
+
+    def materialize(self, config: FeffConfig) -> Path:
+        """Ensure ``feff.inp`` exists, generating it from the structure if needed.
+
+        Args:
+            config: Configuration to generate the input with.  For a batch that
+                reuses precomputed potentials this **must** be the path-only
+                config (``CONTROL 0 0 0 1 1 1``), i.e. ``FeffBatch.config``.
+
+        Returns:
+            Path to the (now existing) ``feff.inp``.
+
+        Raises:
+            FileNotFoundError: If the file is absent and no structure was
+                recorded to regenerate it from.
+        """
+        if not self.input_file.exists():
+            if self.structure is None:
+                raise FileNotFoundError(
+                    f"FEFF input file {self.input_file} does not exist "
+                    "and no structure provided."
+                )
+            from .feff_utils import generate_pymatgen_input
+
+            self.feff_dir.mkdir(parents=True, exist_ok=True)
+            generate_pymatgen_input(
+                self.structure,
+                self.site_index,
+                self.feff_dir,
+                config,
+            )
+        return self.input_file
 
 
 @dataclass
@@ -75,6 +118,10 @@ class FeffBatch:
     output_dir: Path
     config: FeffConfig
     precompute_tasks: list[FeffTask] = None
+    #: True when the tasks were only planned, not written to disk.  Their
+    #: directories and ``feff.inp`` files are materialized one streaming chunk
+    #: at a time, which is what keeps the on-disk directory count bounded.
+    lazy: bool = False
 
     def get_precompute_tasks(self) -> list[FeffTask]:
         """Get pre-compute tasks, if any."""
@@ -97,6 +144,44 @@ class FeffBatch:
                 sites[task.site_index] = []
             sites[task.site_index].append(task)
         return sites
+
+
+def build_exafs_group(
+    k: np.ndarray,
+    chi: np.ndarray,
+    task: FeffTask,
+    fourier_params: dict,
+) -> Group:
+    """Build a Fourier-transformed larch group for one site's chi(k).
+
+    The transform uses the *full* configured Fourier parameters rather than
+    ``kweight`` alone: leaving a spectrum on larch's built-in window/kmin/kmax
+    defaults would transform it differently from the averages, silently
+    ignoring the configured window, kmin, kmax and dk.
+
+    Args:
+        k: Photoelectron wavenumber grid.
+        chi: chi(k) on that grid.  Complex input is reduced to its real part.
+        task: Task the spectrum belongs to, used for the group's metadata.
+        fourier_params: ``FeffConfig.fourier_params`` for the active config.
+
+    Returns:
+        A larch Group carrying ``k``, ``chi``, the r-space transform, and the
+        frame/site/absorber metadata the averaging stage groups by.
+    """
+    from larch.xafs import xftf
+
+    group = Group()
+    group.k = np.asarray(k, dtype=np.float64)
+    group.chi = np.asarray(
+        np.real(chi) if np.iscomplexobj(chi) else chi, dtype=np.float64
+    )
+    xftf(group, **fourier_params)
+    group.site_idx = task.site_index
+    group.frame_idx = task.frame_index
+    group.absorber_element = task.absorber_element
+    group.task_id = task.task_id
+    return group
 
 
 class InputGenerator:
@@ -162,6 +247,7 @@ class InputGenerator:
         precompute_potentials: bool = False,
         precompute_potentials_structure: Atoms = None,
         input_progress_callback: callable = None,
+        lazy: bool = False,
     ) -> FeffBatch:
         """Generate inputs for trajectory with multiple frames.
 
@@ -177,6 +263,8 @@ class InputGenerator:
             input_progress_callback: Optional callback (completed, total)
                                      invoked after each frame's inputs are
                                      generated.
+            lazy: If True, defer writing feff.inp and creating directories until
+                  tasks are executed in chunks, bounding on-disk directory count.
 
         Returns:
             FeffBatch containing all tasks for all frames,
@@ -259,7 +347,7 @@ class InputGenerator:
             main_config = self.config
 
         # Generate tasks for all frames
-        all_tasks = []
+        all_tasks: list[FeffTask] = []
 
         # Temporarily swap to main config if we're precomputing
         if precompute_potentials:
@@ -279,13 +367,33 @@ class InputGenerator:
             # source trajectory without ambiguity.
             for frame_idx, structure in enumerate(structures):
                 frame_dir = output_dir / f"frame_{frame_idx:04d}"
-                frame_batch = self.generate_single_site_inputs(
-                    structure=structure,
-                    absorber=absorber,
-                    output_dir=frame_dir,
-                    frame_index=frame_idx,
-                )
-                all_tasks.extend(frame_batch.tasks)
+                if lazy:
+                    absorber_indices = normalize_absorbers(structure, absorber)
+                    # Validate up front, exactly as the eager path does via
+                    # generate_multi_site_feff_inputs, so a bad absorber
+                    # specification fails now rather than mid-run.
+                    validate_absorber_indices(structure, absorber_indices)
+                    absorber_element = structure[absorber_indices[0]].symbol
+                    all_tasks.extend(
+                        FeffTask(
+                            input_file=(
+                                frame_dir / f"site_{site_idx:04d}" / "feff.inp"
+                            ).resolve(),
+                            site_index=site_idx,
+                            frame_index=frame_idx,
+                            absorber_element=absorber_element,
+                            structure=structure,
+                        )
+                        for site_idx in absorber_indices
+                    )
+                else:
+                    frame_batch = self.generate_single_site_inputs(
+                        structure=structure,
+                        absorber=absorber,
+                        output_dir=frame_dir,
+                        frame_index=frame_idx,
+                    )
+                    all_tasks.extend(frame_batch.tasks)
                 if input_progress_callback:
                     input_progress_callback(frame_idx + 1, n_frames)
         finally:
@@ -296,8 +404,14 @@ class InputGenerator:
         return FeffBatch(
             tasks=all_tasks,
             output_dir=output_dir,
-            config=self.config,
+            # The config the *main* tasks were planned with, which for a
+            # precompute run is the path-only variant (CONTROL 0 0 0 1 1 1).
+            # A lazy batch writes its feff.inp files from this later on, so
+            # handing back self.config here would silently recompute the
+            # potentials the run is meant to be reusing.
+            config=main_config,
             precompute_tasks=precompute_tasks if precompute_potentials else None,
+            lazy=lazy,
         )
 
 
@@ -324,6 +438,7 @@ class FeffExecutor:
         self.cache_dir = cache_dir
         self.force_recalculate = force_recalculate
         self.hdf5_store = hdf5_store
+        self.loaded_groups: dict[str, Any] = {}
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
         if self.cache_dir:
@@ -552,8 +667,9 @@ class FeffExecutor:
         parallel: bool = True,
         progress_callback: callable = None,
         valid_sites: set[int] | None = None,
+        tasks: list[FeffTask] | None = None,
     ) -> int:
-        """Distribute precomputed potential files to every main task directory.
+        """Distribute precomputed potential files to main task directories.
 
         For large trajectories this places tens of thousands of small files, so
         it is parallelized (I/O bound) and reports progress.  The placement
@@ -570,6 +686,9 @@ class FeffExecutor:
                 set are provisioned.  Potentials are per-site and independent,
                 so a site whose precompute run failed must not block the sites
                 that succeeded.  ``None`` provisions every task.
+            tasks: Subset of tasks to provision.  Defaults to ``batch.tasks``.
+                Streaming runs pass one chunk at a time so that only the task
+                directories that currently exist on disk are populated.
 
         Returns the number of files successfully placed.
         """
@@ -577,7 +696,7 @@ class FeffExecutor:
         precompute_dir = batch.output_dir / "precomputed_potentials"
         tasks = [
             task
-            for task in batch.tasks
+            for task in (batch.tasks if tasks is None else tasks)
             if valid_sites is None or task.site_index in valid_sites
         ]
         n_tasks = len(tasks)
@@ -641,6 +760,88 @@ class FeffExecutor:
         )
         return files_placed
 
+    @staticmethod
+    def _spectrum_rejection_reason(
+        k: np.ndarray | None, chi: np.ndarray | None
+    ) -> str | None:
+        """Describe why a chi(k) spectrum is unusable, or ``None`` if it is fine.
+
+        FEFF can exit successfully and still leave behind a spectrum that
+        cannot be averaged -- an empty or truncated ``chi.dat``, a run that
+        diverged to NaN/Inf, or an all-zero spectrum from a site whose
+        potentials were missing.  Folding such a spectrum into the ensemble
+        average corrupts it silently, so a rejected result is reported as a
+        failure rather than merely kept out of the cleanup list.
+
+        Args:
+            k: Photoelectron wavenumber grid, or ``None`` if unreadable.
+            chi: chi(k) on that grid, or ``None`` if unreadable.
+
+        Returns:
+            A short human-readable reason, or ``None`` when the spectrum is
+            usable.
+        """
+        if k is None or chi is None:
+            return "no k/chi arrays could be read"
+        if len(k) == 0:
+            return "empty k grid"
+        if len(k) != len(chi):
+            return f"k/chi length mismatch ({len(k)} vs {len(chi)})"
+        if not (np.isfinite(k).all() and np.isfinite(chi).all()):
+            return "k or chi contains NaN/Inf"
+        if np.all(chi == 0.0):
+            return "chi is identically zero"
+        return None
+
+    def _retain_task_dir(
+        self, task: FeffTask, feff_dir: Path, reason: str, cleanup: bool
+    ) -> None:
+        """Keep a task's directory for inspection, minus its per-path files.
+
+        Unbounded growth in the failure case is exactly what streaming exists
+        to avoid, so the feffNNNN.dat files go even here; ``feff.inp``,
+        ``chi.dat`` and the logs -- what a post-mortem actually needs -- stay.
+
+        Args:
+            task: Task whose directory is being held back.
+            feff_dir: The directory itself.
+            reason: Why it is being retained, for the log line.
+            cleanup: Whether per-path file cleanup is enabled at all.
+        """
+        self.logger.warning(
+            f"{task.task_id}: {reason} Keeping {feff_dir} on disk for inspection."
+        )
+        if cleanup:
+            cleanup_feff_output(feff_dir, keep_essential=False)
+
+    def _cleanup_task_dir(self, task: FeffTask) -> None:
+        """Remove a task's scratch directory, and its frame directory if empty.
+
+        Args:
+            task: Task whose ``feff_dir`` is no longer needed because its
+                results are committed to the HDF5 archive.
+        """
+        feff_dir = task.feff_dir
+        if feff_dir.exists():
+            try:
+                shutil.rmtree(feff_dir)
+            except OSError as e:
+                self.logger.warning(
+                    f"Could not remove scratch directory {feff_dir}: {e}"
+                )
+            else:
+                self.logger.debug(f"Removed scratch directory: {feff_dir}")
+
+        # Remove the parent frame_XXXX directory once its last site is gone.
+        frame_dir = feff_dir.parent
+        if frame_dir.name.startswith("frame_"):
+            try:
+                frame_dir.rmdir()
+            except OSError:
+                pass  # Still holds other sites, or already gone.
+            else:
+                self.logger.debug(f"Removed empty frame directory: {frame_dir}")
+
     def execute_batch(
         self,
         batch: FeffBatch,
@@ -689,6 +890,9 @@ class FeffExecutor:
 
         # Tasks dropped because their site has no usable precomputed potentials.
         skipped_task_results: dict[str, bool] = {}
+        # Sites with usable precomputed potentials, for deferred (lazy)
+        # distribution in the streaming loop.  ``None`` when not precomputing.
+        potential_sites: set[int] | None = None
 
         # Execute precompute tasks first if they exist
         if batch.precompute_tasks:
@@ -738,12 +942,18 @@ class FeffExecutor:
             # when others failed.  Doing this all-or-nothing used to leave every
             # task directory without phase.pad/pot.pad, so *all* path-only runs
             # aborted with "cannot find phase.pad in rdxsph".
-            self._distribute_potentials(
-                batch,
-                parallel=parallel,
-                progress_callback=copy_progress_callback,
-                valid_sites=usable_sites,
-            )
+            #
+            # A lazy batch has no task directories yet, so distribution is
+            # deferred to the streaming loop, which provisions one chunk at a
+            # time immediately after materializing it.
+            potential_sites = usable_sites
+            if not batch.lazy:
+                self._distribute_potentials(
+                    batch,
+                    parallel=parallel,
+                    progress_callback=copy_progress_callback,
+                    valid_sites=usable_sites,
+                )
 
             if unusable_sites:
                 skipped = [
@@ -774,6 +984,15 @@ class FeffExecutor:
 
         total_tasks = len(batch.tasks)
         completed_tasks = 0
+        self.loaded_groups.clear()
+
+        # Scratch eviction needs somewhere durable to evict *to*, so it is only
+        # ever attempted when results are being committed to an HDF5 archive.
+        clean_scratch_requested = (
+            getattr(batch.config, "clean_scratch", False)
+            and batch.config.cleanup_feff_files
+            and self.hdf5_store is not None
+        )
 
         # Initialize progress
         if progress_callback:
@@ -791,16 +1010,17 @@ class FeffExecutor:
                         g = self.hdf5_store.load_site_as_group(
                             task.frame_index, task.site_index
                         )
-                        task.feff_dir.mkdir(parents=True, exist_ok=True)
-                        chi_file = task.feff_dir / "chi.dat"
-                        # Write minimal chi.dat so ResultProcessor can read it
-                        data = np.column_stack(
-                            [g.k, g.chi, np.zeros_like(g.k), np.zeros_like(g.k)]
-                        )
-                        header = (
-                            "#       k          chi          mag           phase @#"
-                        )
-                        np.savetxt(chi_file, data, header=header, fmt="%.8e")
+                        self.loaded_groups[task.task_id] = g
+                        if not clean_scratch_requested:
+                            task.feff_dir.mkdir(parents=True, exist_ok=True)
+                            chi_file = task.feff_dir / "chi.dat"
+                            # Write minimal chi.dat so ResultProcessor can read it
+                            data = np.column_stack(
+                                [g.k, g.chi, np.zeros_like(g.k), np.zeros_like(g.k)]
+                            )
+                            np.savetxt(
+                                chi_file, data, header=CHI_DAT_HEADER, fmt="%.8e"
+                            )
                         cached_results[task.task_id] = True
                         completed_tasks += 1
                         if progress_callback:
@@ -814,13 +1034,22 @@ class FeffExecutor:
                         # fall through to FEFF run
 
             # ── Priority 2: pkl cache (only when HDF5 is not active) ────────
-            cache_key = self._get_feff_input_hash(task.input_file)
-            if not self.hdf5_store:
+            # The key is the hash of feff.inp, so it is computed whenever the
+            # cache is in play -- including under --force-recalculate, where it
+            # is needed to *refresh* the stale entry rather than read it.
+            cache_key = None
+            if not self.hdf5_store and self.cache_dir:
+                task.materialize(batch.config)
+                cache_key = self._get_feff_input_hash(task.input_file)
                 cached_data = self._load_cached_result(cache_key)
                 if cached_data is not None:
                     k, chi = cached_data
                     self.logger.debug(f"Pkl cache hit for {task.task_id}")
                     try:
+                        self.loaded_groups[task.task_id] = build_exafs_group(
+                            k, chi, task, batch.config.fourier_params
+                        )
+
                         task.feff_dir.mkdir(parents=True, exist_ok=True)
                         chi_file = task.feff_dir / "chi.dat"
                         if chi_file.exists():
@@ -832,10 +1061,7 @@ class FeffExecutor:
                         phase = np.angle(chi)
                         chi_real = np.real(chi) if np.iscomplexobj(chi) else chi
                         data = np.column_stack([k, chi_real, mag, phase])
-                        header = (
-                            "#       k          chi          mag           phase @#"
-                        )
-                        np.savetxt(chi_file, data, header=header, fmt="%.8e")
+                        np.savetxt(chi_file, data, header=CHI_DAT_HEADER, fmt="%.8e")
                         cached_results[task.task_id] = True
                         completed_tasks += 1
                         if progress_callback:
@@ -901,6 +1127,24 @@ class FeffExecutor:
                 range(0, total_to_run, chunk_size), start=1
             ):
                 chunk = tasks_to_run[chunk_start : chunk_start + chunk_size]
+
+                if batch.lazy:
+                    # Write this chunk's directories and feff.inp files.  Note
+                    # that ``batch.config`` is the config the tasks were planned
+                    # with -- for a precompute run that is the path-only config
+                    # (CONTROL 0 0 0 1 1 1), without which the run would
+                    # recompute the potentials it is supposed to be reusing.
+                    for task, _ in chunk:
+                        task.materialize(batch.config)
+                    if potential_sites is not None:
+                        self._distribute_potentials(
+                            batch,
+                            parallel=parallel,
+                            progress_callback=copy_progress_callback,
+                            valid_sites=potential_sites,
+                            tasks=[t for t, _ in chunk],
+                        )
+
                 input_files = [task.input_file for task, _ in chunk]
 
                 if n_chunks > 1:
@@ -948,78 +1192,122 @@ class FeffExecutor:
                 # Process results, read chi(k), recompute path chi on the grid,
                 # delete the per-path files, and stage the HDF5 write.
                 pending_hdf5_writes: list[dict] = []
+                validated_tasks_this_chunk: list[FeffTask] = []
                 for (task, cache_key), (feff_dir, success) in zip(
                     chunk, results, strict=False
                 ):
-                    if success:
-                        try:
-                            from .feff_utils import read_feff_output
+                    if not success:
+                        cached_results[task.task_id] = False
+                        continue
 
-                            k, chi = read_feff_output(feff_dir)
-                            if not self.hdf5_store:
-                                self._save_to_cache(cache_key, chi, k)
-                            self.logger.debug(f"Cached result for {task.task_id}")
+                    from .feff_utils import read_feff_output
 
-                            if self.hdf5_store:
-                                path_contributions: list | None = None
-                                if store_paths:
-                                    from .hdf5_store import recompute_path_chi_on_grid
+                    # Two independent questions, deliberately kept apart:
+                    #   reject -- the spectrum itself cannot be trusted, so it
+                    #     must not reach the archive or the ensemble average;
+                    #   retain -- something about the run warrants a look, so
+                    #     its directory survives the chunk.
+                    # A rejected spectrum is always retained; the converse does
+                    # not hold, because a perfectly good chi(k) whose path files
+                    # would not parse is still a perfectly good chi(k).
+                    cleanup = batch.config.cleanup_feff_files
+                    try:
+                        k, chi = read_feff_output(feff_dir)
+                    except (OSError, ValueError, TypeError) as e:
+                        self._retain_task_dir(
+                            task,
+                            feff_dir,
+                            f"discarding result -- could not read FEFF output ({e}).",
+                            cleanup,
+                        )
+                        cached_results[task.task_id] = False
+                        continue
 
-                                    n_feff_files = len(
-                                        get_feff_numbered_files(feff_dir)
-                                    )
-                                    _parsed = parsed_paths.get(task.task_id, [])
-                                    # Optionally prune negligible paths at write
-                                    # time to shrink the results file.
-                                    _min_cw = batch.config.store_min_cw_ratio
-                                    if _min_cw is not None:
-                                        _parsed = [
-                                            pc
-                                            for pc in _parsed
-                                            if pc.get("cw_ratio", 100.0) >= _min_cw
-                                        ]
-                                    path_contributions = [
-                                        recompute_path_chi_on_grid(pc, k)
-                                        for pc in _parsed
-                                    ]
-                                    if n_feff_files > 0 and not path_contributions:
-                                        self.logger.warning(
-                                            f"{task.task_id}: {n_feff_files}"
-                                            " feffNNNN.dat files found but 0"
-                                            " paths were successfully parsed."
-                                            " Check larch FeffDatFile compatibility."
-                                        )
-                                    elif n_feff_files == 0:
-                                        self.logger.warning(
-                                            f"{task.task_id}: store_paths=True but no "
-                                            f"feffNNNN.dat files found in {feff_dir}. "
-                                            "Was FEFF run with CONTROL …1 1 1?"
-                                        )
-                                    # Cleanup feff files right after reading paths
-                                    # so they do not accumulate on disk.
-                                    if batch.config.cleanup_feff_files:
-                                        cleanup_feff_output(feff_dir)
+                    reject_reason = self._spectrum_rejection_reason(k, chi)
+                    if reject_reason is not None:
+                        self._retain_task_dir(
+                            task,
+                            feff_dir,
+                            f"discarding result -- {reject_reason}.",
+                            cleanup,
+                        )
+                        cached_results[task.task_id] = False
+                        continue
 
-                                pending_hdf5_writes.append(
-                                    {
-                                        "frame_index": task.frame_index,
-                                        "site_index": task.site_index,
-                                        "k": np.asarray(k),
-                                        "chi": np.asarray(chi),
-                                        "absorber_element": task.absorber_element,
-                                        "success": True,
-                                        "path_contributions": path_contributions,
-                                    }
-                                )
-                        except (OSError, ValueError, TypeError) as e:
-                            self.logger.warning(
-                                f"Failed to read result for {task.task_id}: {e}"
+                    retain_reason: str | None = None
+                    path_contributions: list | None = None
+                    if store_paths:
+                        from .hdf5_store import recompute_path_chi_on_grid
+
+                        n_feff_files = len(get_feff_numbered_files(feff_dir))
+                        _parsed = parsed_paths.get(task.task_id, [])
+                        if n_feff_files == 0:
+                            retain_reason = (
+                                "store_paths=True but no feffNNNN.dat files were "
+                                "found. Was FEFF run with CONTROL …1 1 1?"
                             )
+                        elif not _parsed:
+                            retain_reason = (
+                                f"{n_feff_files} feffNNNN.dat files found but none "
+                                "could be parsed. Check larch FeffDatFile "
+                                "compatibility."
+                            )
+                        # Optionally prune negligible paths at write time to
+                        # shrink the results file.
+                        _min_cw = batch.config.store_min_cw_ratio
+                        if _min_cw is not None:
+                            _parsed = [
+                                pc
+                                for pc in _parsed
+                                if pc.get("cw_ratio", 100.0) >= _min_cw
+                            ]
+                        path_contributions = [
+                            recompute_path_chi_on_grid(pc, k) for pc in _parsed
+                        ]
 
-                    cached_results[task.task_id] = success
+                    if cache_key:
+                        self._save_to_cache(cache_key, chi, k)
+                        self.logger.debug(f"Cached result for {task.task_id}")
+
+                    self.loaded_groups[task.task_id] = build_exafs_group(
+                        k, chi, task, batch.config.fourier_params
+                    )
+
+                    if self.hdf5_store:
+                        pending_hdf5_writes.append(
+                            {
+                                "frame_index": task.frame_index,
+                                "site_index": task.site_index,
+                                "k": np.asarray(k),
+                                "chi": np.asarray(
+                                    np.real(chi) if np.iscomplexobj(chi) else chi
+                                ),
+                                "absorber_element": task.absorber_element,
+                                "success": True,
+                                "path_contributions": path_contributions,
+                            }
+                        )
+
+                    cached_results[task.task_id] = True
+
+                    if retain_reason is not None:
+                        # The spectrum is archived as usual; only the directory
+                        # sticks around, so the path problem can be looked into
+                        # without losing the calculation.
+                        self._retain_task_dir(task, feff_dir, retain_reason, cleanup)
+                        continue
+
+                    # Directories that survive the chunk need their per-path
+                    # files removed here; the ones about to be evicted do not,
+                    # since the whole tree goes.
+                    if cleanup and not clean_scratch_requested:
+                        cleanup_feff_output(feff_dir)
+
+                    validated_tasks_this_chunk.append(task)
 
                 # Write this chunk's results to HDF5 before running the next
                 # chunk.  Repeated calls append/overwrite rows incrementally.
+                hdf5_write_success = True
                 if self.hdf5_store and pending_hdf5_writes:
                     if hdf5_progress_callback:
                         hdf5_progress_callback(0, 1)
@@ -1028,11 +1316,24 @@ class FeffExecutor:
                     except Exception as exc:  # noqa: BLE001
                         import traceback
 
-                        self.logger.warning(
+                        hdf5_write_success = False
+                        self.logger.error(
                             f"HDF5 batch write failed: {exc}\n" + traceback.format_exc()
                         )
                     if hdf5_progress_callback:
                         hdf5_progress_callback(1, 1)
+
+                # Evict this chunk's scratch directories, but only once their
+                # results are safely committed: the archive is now the sole
+                # copy, so a failed write must leave the directories alone.
+                if clean_scratch_requested:
+                    if hdf5_write_success:
+                        for task in validated_tasks_this_chunk:
+                            self._cleanup_task_dir(task)
+                    elif batch.config.cleanup_feff_files:
+                        # Retained for recovery, but not at full size.
+                        for task in validated_tasks_this_chunk:
+                            cleanup_feff_output(task.feff_dir, keep_essential=False)
 
         # Skipped tasks are merged in last so they never inflate the progress
         # accounting above, which is based on ``len(batch.tasks)``.
@@ -1055,53 +1356,67 @@ class ResultProcessor:
         self,
         batch: FeffBatch,
         task_results: dict[str, bool],
+        loaded_groups: dict[str, Group] | None = None,
+        hdf5_store: Any | None = None,
     ) -> dict[str, Group]:
         """Load EXAFS data from successful calculations.
 
         Args:
             batch: Original FeffBatch
             task_results: Results from FeffExecutor
+            loaded_groups: Optional pre-loaded in-memory dictionary of Larch Groups
+            hdf5_store: Optional ExafsHDF5Store to load results from
 
         Returns:
             Dict mapping task_id to Larch Group
         """
+        from larch.xafs import xftf
+
         from .feff_utils import read_feff_output
 
-        groups = {}
+        groups: dict[str, Group] = {}
 
         for task in batch.tasks:
-            if task_results.get(task.task_id, False):
+            if not task_results.get(task.task_id, False):
+                continue
+
+            # 1. Check in-memory pre-loaded groups
+            if loaded_groups and task.task_id in loaded_groups:
+                groups[task.task_id] = loaded_groups[task.task_id]
+                continue
+
+            # 2. Check HDF5 store if provided
+            if hdf5_store is not None:
                 try:
-                    k, chi = read_feff_output(task.feff_dir)
-
-                    # Create larch group
-                    from larch import Group
-                    from larch.xafs import xftf
-
-                    group = Group()
-                    group.k = k
-                    group.chi = chi
-
-                    # Apply Fourier transform with the *full* configured
-                    # parameters.  Passing only kweight left every individual
-                    # spectrum on larch's built-in window/kmin/kmax defaults,
-                    # so they were transformed differently from the averages
-                    # (which use config.fourier_params) and silently ignored
-                    # the window, kmin, kmax and dk settings.
-                    xftf(group, **self.config.fourier_params)
-
-                    # Add metadata
-                    group.site_idx = task.site_index
-                    group.frame_idx = task.frame_index
-                    group.absorber_element = task.absorber_element
-                    group.task_id = task.task_id
-
-                    groups[task.task_id] = group
-
-                except (OSError, ValueError, KeyError) as e:
-                    self.logger.warning(
-                        f"Failed to load results for {task.task_id}: {e}"
+                    grp = hdf5_store.load_site_as_group(
+                        task.frame_index, task.site_index
                     )
+                    # Only chi(k) is persisted, so the transform is (re)applied
+                    # here with the *full* configured parameters.  Passing only
+                    # kweight would leave the spectrum on larch's built-in
+                    # window/kmin/kmax defaults, transforming it differently
+                    # from the averages (which use config.fourier_params).
+                    xftf(grp, **self.config.fourier_params)
+                    grp.site_idx = task.site_index
+                    grp.frame_idx = task.frame_index
+                    grp.absorber_element = task.absorber_element
+                    grp.task_id = task.task_id
+                    groups[task.task_id] = grp
+                    continue
+                except (KeyError, OSError, ValueError) as e:
+                    self.logger.debug(
+                        f"Could not load site from HDF5 for {task.task_id}: {e}"
+                    )
+
+            # 3. Disk fallback (legacy mode when scratch directories are kept)
+            try:
+                k, chi = read_feff_output(task.feff_dir)
+                groups[task.task_id] = build_exafs_group(
+                    k, chi, task, self.config.fourier_params
+                )
+
+            except (OSError, ValueError, KeyError) as e:
+                self.logger.warning(f"Failed to load results for {task.task_id}: {e}")
 
         self.logger.info(f"Loaded {len(groups)} successful EXAFS spectra")
         return groups
@@ -1325,7 +1640,14 @@ class PipelineProcessor:
             Tuple of (overall_average, frame_averages, actual_site_averages,
                      individual_groups)
         """
-        # Stage A: Generate inputs for all frames
+        # Stage A: Plan (or write) the inputs for all frames.  Planning them
+        # lazily only pays off when the directories are going to be evicted
+        # again chunk by chunk, which needs an HDF5 archive to evict into.
+        use_lazy = (
+            getattr(self.config, "clean_scratch", False)
+            and self._hdf5_store is not None
+            and getattr(self.config, "cleanup_feff_files", True)
+        )
         batch = self.input_generator.generate_trajectory_inputs(
             structures=structures,
             absorber=absorber,
@@ -1333,6 +1655,7 @@ class PipelineProcessor:
             precompute_potentials=precompute_potentials,
             precompute_potentials_structure=precompute_potentials_structure,
             input_progress_callback=input_progress_callback,
+            lazy=use_lazy,
         )
 
         # Stage B: Execute all FEFF calculations
@@ -1349,7 +1672,12 @@ class PipelineProcessor:
         )
 
         # Stage C: Process results
-        groups = self.result_processor.load_successful_results(batch, task_results)
+        groups = self.result_processor.load_successful_results(
+            batch,
+            task_results,
+            loaded_groups=self.feff_executor.loaded_groups,
+            hdf5_store=self._hdf5_store,
+        )
         frame_averages = self.result_processor.create_frame_averages(
             groups, batch
         )  # These are frame averages

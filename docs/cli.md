@@ -50,6 +50,7 @@ md-exafs pipeline [OPTIONS] STRUCTURE ABSORBER
 | `--ase-kwargs JSON` | JSON string passed to `ase.io.read()` (e.g. `'{"index": "::10"}'`). |
 | `--hdf5 / --no-hdf5` | Store results in a compressed HDF5 archive (default: enabled). |
 | `--hdf5-file PATH` | Custom destination for the HDF5 archive. |
+| `--clean-scratch / --no-clean-scratch` | Delete each `frame_XXXX/site_YYYY` directory once its spectrum is committed to the archive (default: enabled; requires `--hdf5` and `--cleanup`). |
 | `--keep-paths / --no-keep-paths` | Retain individual `feffNNNN.dat` files for path analysis. |
 | `--reuse-potentials` | Compute SCF potentials once on a representative structure and reuse across all snapshots. |
 | `--potentials-structure PATH` | User-supplied structure for initial potential precomputation. |
@@ -60,6 +61,29 @@ md-exafs pipeline [OPTIONS] STRUCTURE ABSORBER
 | `--e0-shift FLOAT` | Energy shift $\Delta E_0$ (eV) for experimental comparison. |
 | `--s02 FLOAT` | Amplitude reduction factor $S_0^2$ for experimental comparison. |
 | `--show / --no-show` | Display matplotlib plots interactively on completion. |
+
+#### Scratch directories
+
+A trajectory run creates one FEFF calculation directory per frame *and* site,
+which for a realistic ensemble is tens of thousands of directories holding
+millions of small files. By default the pipeline therefore streams: it writes
+only the current chunk's directories (`--stream-chunk-size`, default 256), and
+deletes each one as soon as its $\chi(k)$ has been validated and committed to
+the HDF5 archive. Peak directory count stays at the chunk size regardless of
+trajectory length.
+
+Directories are kept whenever the results would otherwise be lost:
+
+- the FEFF run failed;
+- the spectrum was rejected as unusable (empty, NaN/Inf, or identically zero) —
+  such a spectrum is also excluded from the ensemble average, and the reason is
+  logged;
+- the HDF5 write failed.
+
+Pass `--no-clean-scratch` to keep every directory and its `chi.dat`, for example
+when you want to inspect the raw FEFF output of a completed run. Eviction is
+also skipped automatically under `--no-hdf5` or `--no-cleanup`, since the
+archive would then not hold the results being deleted.
 
 ---
 
