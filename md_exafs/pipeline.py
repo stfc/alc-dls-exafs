@@ -173,9 +173,7 @@ def build_exafs_group(
 
     group = Group()
     group.k = np.asarray(k, dtype=np.float64)
-    group.chi = np.asarray(
-        np.real(chi) if np.iscomplexobj(chi) else chi, dtype=np.float64
-    )
+    group.chi = np.asarray(np.real(chi), dtype=np.float64)
     xftf(group, **fourier_params)
     group.site_idx = task.site_index
     group.frame_idx = task.frame_index
@@ -989,7 +987,7 @@ class FeffExecutor:
         # Scratch eviction needs somewhere durable to evict *to*, so it is only
         # ever attempted when results are being committed to an HDF5 archive.
         clean_scratch_requested = (
-            getattr(batch.config, "clean_scratch", False)
+            batch.config.clean_scratch
             and batch.config.cleanup_feff_files
             and self.hdf5_store is not None
         )
@@ -1285,9 +1283,7 @@ class FeffExecutor:
                                 "frame_index": task.frame_index,
                                 "site_index": task.site_index,
                                 "k": np.asarray(k),
-                                "chi": np.asarray(
-                                    np.real(chi) if np.iscomplexobj(chi) else chi
-                                ),
+                                "chi": np.asarray(np.real(chi)),
                                 "absorber_element": task.absorber_element,
                                 "success": True,
                                 "path_contributions": path_contributions,
@@ -1642,9 +1638,9 @@ class PipelineProcessor:
         # lazily only pays off when the directories are going to be evicted
         # again chunk by chunk, which needs an HDF5 archive to evict into.
         use_lazy = (
-            getattr(self.config, "clean_scratch", False)
+            self.config.clean_scratch
             and self._hdf5_store is not None
-            and getattr(self.config, "cleanup_feff_files", True)
+            and self.config.cleanup_feff_files
         )
         batch = self.input_generator.generate_trajectory_inputs(
             structures=structures,
