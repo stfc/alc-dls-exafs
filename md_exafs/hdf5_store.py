@@ -119,6 +119,7 @@ if TYPE_CHECKING:
 
 
 from .feff_utils import FeffConfig  # noqa: E402
+from .spectra import resample_chi  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -674,7 +675,7 @@ class ExafsHDF5Store:
                 if k_res.shape != stored_k.shape or not np.allclose(
                     k_res, stored_k, rtol=1e-6, atol=1e-8
                 ):
-                    chi_res = np.interp(stored_k, k_res, chi_res)
+                    chi_res = resample_chi(k_res, chi_res, stored_k)
                 chi_batch[i] = chi_res
 
                 # Paths
@@ -1029,7 +1030,7 @@ class ExafsHDF5Store:
                     if pk_pc.shape != stored_pk.shape or not np.allclose(
                         pk_pc, stored_pk, rtol=1e-6, atol=1e-8
                     ):
-                        chi_pc = np.interp(stored_pk, pk_pc, chi_pc)
+                        chi_pc = resample_chi(pk_pc, chi_pc, stored_pk)
 
                     p_chi_batch[j] = chi_pc
                     p_frame_indices[j] = pc["frame_index"]

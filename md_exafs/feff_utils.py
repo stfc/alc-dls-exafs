@@ -822,77 +822,44 @@ def average_chi_spectra(
     *,
     restrict_to_common_range: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Average χ(k) spectra with optional common-range alignment.
+    """Average χ(k) spectra, optionally on the range they all share.
+
+    A thin wrapper over :func:`md_exafs.spectra.average_chi_arrays` that picks
+    the reference grid and returns ``(chi, k)`` in that order.
 
     Args:
-        k_arrays: List of k-grids (one per spectrum)
-        chi_arrays: List of χ(k) arrays (one per spectrum)
-        weights: Optional weights for averaging (``None`` for equal weights)
-        restrict_to_common_range: When True, restrict interpolation to the
-            overlapping k-range across all spectra using the shortest grid.
-            When False, use the first spectrum's grid and zero-pad gaps.
+        k_arrays: k-grid of each spectrum (Å⁻¹).
+        chi_arrays: χ(k) of each spectrum.
+        weights: Per-spectrum weights. Defaults to equal weighting.
+        restrict_to_common_range: Average only where every spectrum has data,
+            on a grid spanning that overlap. Otherwise use the first
+            spectrum's grid, where members that fall short simply stop
+            contributing.
 
     Returns:
-        Tuple of (averaged χ, k_grid)
+        ``(averaged χ, k_grid)``.
 
     Raises:
-        ValueError: If inputs are empty, mismatched, or have no overlap when
-            ``restrict_to_common_range`` is requested.
+        ValueError: If the inputs are empty or mismatched, or if
+            ``restrict_to_common_range`` is set and the spectra do not overlap.
     """
     if not k_arrays or not chi_arrays:
         raise ValueError("Empty input arrays provided")
-
     if len(k_arrays) != len(chi_arrays):
         raise ValueError("Number of k and chi arrays must match")
 
-    if len(k_arrays) == 1:
-        # Single spectrum - no averaging needed
-        return chi_arrays[0], k_arrays[0]
+    from .spectra import average_chi_arrays
 
+    k_ref = None
     if restrict_to_common_range:
         k_min = max(float(k.min()) for k in k_arrays)
         k_max = min(float(k.max()) for k in k_arrays)
-
         if not np.isfinite(k_min) or not np.isfinite(k_max) or k_min >= k_max:
             raise ValueError("No overlapping k-range found for averaging")
+        k_ref = np.linspace(k_min, k_max, min(len(k) for k in k_arrays))
 
-        n_points = min(len(k) for k in k_arrays)
-        k_ref = np.linspace(k_min, k_max, n_points)
-    else:
-        # Set reference k-grid from first spectrum
-        k_ref = k_arrays[0].copy()
-
-    chi_list = []
-
-    for _i, (k, chi) in enumerate(zip(k_arrays, chi_arrays, strict=False)):
-        # chi(k) is always real float64 (Im of complex FEFF amplitude).
-        # Interpolate to the common k-grid where needed.
-        chi_real = np.asarray(chi, dtype=np.float64)
-        if not np.array_equal(k, k_ref):
-            chi_interp = np.interp(k_ref, k, chi_real, left=0.0, right=0.0)
-        else:
-            chi_interp = chi_real
-        chi_list.append(chi_interp)
-
-    # Apply weights if provided
-    if weights is not None:
-        if len(weights) != len(chi_list):
-            raise ValueError(
-                f"Number of weights ({len(weights)}) must match number of "
-                f"spectra ({len(chi_list)})"
-            )
-
-        # Normalize weights
-        weights_array = np.array(weights)
-        weights_array = weights_array / np.sum(weights_array)
-
-        # Weighted average
-        chi_avg = np.average(chi_list, axis=0, weights=weights_array)
-    else:
-        # Simple average
-        chi_avg = np.mean(chi_list, axis=0)
-
-    return chi_avg, k_ref
+    avg = average_chi_arrays(k_arrays, chi_arrays, k_grid=k_ref, weights=weights)
+    return avg.mean, avg.k
 
 
 def generate_pymatgen_input(

@@ -2111,6 +2111,13 @@ def load_results_from_hdf5(
         tasks=tasks, output_dir=output_dir or hdf5_path.parent, config=config
     )
     processor = ResultProcessor(config)
+
+    # Recomputed from the per-site groups rather than read back from the
+    # store's own /aggregates. Both go through average_chi_arrays, and the
+    # groups are already in memory, so the stored copy saves one nanmean and
+    # costs the guarantee that what is returned as `groups` is what the
+    # averages were taken over. There is no staleness marker to check it
+    # against.
     return LoadedResults(
         groups=groups,
         frame_averages=processor.create_frame_averages(groups, batch),

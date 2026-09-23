@@ -24,7 +24,7 @@ import numpy as np
 from .hdf5 import ArchiveReader, BatchShardWriter, EnsembleWriter
 from .paths import PathResult, path_chi, read_paths_from_dir
 from .potentials import PotentialsManager
-from .spectra import average_chi_arrays, xftf_arrays
+from .spectra import average_chi_arrays, resample_chi, xftf_arrays
 from .viz import group_path_results
 
 logger = logging.getLogger("md_exafs.execution")
@@ -33,7 +33,11 @@ logger = logging.getLogger("md_exafs.execution")
 #: Shards must share a grid for :func:`merge_shards` to average them, so callers that
 #: write shards outside :class:`BatchExecutor` should use this unless they pass an
 #: explicit grid everywhere.
-DEFAULT_K_GRID: np.ndarray = np.arange(0.05, 20.0, 0.05)
+#:
+#: Built by exact division rather than ``np.arange(0.05, 20.0, 0.05)``, whose
+#: accumulated float error puts the last point at 19.950000000000003 — beyond a
+#: ``chi.dat`` that ends at exactly 19.95, which would then resample to NaN.
+DEFAULT_K_GRID: np.ndarray = np.arange(1, 400) / 20.0
 
 
 @dataclass
@@ -181,7 +185,7 @@ def collect_task_into_shard(
     if k_res is None or chi_res is None:
         return False
 
-    chi_interp = np.interp(k_grid, k_res, chi_res, left=0.0, right=0.0)
+    chi_interp = resample_chi(k_res, chi_res, k_grid)
     writer.add_task_result(
         frame_idx=task.frame_idx,
         site_idx=task.site_idx,
@@ -401,26 +405,35 @@ def merge_shards(
         raise ValueError("No calculated chi spectra found across the provided shards.")
 
     # Grand ensemble average
-    k_ref, mean_chi, std_chi = average_chi_arrays([k_ref] * len(all_chis), all_chis)
-    ft_overall = xftf_arrays(k_ref, mean_chi, fourier_params)
+    overall = average_chi_arrays([k_ref] * len(all_chis), all_chis)
+    k_ref = overall.k
+    ft_overall = xftf_arrays(k_ref, overall.mean, fourier_params)
 
     out_path = Path(ensemble_path).resolve()
     with EnsembleWriter(
         out_path, k_grid=k_ref, fourier_params=fourier_params
     ) as writer:
         writer.set_overall_average(
-            k_ref, mean_chi, chi_std=std_chi, ft_results=ft_overall
+            k_ref,
+            overall.mean,
+            chi_std=overall.std,
+            ft_results=ft_overall,
+            n_contributors=overall.n_contributors,
         )
 
         # Frame averages
         for f_idx, c_list in sorted(frame_chis.items()):
-            _, f_mean, _ = average_chi_arrays([k_ref] * len(c_list), c_list)
-            writer.add_frame_average(f_idx, k_ref, f_mean)
+            avg = average_chi_arrays([k_ref] * len(c_list), c_list)
+            writer.add_frame_average(
+                f_idx, k_ref, avg.mean, n_contributors=avg.n_contributors
+            )
 
         # Site averages
         for s_idx, c_list in sorted(site_chis.items()):
-            _, s_mean, _ = average_chi_arrays([k_ref] * len(c_list), c_list)
-            writer.add_site_average(s_idx, k_ref, s_mean)
+            avg = average_chi_arrays([k_ref] * len(c_list), c_list)
+            writer.add_site_average(
+                s_idx, k_ref, avg.mean, n_contributors=avg.n_contributors
+            )
 
         # Top-N composite paths (ADR 0003)
         if all_paths:
