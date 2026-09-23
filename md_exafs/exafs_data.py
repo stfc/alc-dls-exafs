@@ -1604,10 +1604,8 @@ def add_metadata_to_group(group: Group, **metadata) -> Group:
 def create_averaged_group(groups: list[Group], fourier_params: dict) -> Group:
     """Create an averaged Group from a list of individual Groups.
 
-    This delegates the k-grid reconciliation to
-    :func:`larch_cli_wrapper.feff_utils.average_chi_spectra` to keep the
-    interpolation logic in a single place while still returning a Larch Group
-    ready for Fourier transformation.
+    Delegates to :func:`md_exafs.spectra.average_chi_arrays` to use the single
+    canonical averaging implementation.
 
     Args:
         groups: List of EXAFS Groups to average
@@ -1619,16 +1617,13 @@ def create_averaged_group(groups: list[Group], fourier_params: dict) -> Group:
     if not groups:
         raise ValueError("Cannot create averaged group from empty list")
 
-    from .feff_utils import average_chi_spectra
+    from .spectra import average_chi_arrays
 
     k_arrays = [np.asarray(group.k) for group in groups]
     chi_arrays = [np.asarray(group.chi) for group in groups]
 
-    chi_avg, k_common = average_chi_spectra(
-        k_arrays,
-        chi_arrays,
-        restrict_to_common_range=True,
-    )
+    avg = average_chi_arrays(k_arrays, chi_arrays)
+    k_common, chi_avg = avg.k, avg.mean
 
     avg_group = Group()
     avg_group.k = k_common

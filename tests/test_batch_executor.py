@@ -113,8 +113,8 @@ def test_write_batch_shard_collects_completed_runs(tmp_path: Path):
     assert np.allclose(reader.k, DEFAULT_K_GRID)
     expected = np.mean(
         [
-            np.interp(DEFAULT_K_GRID, k_native, chi_a, left=0.0, right=0.0),
-            np.interp(DEFAULT_K_GRID, k_native, chi_b, left=0.0, right=0.0),
+            np.interp(DEFAULT_K_GRID, k_native, chi_a),
+            np.interp(DEFAULT_K_GRID, k_native, chi_b),
         ],
         axis=0,
     )
@@ -154,7 +154,7 @@ def test_write_batch_shard_omits_unparseable_tasks(tmp_path: Path):
     assert n_written == 1
     reader = ArchiveReader(out)
     # The shard mean must equal the one good spectrum, not half of it.
-    expected = np.interp(DEFAULT_K_GRID, k_native, chi, left=0.0, right=0.0)
+    expected = np.interp(DEFAULT_K_GRID, k_native, chi)
     assert np.allclose(reader.chi, expected, atol=1e-5)
 
 

@@ -26,7 +26,7 @@ from .spectra import resolve_ft_params, xftf_arrays
 logger = logging.getLogger("md_exafs.hdf5")
 
 SHARD_VERSION = 1
-ENSEMBLE_VERSION = 2
+ENSEMBLE_VERSION = 3
 
 _COMPRESS = {"compression": "gzip", "compression_opts": 1, "shuffle": True}
 _ARRAY_DTYPE = np.float32
@@ -178,6 +178,7 @@ class EnsembleWriter:
         chi: np.ndarray,
         chi_std: np.ndarray | None = None,
         ft_results: dict[str, np.ndarray] | None = None,
+        n_contributors: np.ndarray | None = None,
     ) -> None:
         """Store the grand ensemble average spectra and Fourier transform."""
         grp = self._aggregates.create_group("overall_average")
@@ -185,6 +186,11 @@ class EnsembleWriter:
         grp.create_dataset("chi", data=np.asarray(chi, dtype=float))
         if chi_std is not None:
             grp.create_dataset("chi_std", data=np.asarray(chi_std, dtype=float))
+        if n_contributors is not None:
+            grp.create_dataset(
+                "n_contributors",
+                data=np.asarray(n_contributors, dtype=np.int32),
+            )
 
         if ft_results is None:
             ft_results = xftf_arrays(k, chi, self.fourier_params)
@@ -206,12 +212,18 @@ class EnsembleWriter:
         k: np.ndarray,
         chi: np.ndarray,
         ft_results: dict[str, np.ndarray] | None = None,
+        n_contributors: np.ndarray | None = None,
     ) -> None:
         """Store a frame average spectrum."""
         grp = self._frame_avgs.create_group(f"frame_{frame_idx:04d}")
         grp.attrs["frame_idx"] = int(frame_idx)
         grp.create_dataset("k", data=np.asarray(k, dtype=float))
         grp.create_dataset("chi", data=np.asarray(chi, dtype=float))
+        if n_contributors is not None:
+            grp.create_dataset(
+                "n_contributors",
+                data=np.asarray(n_contributors, dtype=np.int32),
+            )
         if ft_results is None:
             ft_results = xftf_arrays(k, chi, self.fourier_params)
         grp.create_dataset("r", data=np.asarray(ft_results["r"], dtype=float))
@@ -225,12 +237,18 @@ class EnsembleWriter:
         k: np.ndarray,
         chi: np.ndarray,
         ft_results: dict[str, np.ndarray] | None = None,
+        n_contributors: np.ndarray | None = None,
     ) -> None:
         """Store a site average spectrum."""
         grp = self._site_avgs.create_group(f"site_{site_idx:04d}")
         grp.attrs["site_idx"] = int(site_idx)
         grp.create_dataset("k", data=np.asarray(k, dtype=float))
         grp.create_dataset("chi", data=np.asarray(chi, dtype=float))
+        if n_contributors is not None:
+            grp.create_dataset(
+                "n_contributors",
+                data=np.asarray(n_contributors, dtype=np.int32),
+            )
         if ft_results is None:
             ft_results = xftf_arrays(k, chi, self.fourier_params)
         grp.create_dataset("r", data=np.asarray(ft_results["r"], dtype=float))
@@ -296,7 +314,7 @@ class ArchiveReader:
                 return True
             version = f.get("meta", {}).attrs.get("format_version", 0)
             atype = _as_str(f.get("meta", {}).attrs.get("archive_type", ""))
-            return version == ENSEMBLE_VERSION or atype == "ensemble"
+            return version in (2, ENSEMBLE_VERSION) or atype == "ensemble"
 
     @property
     def is_shard(self) -> bool:
@@ -334,8 +352,19 @@ class ArchiveReader:
             if "tasks" in f:
                 chis = [np.array(t["chi"]) for t in f["tasks"].values() if "chi" in t]
                 if chis:
-                    return np.mean(chis, axis=0)
+                    from .spectra import average_chi_arrays
+
+                    k_grid = self.k
+                    return average_chi_arrays([k_grid] * len(chis), chis).mean
             raise KeyError(f"No chi spectrum found in {self.path}")
+
+    @property
+    def n_contributors(self) -> np.ndarray | None:
+        """Per-k contributor count if available."""
+        with self._open() as f:
+            if "aggregates/overall_average/n_contributors" in f:
+                return np.array(f["aggregates/overall_average/n_contributors"])
+            return None
 
     @property
     def chi_std(self) -> np.ndarray | None:
@@ -377,6 +406,24 @@ class ArchiveReader:
                 return np.array(f["aggregates/overall_average/chir_im"])
             return None
 
+    @property
+    def site_indices(self) -> list[int]:
+        """Absorber site indices that have a stored average, ascending."""
+        with self._open() as f:
+            grp = f.get("aggregates/site_averages")
+            if grp is None:
+                return []
+            return sorted(int(name.removeprefix("site_")) for name in grp)
+
+    @property
+    def frame_indices(self) -> list[int]:
+        """Trajectory frame indices that have a stored average, ascending."""
+        with self._open() as f:
+            grp = f.get("aggregates/frame_averages")
+            if grp is None:
+                return []
+            return sorted(int(name.removeprefix("frame_")) for name in grp)
+
     def get_site_average(self, site_idx: int) -> dict[str, np.ndarray]:
         """Return average spectra for a given site index."""
         with self._open() as f:
@@ -393,6 +440,8 @@ class ArchiveReader:
             if "r" in grp and "chir_mag" in grp:
                 out["r"] = np.array(grp["r"])
                 out["chir_mag"] = np.array(grp["chir_mag"])
+            if "n_contributors" in grp:
+                out["n_contributors"] = np.array(grp["n_contributors"])
             return out
 
     def get_frame_average(self, frame_idx: int) -> dict[str, np.ndarray]:
@@ -411,6 +460,8 @@ class ArchiveReader:
             if "r" in grp and "chir_mag" in grp:
                 out["r"] = np.array(grp["r"])
                 out["chir_mag"] = np.array(grp["chir_mag"])
+            if "n_contributors" in grp:
+                out["n_contributors"] = np.array(grp["n_contributors"])
             return out
 
     def iter_paths(self) -> Iterator[PathResult]:

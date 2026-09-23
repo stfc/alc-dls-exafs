@@ -21,10 +21,11 @@ def test_average_chi_arrays():
     k = np.linspace(2.0, 12.0, 50)
     chi1 = np.sin(k)
     chi2 = np.sin(k) * 1.1
-    k_ref, mean_chi, std_chi = average_chi_arrays([k, k], [chi1, chi2])
+    k_ref, mean_chi, std_chi, n_contrib = average_chi_arrays([k, k], [chi1, chi2])
     assert np.allclose(k_ref, k)
     assert np.allclose(mean_chi, 1.05 * np.sin(k))
     assert np.all(std_chi >= 0.0)
+    assert np.all(n_contrib == 2)
 
 
 def test_format_chi_ascii():

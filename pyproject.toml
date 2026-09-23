@@ -1,6 +1,6 @@
 [project]
 name = "md-exafs"
-version = "0.2.0"
+version = "0.3.0"
 authors = [
     { name = "Kane Shenton", email = "jkshenton@gmail.com" },
 ]

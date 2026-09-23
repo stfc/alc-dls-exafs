@@ -20,9 +20,15 @@ from .selection import (
     resolve_frame_absorbers,
     resolve_trajectory_absorbers,
 )
-from .spectra import average_chi_arrays, format_chi_ascii, xftf_arrays
+from .spectra import (
+    ChiAverage,
+    average_chi_arrays,
+    format_chi_ascii,
+    resample_chi,
+    xftf_arrays,
+)
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Default cache directory for FEFF calculations and results
 DEFAULT_CACHE_DIR = Path.home() / ".larch_cache"
@@ -40,6 +46,8 @@ __all__ = [
     "make_path_key",
     "xftf_arrays",
     "average_chi_arrays",
+    "ChiAverage",
+    "resample_chi",
     "format_chi_ascii",
     "resolve_frame_absorbers",
     "resolve_trajectory_absorbers",
