@@ -43,10 +43,20 @@ def _make_batch(tmp_path: Path, n_frames: int, cfg: FeffConfig) -> FeffBatch:
     return FeffBatch(tasks=tasks, output_dir=out, config=cfg)
 
 
-def _run(tmp_path, n_frames, chunk_size, fake_feff, *, min_cw=None, cleanup=True):
+def _run(
+    tmp_path,
+    n_frames,
+    chunk_size,
+    fake_feff,
+    *,
+    min_cw=None,
+    cleanup=True,
+    clean_scratch=True,
+):
     cfg = FeffConfig(
         keep_path_files=True,
         cleanup_feff_files=cleanup,
+        clean_scratch=clean_scratch,
         stream_chunk_size=chunk_size,
         store_min_cw_ratio=min_cw,
     )
@@ -111,11 +121,19 @@ def test_results_independent_of_chunk_size(tmp_path, fake_feff, chunk_size):
 
 
 def test_feff_path_files_deleted_after_processing(tmp_path, fake_feff):
-    """With cleanup on, feffNNNN.dat are removed (bounding on-disk usage)."""
+    """With cleanup on and clean_scratch=True, scratch dirs are removed on the fly."""
     h5, batch, _r, _c = _run(tmp_path, n_frames=4, chunk_size=2, fake_feff=fake_feff)
+    # Scratch directories are removed once validated and written to HDF5
+    assert not any(t.feff_dir.exists() for t in batch.tasks)
+
+
+def test_chi_dat_retained_when_clean_scratch_disabled(tmp_path, fake_feff):
+    """When clean_scratch=False, path files are removed but chi.dat is kept."""
+    h5, batch, _r, _c = _run(
+        tmp_path, n_frames=4, chunk_size=2, fake_feff=fake_feff, clean_scratch=False
+    )
     leftover = [p for task in batch.tasks for p in task.feff_dir.glob("feff[0-9]*.dat")]
     assert leftover == [], f"path files not cleaned up: {leftover}"
-    # chi.dat is intentionally kept for Stage C result loading
     assert all((t.feff_dir / "chi.dat").exists() for t in batch.tasks)
 
 

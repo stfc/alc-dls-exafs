@@ -280,6 +280,13 @@ class FeffConfig:
     force_recalculate: bool = False
     # Clean up unnecessary FEFF output files
     cleanup_feff_files: bool = True
+    # Remove each scratch calculation directory (frame_XXXX/site_YYYY) as soon
+    # as its chi(k) is validated and committed to the HDF5 archive, bounding the
+    # live directory count to one streaming chunk instead of one per task.
+    # Requires HDF5 output and cleanup_feff_files; ignored otherwise, since the
+    # archive would then be the only copy of a result that was never written.
+    # Directories belonging to failed or rejected runs are always kept.
+    clean_scratch: bool = True
     # Keep per-path feffNNNN.dat files before cleanup (needed for path contributions).
     # Automatically forced True when HDF5 store is used with store_paths=True.
     keep_path_files: bool = False
@@ -486,6 +493,7 @@ class FeffConfig:
                 "sample_interval": self.sample_interval,
                 "force_recalculate": self.force_recalculate,
                 "cleanup_feff_files": self.cleanup_feff_files,
+                "clean_scratch": self.clean_scratch,
             }
         )
 

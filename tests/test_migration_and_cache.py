@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import h5py
 import numpy as np
@@ -13,7 +14,9 @@ from larch_cli_wrapper.cache_utils import (
     load_from_cache,
     save_to_cache,
 )
+from larch_cli_wrapper.feff_utils import FeffConfig
 from larch_cli_wrapper.hdf5_store import ExafsHDF5Store
+from larch_cli_wrapper.pipeline import FeffBatch, FeffExecutor, FeffTask
 
 from .conftest import write_fake_feff_outputs
 
@@ -127,3 +130,67 @@ def test_corrupt_cache_file_is_removed(tmp_path):
     assert load_from_cache("bad", tmp_path) is None
     # corrupt file is cleaned up so the next run recomputes cleanly
     assert not bad.exists()
+
+
+# --------------------------------------------------------------------------- #
+# FeffExecutor <-> pkl cache wiring
+# --------------------------------------------------------------------------- #
+def _cache_batch(tmp_path: Path) -> FeffBatch:
+    """A two-task batch with inputs already on disk, ready to execute."""
+    out = tmp_path / "run"
+    tasks = []
+    for frame in range(2):
+        feff_dir = out / f"frame_{frame:04d}" / "site_0000"
+        feff_dir.mkdir(parents=True, exist_ok=True)
+        inp = feff_dir / "feff.inp"
+        inp.write_text(f"TITLE frame {frame}\nCONTROL 1 1 1 1 1 1\nEND\n")
+        tasks.append(FeffTask(input_file=inp, site_index=0, frame_index=frame))
+    return FeffBatch(
+        tasks=tasks, output_dir=out, config=FeffConfig(cleanup_feff_files=False)
+    )
+
+
+def test_executor_populates_pkl_cache(tmp_path, fake_feff):
+    """Results are cached under the feff.inp hash, and reused on a second run."""
+    cache_dir = tmp_path / "cache"
+    batch = _cache_batch(tmp_path)
+
+    with patch(
+        "larch_cli_wrapper.pipeline.run_multi_site_feff_calculations", fake_feff
+    ):
+        results = FeffExecutor(cache_dir=cache_dir).execute_batch(batch, parallel=False)
+
+    assert all(results.values())
+    cached = sorted(p.name for p in cache_dir.glob("*.pkl"))
+    assert len(cached) == 2, cached
+    assert "None.pkl" not in cached
+
+    # A second run is served entirely from the cache: FEFF is never invoked.
+    def _explode(*_a, **_kw):
+        raise AssertionError("FEFF should not run on a full cache hit")
+
+    with patch("larch_cli_wrapper.pipeline.run_multi_site_feff_calculations", _explode):
+        again = FeffExecutor(cache_dir=cache_dir).execute_batch(batch, parallel=False)
+    assert all(again.values())
+
+
+def test_force_recalculate_refreshes_pkl_cache(tmp_path, fake_feff):
+    """--force-recalculate must rewrite the cache, not bypass and abandon it.
+
+    The cache key is the hash of feff.inp, so it has to be computed even when
+    the existing entry is being ignored; otherwise the refreshed result is
+    written under a null key and the stale entry survives forever.
+    """
+    cache_dir = tmp_path / "cache"
+    batch = _cache_batch(tmp_path)
+    executor = FeffExecutor(cache_dir=cache_dir, force_recalculate=True)
+
+    with patch(
+        "larch_cli_wrapper.pipeline.run_multi_site_feff_calculations", fake_feff
+    ):
+        results = executor.execute_batch(batch, parallel=False)
+
+    assert all(results.values())
+    names = sorted(p.name for p in cache_dir.glob("*.pkl"))
+    assert len(names) == 2, names
+    assert "None.pkl" not in names

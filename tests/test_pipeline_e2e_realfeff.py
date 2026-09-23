@@ -33,6 +33,8 @@ def _run_pipeline(
     n_frames: int = 2,
     chunk_size: int = 100,
     store_path_params: bool = False,
+    clean_scratch: bool = True,
+    reuse_potentials: bool = False,
 ) -> Path:
     """Run the real pipeline on a tiny 1-atom fcc-Cu cell; return results.h5."""
     out_dir = Path(out_dir)
@@ -45,6 +47,7 @@ def _run_pipeline(
         kmax=10.0,
         keep_path_files=True,
         cleanup_feff_files=True,
+        clean_scratch=clean_scratch,
         stream_chunk_size=chunk_size,
         store_path_params=store_path_params,
     )
@@ -52,8 +55,22 @@ def _run_pipeline(
     # max_workers=1 keeps path parsing / aggregation serial (no process pool),
     # which is deterministic and fast for a couple of calculations.
     proc = PipelineProcessor(cfg, max_workers=1, hdf5_path=h5)
-    proc.process_trajectory(frames, absorber="Cu", output_dir=out_dir, parallel=True)
+    proc.process_trajectory(
+        frames,
+        absorber="Cu",
+        output_dir=out_dir,
+        parallel=True,
+        precompute_potentials=reuse_potentials,
+    )
     return h5
+
+
+def _sorted_site_chi(h5: Path) -> np.ndarray:
+    with h5py.File(h5, "r") as f:
+        fr = np.array(f["site_results"]["frame_index"])
+        si = np.array(f["site_results"]["site_index"])
+        chi = np.array(f["site_results"]["chi"])
+        return chi[np.lexsort((si, fr))]
 
 
 @pytest.fixture(scope="module")
@@ -105,17 +122,59 @@ def test_chunk_size_does_not_change_results(tmp_path):
     h5_big = _run_pipeline(tmp_path / "big", n_frames=3, chunk_size=100)
     h5_stream = _run_pipeline(tmp_path / "stream", n_frames=3, chunk_size=1)
 
-    def _sorted_site_chi(h5):
-        with h5py.File(h5, "r") as f:
-            fr = np.array(f["site_results"]["frame_index"])
-            si = np.array(f["site_results"]["site_index"])
-            chi = np.array(f["site_results"]["chi"])
-            order = np.lexsort((si, fr))
-            return chi[order]
-
     np.testing.assert_allclose(
         _sorted_site_chi(h5_big), _sorted_site_chi(h5_stream), rtol=1e-6, atol=1e-7
     )
+
+
+def test_evicting_scratch_does_not_change_results(tmp_path):
+    """Deleting each directory as it completes changes nothing but disk usage."""
+    h5_keep = _run_pipeline(
+        tmp_path / "keep", n_frames=3, chunk_size=2, clean_scratch=False
+    )
+    h5_evict = _run_pipeline(
+        tmp_path / "evict", n_frames=3, chunk_size=2, clean_scratch=True
+    )
+
+    np.testing.assert_allclose(
+        _sorted_site_chi(h5_keep), _sorted_site_chi(h5_evict), rtol=1e-6, atol=1e-7
+    )
+    assert list((tmp_path / "keep").glob("frame_*/site_*")) != []
+    assert list((tmp_path / "evict").glob("frame_*")) == []
+
+
+def test_reuse_potentials_survives_lazy_materialization(tmp_path):
+    """--reuse-potentials still works when directories are written per chunk.
+
+    Lazily planned tasks write their ``feff.inp`` inside the streaming loop,
+    long after the precompute stage has finished.  They must still be written
+    as path-only runs (``CONTROL 0 0 0 1 1 1``) against the distributed
+    potentials; getting the config wrong there silently turns every frame back
+    into a full SCF calculation.  Chunking also means the potentials have to be
+    distributed per chunk rather than once up front.
+    """
+    out_dir = tmp_path / "reuse"
+    h5 = _run_pipeline(
+        out_dir,
+        n_frames=3,
+        chunk_size=2,  # forces >1 chunk, so distribution must repeat
+        clean_scratch=True,
+        reuse_potentials=True,
+    )
+
+    with h5py.File(h5, "r") as f:
+        chi = np.array(f["site_results"]["chi"])
+        # Every frame produced a real, non-degenerate spectrum: a path-only run
+        # that could not find its potentials would have failed outright.
+        assert chi.shape[0] == 3
+        assert np.all(np.isfinite(chi))
+        assert np.all(np.abs(chi).max(axis=1) > 0)
+        assert f["path_results"]["chi"].shape[0] > 0
+
+    # The precompute directory is deliberately not scratch, so it stays; the
+    # per-frame calculation directories do not.
+    assert (out_dir / "precomputed_potentials").exists()
+    assert list(out_dir.glob("frame_*")) == []
 
 
 def test_store_path_params_does_not_change_averaged_chi(tmp_path):

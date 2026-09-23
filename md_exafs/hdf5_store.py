@@ -213,6 +213,7 @@ class ExafsHDF5Store:
             )
         )
         self._lock = threading.Lock()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._h5 = h5py.File(self.path, mode)
 
         if mode == "a":
