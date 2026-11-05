@@ -407,6 +407,23 @@ class ArchiveReader:
             return None
 
     @property
+    def fourier_params(self) -> dict[str, Any]:
+        """Fourier transform parameters recorded in the archive metadata."""
+        with self._open() as f:
+            raw = f.get("meta", {}).attrs.get("fourier_params")
+            if raw is None:
+                return {}
+            return dict(json.loads(_as_str(raw)))
+
+    def get_overall_average(self) -> dict[str, np.ndarray]:
+        """Return the stored grand average, one array per stored dataset."""
+        with self._open() as f:
+            if "aggregates/overall_average" not in f:
+                raise KeyError(f"No overall average in {self.path}")
+            grp = f["aggregates/overall_average"]
+            return {name: np.array(ds) for name, ds in grp.items()}
+
+    @property
     def site_indices(self) -> list[int]:
         """Absorber site indices that have a stored average, ascending."""
         with self._open() as f:

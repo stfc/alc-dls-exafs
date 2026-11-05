@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.1
+
+### Added
+
+- `md_exafs.archive_series.archive_series`, which reads an ensemble archive
+  into a versioned, JSON-safe, plot-ready series: the stored overall average
+  (with std and contributor counts), per-site averages, and a capped, evenly
+  subsampled set of per-frame spectra, together with the Fourier-transform
+  parameters, units and warnings. The stored overall average is checked
+  against one recomputed from the stored frame averages with
+  `average_chi_arrays`; a disagreement beyond `rel_tol` is reported in the
+  series `warnings`. `max_points` thins curves by min/max per bucket so peaks
+  survive.
+- `series_to_vega_lite`, which turns a series into a Vega-Lite spec (views
+  `chi_k`, `chi_r`, `sites`, `frames`) using the `viz` chart builders.
+  Requires `altair`.
+- `ArchiveReader.fourier_params` and `ArchiveReader.get_overall_average`.
+
 ## 0.3.0
 
 Averaging χ(k) had four implementations with three different conventions for
