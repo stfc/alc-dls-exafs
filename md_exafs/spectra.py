@@ -26,6 +26,17 @@ FT_DEFAULTS: dict[str, Any] = {
     "window": "kaiser",
 }
 
+# Window names larch's ``ftwindow`` accepts (it matches on the first three
+# letters, so ``kaiser-bessel`` also works; the bare name is the documented one).
+FT_WINDOWS: tuple[str, ...] = (
+    "hanning",
+    "parzen",
+    "welch",
+    "gaussian",
+    "sine",
+    "kaiser",
+)
+
 
 def resolve_ft_params(ft_params: dict[str, Any] | None = None) -> dict[str, Any]:
     """Fill ft_params with FT_DEFAULTS and validate keys."""
@@ -308,6 +319,7 @@ def format_chi_ascii(
 
 __all__ = [
     "FT_DEFAULTS",
+    "FT_WINDOWS",
     "ChiAverage",
     "average_chi_arrays",
     "format_chi_ascii",

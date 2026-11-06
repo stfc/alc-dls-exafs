@@ -244,7 +244,7 @@ def test_vega_lite_views(archive: Path, view: str):
         labels = {row["path"] for rows in datasets for row in rows}
         assert labels == {"|χ(R)|", "Re χ(R)", "Im χ(R)"}
     if view == "chi_k":
-        assert ("y", "chi") in fields
+        assert ("y", "chi_weighted") in fields
         assert ("y2", "hi") in fields
         assert ("y", "n") in fields
     if view == "frames":

@@ -7,8 +7,14 @@ is the contract; :func:`series_to_vega_lite` derives chart specifications from
 it with the builders in :mod:`md_exafs.viz`.
 
 Conventions recorded in the series ``units`` block: ``chi`` is stored
-unweighted (no k**n factor); |chi(R)| is the transform of k**kweight * chi(k)
-with the window and range in ``ft_params``, so its unit is A^-(kweight+1).
+unweighted (no k**n factor). ``chi_weighted`` is k**kweight * chi, the curve
+plotted in the chi(k) views, and |chi(R)| is the transform of that same
+weighting with the window and range in ``ft_params``, so its unit is
+A^-(kweight+1).
+
+Fourier-transform parameters are either the archive's own (``ft_params=None``:
+the stored chi(R) is used) or caller-supplied, in which case chi(R) is
+recomputed from the stored unweighted chi(k) for every spectrum.
 """
 
 from __future__ import annotations
@@ -19,7 +25,12 @@ from typing import Any
 import numpy as np
 
 from .hdf5 import ArchiveReader
-from .spectra import average_chi_arrays
+from .spectra import (
+    FT_WINDOWS,
+    average_chi_arrays,
+    resolve_ft_params,
+    xftf_arrays,
+)
 
 SCHEMA_VERSION = 1
 
@@ -35,9 +46,35 @@ MIN_MAX_POINTS = 16
 
 VIEWS = ("chi_k", "chi_r", "sites", "frames")
 
+# Sections of the series that ``include`` can select. The overall average is
+# always computed: the stored-vs-recomputed check and two views need it.
+SECTIONS = ("overall", "sites", "frames")
+
+# Fourier-transform parameters a caller may override.
+FT_REQUEST_KEYS = ("kmin", "kmax", "dk", "window", "kweight", "rmax")
+
+# k-weights offered to a UI (``ft_limits``). Requests accept 0 to 4 inclusive.
+KWEIGHTS = (0, 1, 2, 3)
+KWEIGHT_RANGE = (0, 4)
+
+# Largest R_max accepted; larger values are rejected as absurd.
+RMAX_MAX = 30.0
+
 
 class ViewUnavailableError(ValueError):
     """The series holds no data for the requested view."""
+
+
+class InvalidFtParamsError(ValueError):
+    """Requested Fourier-transform parameters cannot be used.
+
+    ``problems`` holds one message per problem found.
+    """
+
+    def __init__(self, problems: list[str]) -> None:
+        """Join ``problems`` into the message."""
+        self.problems = list(problems)
+        super().__init__("; ".join(self.problems))
 
 
 def _keep_indices(n: int, max_points: int | None, *channels: np.ndarray) -> np.ndarray:
@@ -68,14 +105,175 @@ def _floats(a: np.ndarray, idx: np.ndarray) -> list[float | None]:
     return [float(v) if np.isfinite(v) else None for v in np.asarray(a, float)[idx]]
 
 
-def _spectrum(data: dict[str, np.ndarray], max_points: int | None) -> dict[str, Any]:
+def _finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int | float | np.number):
+        return False
+    return bool(np.isfinite(value))
+
+
+def _resolve_ft_request(
+    request: dict[str, Any], defaults: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge a caller's Fourier-transform request over the archive's defaults.
+
+    Raises:
+        InvalidFtParamsError: One message per problem: unknown keys, bad types
+            or ranges, an empty window, or ``kmin >= kmax``.
+    """
+    problems: list[str] = []
+    unknown = sorted(str(key) for key in set(request) - set(FT_REQUEST_KEYS))
+    if unknown:
+        problems.append(
+            f"unknown Fourier-transform parameter(s) {unknown}; "
+            f"allowed: {list(FT_REQUEST_KEYS)}"
+        )
+    merged = {**defaults, **{k: v for k, v in request.items() if k in FT_REQUEST_KEYS}}
+
+    if not _finite_number(merged["kmin"]) or merged["kmin"] < 0:
+        problems.append(f"kmin must be a finite number >= 0, got {merged['kmin']!r}")
+    if not _finite_number(merged["kmax"]):
+        problems.append(f"kmax must be a finite number, got {merged['kmax']!r}")
+    elif _finite_number(merged["kmin"]) and merged["kmin"] >= merged["kmax"]:
+        problems.append(
+            f"kmin ({merged['kmin']:g}) must be below kmax ({merged['kmax']:g})"
+        )
+    if not _finite_number(merged["dk"]) or merged["dk"] < 0:
+        problems.append(f"dk must be a finite number >= 0, got {merged['dk']!r}")
+    if not _finite_number(merged["rmax"]) or not 0 < merged["rmax"] <= RMAX_MAX:
+        problems.append(f"rmax must be in (0, {RMAX_MAX:g}] A, got {merged['rmax']!r}")
+    if merged["window"] not in FT_WINDOWS:
+        problems.append(
+            f"window must be one of {list(FT_WINDOWS)}, got {merged['window']!r}"
+        )
+    kw = merged["kweight"]
+    lo, hi = KWEIGHT_RANGE
+    if (
+        isinstance(kw, bool)
+        or not isinstance(kw, int | np.integer)
+        or not lo <= kw <= hi
+    ):
+        problems.append(f"kweight must be an integer from {lo} to {hi}, got {kw!r}")
+
+    if problems:
+        raise InvalidFtParamsError(problems)
+    return {
+        "kmin": float(merged["kmin"]),
+        "kmax": float(merged["kmax"]),
+        "dk": float(merged["dk"]),
+        "window": str(merged["window"]),
+        "kweight": int(merged["kweight"]),
+        "rmax": float(merged["rmax"]),
+    }
+
+
+def _archive_ft_defaults(stored: dict[str, Any]) -> dict[str, Any]:
+    """The archive's Fourier-transform parameters, library defaults filled in."""
+    resolved = resolve_ft_params({k: stored[k] for k in FT_REQUEST_KEYS if k in stored})
+    return {k: resolved[k] for k in FT_REQUEST_KEYS}
+
+
+def _coverage_limits(overall: dict[str, np.ndarray]) -> dict[str, Any]:
+    """First and last k with data in the overall average, and the grid top."""
+    k = np.asarray(overall["k"], dtype=float)
+    if "n_contributors" in overall:
+        covered = np.asarray(overall["n_contributors"]) > 0
+    else:
+        covered = np.isfinite(np.asarray(overall["chi"], dtype=float))
+    if not covered.any():
+        kmin_data = kmax_data = None
+    else:
+        kmin_data = float(k[covered][0])
+        kmax_data = float(k[covered][-1])
+    return {
+        "kmin_data": kmin_data,
+        "kmax_data": kmax_data,
+        "k_grid_max": float(k.max()) if k.size else None,
+        "kweights": list(KWEIGHTS),
+        "windows": list(FT_WINDOWS),
+        "rmax_max": RMAX_MAX,
+    }
+
+
+def _ft_data_warnings(
+    ft: dict[str, Any], limits: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Structured warnings for a window that reaches past the data."""
+    if limits["kmin_data"] is None:
+        return [
+            {
+                "code": "no_data",
+                "message": "The overall average has no k with data, so the "
+                "Fourier-transform window cannot be checked against it.",
+            }
+        ]
+    out: list[dict[str, Any]] = []
+    kmin_data, kmax_data = limits["kmin_data"], limits["kmax_data"]
+    if ft["kmax"] > kmax_data:
+        out.append(
+            {
+                "code": "window_beyond_data",
+                "param": "kmax",
+                "value": ft["kmax"],
+                "data_limit": kmax_data,
+                "message": f"kmax={ft['kmax']:g} A^-1 lies above the highest k "
+                f"with data ({kmax_data:g} A^-1). The transform fills k inside "
+                "the window beyond the data with zeros, which damps |chi(R)|; "
+                f"lower kmax to at most {kmax_data:g} A^-1.",
+            }
+        )
+    if ft["kmin"] < kmin_data:
+        out.append(
+            {
+                "code": "window_beyond_data",
+                "param": "kmin",
+                "value": ft["kmin"],
+                "data_limit": kmin_data,
+                "message": f"kmin={ft['kmin']:g} A^-1 lies below the lowest k "
+                f"with data ({kmin_data:g} A^-1). The transform fills k inside "
+                "the window below the data with zeros, which damps |chi(R)|; "
+                f"raise kmin to at least {kmin_data:g} A^-1.",
+            }
+        )
+    return out
+
+
+def _transform(data: dict[str, np.ndarray], ft: dict[str, Any]) -> dict[str, Any]:
+    """Fourier transform of one stored unweighted spectrum with ``ft``."""
+    res = xftf_arrays(
+        np.asarray(data["k"], dtype=float),
+        np.asarray(data["chi"], dtype=float),
+        ft,
+    )
+    return {name: res[name] for name in ("r", "chir_mag", "chir_re", "chir_im")}
+
+
+def _with_transform(
+    data: dict[str, np.ndarray], ft: dict[str, Any], recompute: bool
+) -> dict[str, Any]:
+    """``data`` with chi(R) recomputed when asked, or when it was never stored."""
+    if recompute or "chir_mag" not in data:
+        return {**data, **_transform(data, ft)}
+    return data
+
+
+def _spectrum(
+    data: dict[str, np.ndarray], max_points: int | None, kweight: int
+) -> dict[str, Any]:
     """Series entry for one averaged spectrum (any of overall, site, frame)."""
     k = np.asarray(data["k"], dtype=float)
     chi = np.asarray(data["chi"], dtype=float)
-    ik = _keep_indices(k.size, max_points, chi)
-    out: dict[str, Any] = {"k": _floats(k, ik), "chi": _floats(chi, ik)}
+    weight = k**kweight
+    chi_w = weight * chi
+    ik = _keep_indices(k.size, max_points, chi, chi_w)
+    out: dict[str, Any] = {
+        "k": _floats(k, ik),
+        "chi": _floats(chi, ik),
+        "chi_weighted": _floats(chi_w, ik),
+    }
     if "chi_std" in data:
-        out["chi_std"] = _floats(data["chi_std"], ik)
+        std = np.asarray(data["chi_std"], dtype=float)
+        out["chi_std"] = _floats(std, ik)
+        out["chi_std_weighted"] = _floats(weight * std, ik)
     if "n_contributors" in data:
         out["n_contributors"] = [int(v) for v in np.asarray(data["n_contributors"])[ik]]
     if "r" in data and "chir_mag" in data:
@@ -112,6 +310,8 @@ def _check_overall(
     Frames are weighted by their spectrum count (the peak of their
     ``n_contributors``) so unequal numbers of absorbers per frame do not
     register as a mismatch; equal weights are used when counts are absent.
+    This is a k-space check and does not depend on the Fourier-transform
+    parameters.
     """
     frame_ids = reader.frame_indices
     check: dict[str, Any] = {
@@ -167,18 +367,40 @@ def _check_overall(
     return check, []
 
 
+def _units(kweight: int) -> dict[str, str]:
+    unit_k = f"A^-{kweight}" if kweight else "dimensionless"
+    return {
+        "k": "A^-1",
+        "r": "A",
+        "chi": "dimensionless",
+        "chi_weighted": unit_k,
+        "chir": f"A^-{kweight + 1}",
+        "chi_weighting": "none in chi (stored without a k**n factor); "
+        f"chi_weighted = k**{kweight} * chi",
+        "chir_weighting": f"k**{kweight} applied before the Fourier transform",
+    }
+
+
 def archive_series(
     path: Path | str,
     *,
+    ft_params: dict[str, Any] | None = None,
     max_points: int | None = None,
     max_frames: int = 20,
     max_sites: int = 50,
     rel_tol: float = DEFAULT_REL_TOL,
+    include: tuple[str, ...] = SECTIONS,
 ) -> dict[str, Any]:
     """Read an ensemble archive into a plot-ready, JSON-safe series.
 
     Args:
         path: Ensemble archive (``ensemble_results.h5``).
+        ft_params: Fourier-transform parameters to use instead of the archive's.
+            Any subset of ``kmin``, ``kmax``, ``dk``, ``window``, ``kweight``
+            and ``rmax``; the rest default to the archive's stored values. When
+            given, chi(R) is recomputed with :func:`spectra.xftf_arrays` from
+            the stored unweighted chi(k) of every included spectrum. ``None``
+            keeps the stored chi(R).
         max_points: Cap on points per plotted curve, applied by min/max-per-bucket
             decimation so peaks survive; ``None`` keeps every point. At least
             :data:`MIN_MAX_POINTS`.
@@ -186,14 +408,23 @@ def archive_series(
         max_sites: Per-site spectra to include, evenly subsampled in site order.
         rel_tol: Relative tolerance of the stored-vs-recomputed overall average
             check (fraction of the peak |chi|); see :data:`DEFAULT_REL_TOL`.
+        include: Sections to transform and list, a subset of
+            :data:`SECTIONS`. Excluded ``sites`` or ``frames`` keep their
+            ``total`` and come back with no spectra. The overall average is
+            always computed.
 
     Returns:
-        A dict with ``schema_version``, ``units``, ``ft_params``, ``source``,
-        ``downsampling``, ``overall``, ``sites``, ``frames``, ``checks`` and
-        ``warnings``. Non-finite values are ``None``.
+        A dict with ``schema_version``, ``units``, ``ft_params`` (the resolved
+        parameters used), ``ft_params_source`` (``"archive"`` or ``"request"``),
+        ``ft_defaults`` (the archive's stored parameters), ``ft_limits`` (what a
+        UI can offer: k with data, k-weights, windows, R_max cap),
+        ``ft_warnings`` (structured), ``source``, ``downsampling``, ``overall``,
+        ``sites``, ``frames``, ``checks`` and ``warnings``. Non-finite values
+        are ``None``.
 
     Raises:
         FileNotFoundError: ``path`` does not exist.
+        InvalidFtParamsError: ``ft_params`` is unusable (a ``ValueError``).
         ValueError: Not an ensemble archive, no overall average, or bad parameters.
     """
     if max_points is not None and max_points < MIN_MAX_POINTS:
@@ -202,6 +433,11 @@ def archive_series(
         raise ValueError("max_frames and max_sites must be non-negative")
     if rel_tol <= 0:
         raise ValueError("rel_tol must be positive")
+    unknown_sections = sorted(set(include) - set(SECTIONS))
+    if unknown_sections:
+        raise ValueError(
+            f"Unknown section(s) {unknown_sections}; expected a subset of {SECTIONS}"
+        )
 
     reader = ArchiveReader(path)
     try:
@@ -211,36 +447,47 @@ def archive_series(
     if not is_ensemble:
         raise ValueError(f"{reader.path} is not an ensemble archive")
     try:
-        overall = reader.get_overall_average()
+        overall_raw = reader.get_overall_average()
     except KeyError as exc:
         raise ValueError(f"{reader.path} has no overall average") from exc
 
     warnings: list[str] = []
-    ft_params = reader.fourier_params
-    if not ft_params:
-        warnings.append("The archive records no Fourier-transform parameters.")
-    kweight = ft_params.get("kweight")
+    stored = reader.fourier_params
+    if not stored:
+        warnings.append(
+            "The archive records no Fourier-transform parameters; library "
+            "defaults are assumed for the chi(R) labels."
+        )
+    defaults = _archive_ft_defaults(stored)
+    if ft_params is None:
+        ft, source, recompute = defaults, "archive", False
+    else:
+        ft = _resolve_ft_request(ft_params, defaults)
+        source, recompute = "request", True
+    kweight = ft["kweight"]
 
-    check, check_warnings = _check_overall(reader, overall, rel_tol)
+    check, check_warnings = _check_overall(reader, overall_raw, rel_tol)
     warnings.extend(check_warnings)
+
+    overall_limits = _coverage_limits(overall_raw)
+    ft_warnings = _ft_data_warnings(ft, overall_limits)
+    warnings.extend(w["message"] for w in ft_warnings)
+
+    overall = _with_transform(overall_raw, ft, recompute)
 
     site_ids = reader.site_indices
     frame_ids = reader.frame_indices
-    shown_sites = _even_subsample(site_ids, max_sites)
-    shown_frames = _even_subsample(frame_ids, max_frames)
+    shown_sites = _even_subsample(site_ids, max_sites) if "sites" in include else []
+    shown_frames = _even_subsample(frame_ids, max_frames) if "frames" in include else []
 
-    chir_unit = f"A^-{int(kweight) + 1}" if kweight is not None else "A^-(kweight+1)"
     return {
         "schema_version": SCHEMA_VERSION,
-        "units": {
-            "k": "A^-1",
-            "r": "A",
-            "chi": "dimensionless",
-            "chir": chir_unit,
-            "chi_weighting": "none (chi(k) is stored without a k**n factor)",
-            "chir_weighting": f"k**{kweight} applied before the Fourier transform",
-        },
-        "ft_params": ft_params,
+        "units": _units(kweight),
+        "ft_params": ft,
+        "ft_params_source": source,
+        "ft_defaults": defaults,
+        "ft_limits": overall_limits,
+        "ft_warnings": ft_warnings,
         "source": {
             "n_sites": len(site_ids),
             "n_frames": len(frame_ids),
@@ -249,12 +496,19 @@ def archive_series(
             "method": "min/max per bucket",
             "max_points": max_points,
         },
-        "overall": _spectrum(overall, max_points),
+        "overall": _spectrum(overall, max_points, kweight),
         "sites": {
             "total": len(site_ids),
             "shown_indices": shown_sites,
             "spectra": [
-                {"site_idx": i, **_spectrum(reader.get_site_average(i), max_points)}
+                {
+                    "site_idx": i,
+                    **_spectrum(
+                        _with_transform(reader.get_site_average(i), ft, recompute),
+                        max_points,
+                        kweight,
+                    ),
+                }
                 for i in shown_sites
             ],
         },
@@ -262,13 +516,61 @@ def archive_series(
             "total": len(frame_ids),
             "shown_indices": shown_frames,
             "spectra": [
-                {"frame_idx": i, **_spectrum(reader.get_frame_average(i), max_points)}
+                {
+                    "frame_idx": i,
+                    **_spectrum(
+                        _with_transform(reader.get_frame_average(i), ft, recompute),
+                        max_points,
+                        kweight,
+                    ),
+                }
                 for i in shown_frames
             ],
         },
         "checks": {"stored_vs_recomputed": check},
         "warnings": warnings,
     }
+
+
+_SUPERSCRIPT = {
+    "-": "⁻",
+    "0": "⁰",
+    "1": "¹",
+    "2": "²",
+    "3": "³",
+    "4": "⁴",
+    "5": "⁵",
+    "6": "⁶",
+}
+
+
+def _power(n: int) -> str:
+    return "".join(_SUPERSCRIPT[c] for c in str(n))
+
+
+def _inv_angstrom(n: int) -> str:
+    """Unit label Å⁻ⁿ, or '' for a dimensionless quantity."""
+    return f"Å{_SUPERSCRIPT['-']}{_power(n)}" if n else ""
+
+
+def _chi_k_label(kweight: int) -> str:
+    """Axis label for the k-weighted χ(k), e.g. 'k²χ(k) (Å⁻²)'."""
+    if kweight == 0:
+        base = "χ(k)"
+    elif kweight == 1:
+        base = "kχ(k)"
+    else:
+        base = f"k{_power(kweight)}χ(k)"
+    unit = _inv_angstrom(kweight)
+    return f"{base} ({unit})" if unit else base
+
+
+def _weight_phrase(kweight: int) -> str:
+    if kweight == 0:
+        return "unweighted"
+    if kweight == 1:
+        return "k-weighted"
+    return f"k{_power(kweight)}-weighted"
 
 
 def _own_zoom(chart: Any, name: str) -> Any:
@@ -286,14 +588,33 @@ def _own_zoom(chart: Any, name: str) -> Any:
     )
 
 
+def _marker_rules(df: Any, values: list[float]) -> list[Any]:
+    """Thin dashed vertical rules at each of ``values``.
+
+    The rules take their data from the first row of ``df``, so they add no
+    series of their own and carry no extra ``path`` label.
+    """
+    import altair as alt
+
+    row = df.iloc[:1]
+    return [
+        alt.Chart(row)
+        .mark_rule(strokeDash=[4, 3], strokeWidth=1, color="gray", opacity=0.8)
+        .encode(x=alt.datum(float(v)))
+        for v in values
+    ]
+
+
 def _frame_df(spectra: list[dict[str, Any]], key: str, label: str) -> tuple[Any, Any]:
-    """Long-form (k, chi) and (r, chir_mag) frames with one ``path`` per spectrum."""
+    """Long-form (k, chi_weighted) and (r, chir_mag) frames, one path per spectrum."""
     import pandas as pd
 
     chi_rows, chir_rows = [], []
     for s in spectra:
         name = f"{label} {s[key]}"
-        chi_rows.append(pd.DataFrame({"k": s["k"], "chi": s["chi"], "path": name}))
+        chi_rows.append(
+            pd.DataFrame({"k": s["k"], "chi_weighted": s["chi_weighted"], "path": name})
+        )
         if "r" in s:
             chir_rows.append(
                 pd.DataFrame({"r": s["r"], "chir_mag": s["chir_mag"], "path": name})
@@ -313,9 +634,10 @@ def series_to_vega_lite(
 ) -> dict[str, Any]:
     """Vega-Lite specification for one view of a series.
 
-    Views: ``chi_k`` (overall chi(k) with a +-1 std band and a contributor-count
-    strip), ``chi_r`` (|chi(R)|, Re and Im of the overall average), ``sites``
-    and ``frames`` (chi(k) over |chi(R)| for the included spectra).
+    Views: ``chi_k`` (overall k-weighted chi(k) with a +-1 std band, dashed
+    rules at kmin and kmax, and a contributor-count strip), ``chi_r`` (|chi(R)|,
+    Re and Im of the overall average, with a rule at rmax), and ``sites`` and
+    ``frames`` (k-weighted chi(k) over |chi(R)| for the included spectra).
 
     The series warnings, FT parameters, units and checks travel in the spec's
     top-level ``usermeta``, so a viewer needs only the spec.
@@ -332,32 +654,46 @@ def series_to_vega_lite(
     if view not in VIEWS:
         raise ValueError(f"Unknown view {view!r}; expected one of {VIEWS}")
     overall = series["overall"]
-    kweight = series["ft_params"].get("kweight")
-    chir_title = f"χ(R) (Å^-{int(kweight) + 1})" if kweight is not None else "χ(R)"
+    ft = series["ft_params"]
+    kweight = int(ft["kweight"])
+    chi_title = _chi_k_label(kweight)
+    phrase = _weight_phrase(kweight)
 
     if view == "chi_k":
         df = pd.DataFrame(
-            {"k": overall["k"], "chi": overall["chi"], "path": "ensemble mean"}
+            {
+                "k": overall["k"],
+                "chi_weighted": overall["chi_weighted"],
+                "path": "ensemble mean",
+            }
         )
         chart: Any = build_chi_chart(
-            df, title="Ensemble χ(k)", width=width, height=height
+            df,
+            title=f"Ensemble χ(k), {phrase}",
+            width=width,
+            height=height,
+            y_field="chi_weighted",
+            y_title=chi_title,
         )
-        if overall.get("chi_std") is not None:
-            std = pd.Series(overall["chi_std"], dtype=float)
-            chi = pd.Series(overall["chi"], dtype=float)
+        layers: list[Any] = [chart]
+        if overall.get("chi_std_weighted") is not None:
+            std = pd.Series(overall["chi_std_weighted"], dtype=float)
+            center = pd.Series(overall["chi_weighted"], dtype=float)
             band_df = pd.DataFrame(
-                {"k": overall["k"], "lo": chi - std, "hi": chi + std}
+                {"k": overall["k"], "lo": center - std, "hi": center + std}
             )
             band = (
                 alt.Chart(band_df)
                 .mark_area(opacity=0.25)
                 .encode(
                     x=alt.X("k:Q", title="k (Å⁻¹)"),
-                    y=alt.Y("lo:Q", title="χ(k)"),
+                    y=alt.Y("lo:Q", title=chi_title),
                     y2="hi:Q",
                 )
             )
-            chart = alt.layer(band, chart)
+            layers.insert(0, band)
+        layers.extend(_marker_rules(df, [ft["kmin"], ft["kmax"]]))
+        chart = alt.layer(*layers)
         if overall.get("n_contributors") is not None:
             n_df = pd.DataFrame({"k": overall["k"], "n": overall["n_contributors"]})
             strip = (
@@ -381,13 +717,18 @@ def series_to_vega_lite(
             for c, label in labels.items()
             if c in overall
         ]
+        chir_df = pd.concat(parts, ignore_index=True)
         chart = build_chir_chart(
-            pd.concat(parts, ignore_index=True),
-            title="Ensemble χ(R)",
+            chir_df,
+            title=f"Ensemble χ(R), {phrase}",
             width=width,
             height=height,
         )
-        chart.encoding.y = alt.Y("chir_mag:Q", title=chir_title)
+        chart.encoding.y = alt.Y(
+            "chir_mag:Q",
+            title=f"|χ(R)| ({_inv_angstrom(kweight + 1)})",
+        )
+        chart = alt.layer(chart, *_marker_rules(chir_df, [ft["rmax"]]))
     else:
         key, label = ("site_idx", "site") if view == "sites" else ("frame_idx", "frame")
         spectra = series[view]["spectra"]
@@ -395,7 +736,12 @@ def series_to_vega_lite(
             raise ViewUnavailableError(f"The series has no {label} spectra")
         chi_df, chir_df = _frame_df(spectra, key, label)
         chart = build_chi_chart(
-            chi_df, title=f"χ(k) per {label}", width=width, height=height
+            chi_df,
+            title=f"χ(k) per {label}",
+            width=width,
+            height=height,
+            y_field="chi_weighted",
+            y_title=chi_title,
         )
         if chir_df is not None:
             chart = alt.vconcat(
@@ -415,7 +761,11 @@ def series_to_vega_lite(
         "series_schema_version": series["schema_version"],
         "view": view,
         "warnings": series["warnings"],
-        "ft_params": series["ft_params"],
+        "ft_params": ft,
+        "ft_params_source": series.get("ft_params_source"),
+        "ft_defaults": series.get("ft_defaults"),
+        "ft_limits": series.get("ft_limits"),
+        "ft_warnings": series.get("ft_warnings", []),
         "units": series["units"],
         "checks": series["checks"],
         "shown": {
@@ -429,8 +779,13 @@ def series_to_vega_lite(
 
 __all__ = [
     "DEFAULT_REL_TOL",
+    "FT_REQUEST_KEYS",
+    "InvalidFtParamsError",
+    "KWEIGHTS",
     "MIN_MAX_POINTS",
+    "RMAX_MAX",
     "SCHEMA_VERSION",
+    "SECTIONS",
     "VIEWS",
     "ViewUnavailableError",
     "archive_series",

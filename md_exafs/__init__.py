@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from .archive_series import archive_series, series_to_vega_lite
+from .archive_series import InvalidFtParamsError, archive_series, series_to_vega_lite
 from .constants import ETOK, HBAR2_OVER_2M_EV_ANGSTROM2
 from .exafs_data import PathAggregator, PathContribution
 from .feff_input import FeffConfig, build_feff_inp, normalize_tag
@@ -48,6 +48,7 @@ __all__ = [
     "xftf_arrays",
     "archive_series",
     "series_to_vega_lite",
+    "InvalidFtParamsError",
     "average_chi_arrays",
     "ChiAverage",
     "resample_chi",

@@ -82,8 +82,15 @@ def build_chi_chart(
     title: str = "χ(k)",
     width: int = 400,
     height: int = 250,
+    *,
+    y_field: str = "chi",
+    y_title: str = "χ(k)",
 ) -> Any:
-    """Build a standard Altair line chart for χ(k)."""
+    """Build a standard Altair line chart for χ(k).
+
+    ``y_field`` names the column to plot (e.g. a k-weighted χ) and ``y_title``
+    its axis label.
+    """
     import altair as alt
 
     return (
@@ -91,9 +98,9 @@ def build_chi_chart(
         .mark_line()
         .encode(
             x=alt.X("k:Q", title="k (Å⁻¹)"),
-            y=alt.Y("chi:Q", title="χ(k)"),
+            y=alt.Y(f"{y_field}:Q", title=y_title),
             color=alt.Color("path:N", title="Path"),
-            tooltip=["path:N", "k:Q", "chi:Q"],
+            tooltip=["path:N", "k:Q", f"{y_field}:Q"],
         )
         .properties(width=width, height=height, title=title)
         .interactive()

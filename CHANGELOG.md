@@ -17,6 +17,35 @@
   `chi_k`, `chi_r`, `sites`, `frames`) using the `viz` chart builders.
   Requires `altair`.
 - `ArchiveReader.fourier_params` and `ArchiveReader.get_overall_average`.
+- Fourier-transform parameters can be changed on the fly.
+  `archive_series(path, ft_params=..., include=...)` recomputes chi(R) with
+  `xftf_arrays` from the stored unweighted chi(k), for the overall average and
+  every included site and frame spectrum. `ft_params` takes any subset of
+  `kmin`, `kmax`, `dk`, `window`, `kweight` (integer 0 to 4) and `rmax`; the
+  rest default to the archive's own values. Invalid requests raise
+  `InvalidFtParamsError` (a `ValueError`) listing one message per problem. A
+  window that reaches past the k with data is reported in `ft_warnings` and
+  in `warnings`, and the series is still returned. `include` (a subset of
+  `overall`, `sites`, `frames`) skips the transform for sections a view does
+  not need. A full recompute of the overall average, 50 sites and 20 frames
+  takes about 0.1 s.
+- Series fields: `ft_params` (the resolved parameters used), `ft_params_source`
+  (`"archive"` or `"request"`), `ft_defaults` (the archive's stored parameters),
+  `ft_limits` (k with data, k-weights, windows and the R_max cap, so a UI can
+  build its controls from the series) and `ft_warnings`. Each spectrum gains
+  `chi_weighted` = k**kweight * chi, and the overall gains `chi_std_weighted`.
+  `chi` stays unweighted. `units` gains `chi_weighted`.
+- `spectra.FT_WINDOWS`, the window names larch accepts.
+- `viz.build_chi_chart` takes `y_field` and `y_title`.
+
+### Changed
+
+- The chi(k) views plot `chi_weighted`, and their y-axis states the k-weight
+  and units (for example `k²χ(k) (Å⁻²)`). The chi_k view draws dashed rules at
+  kmin and kmax, and the chi_r view draws one at rmax. Vega-Lite specs
+  carry `ft_params_source`, `ft_defaults`, `ft_limits` and `ft_warnings` in
+  `usermeta`. Consumers reading the chi_k `chi` field should read
+  `chi_weighted` instead.
 
 ## 0.3.0
 
