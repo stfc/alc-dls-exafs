@@ -25,7 +25,9 @@
   rest default to the archive's own values. Invalid requests raise
   `InvalidFtParamsError` (a `ValueError`) listing one message per problem. A
   window that reaches past the k with data is reported in `ft_warnings` and
-  in `warnings`, and the series is still returned. `include` (a subset of
+  in `warnings`, and the series is still returned. The same check runs for the
+  included sites and frames, reported as one `window_beyond_data` entry per
+  section with `n_affected` and `n_shown`. `include` (a subset of
   `overall`, `sites`, `frames`) skips the transform for sections a view does
   not need. A full recompute of the overall average, 50 sites and 20 frames
   takes about 0.1 s.
@@ -35,8 +37,13 @@
   build its controls from the series) and `ft_warnings`. Each spectrum gains
   `chi_weighted` = k**kweight * chi, and the overall gains `chi_std_weighted`.
   `chi` stays unweighted. `units` gains `chi_weighted`.
-- `spectra.FT_WINDOWS`, the window names larch accepts.
+- `spectra.FT_WINDOWS`, the window names the API accepts, derived from
+  `feff_input.WindowType`.
 - `viz.build_chi_chart` takes `y_field` and `y_title`.
+- `spectra.xftf_arrays` takes `warn_uncovered: bool = True`. Pass `False` to
+  suppress the log warning when uncovered k fall inside the window; the
+  default is unchanged. `archive_series` passes `False`, so a recompute no
+  longer logs one warning per spectrum.
 
 ### Changed
 
@@ -46,6 +53,13 @@
   carry `ft_params_source`, `ft_defaults`, `ft_limits` and `ft_warnings` in
   `usermeta`. Consumers reading the chi_k `chi` field should read
   `chi_weighted` instead.
+
+### Fixed
+
+- `ArchiveReader.is_ensemble`, `is_shard` and `fourier_params` raised
+  `AttributeError` on an HDF5 file with no `/meta` group (an aggregates-only
+  archive). They now treat a missing `/meta` as empty metadata, and
+  `archive_series` no longer relies on catching that error.
 
 ## 0.3.0
 

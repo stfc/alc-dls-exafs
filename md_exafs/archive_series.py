@@ -116,6 +116,12 @@ def _resolve_ft_request(
 ) -> dict[str, Any]:
     """Merge a caller's Fourier-transform request over the archive's defaults.
 
+    The accepted keys are :data:`FT_REQUEST_KEYS`, deliberately narrower than
+    :func:`spectra.resolve_ft_params`: ``dk2``, ``with_phase``, ``rmax_out``,
+    ``nfft`` and ``kstep`` are not exposed here. Window names are strict: only
+    the :data:`spectra.FT_WINDOWS` names are accepted, although larch itself
+    also matches on the first three letters.
+
     Raises:
         InvalidFtParamsError: One message per problem: unknown keys, bad types
             or ranges, an empty window, or ``kmin >= kmax``.
@@ -202,6 +208,7 @@ def _ft_data_warnings(
         return [
             {
                 "code": "no_data",
+                "section": "overall",
                 "message": "The overall average has no k with data, so the "
                 "Fourier-transform window cannot be checked against it.",
             }
@@ -212,6 +219,7 @@ def _ft_data_warnings(
         out.append(
             {
                 "code": "window_beyond_data",
+                "section": "overall",
                 "param": "kmax",
                 "value": ft["kmax"],
                 "data_limit": kmax_data,
@@ -225,6 +233,7 @@ def _ft_data_warnings(
         out.append(
             {
                 "code": "window_beyond_data",
+                "section": "overall",
                 "param": "kmin",
                 "value": ft["kmin"],
                 "data_limit": kmin_data,
@@ -237,12 +246,45 @@ def _ft_data_warnings(
     return out
 
 
+def _section_ft_warnings(
+    section: str, spectra: list[dict[str, np.ndarray]], ft: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """One summary warning when the window reaches past some spectra's data."""
+    affected = sum(
+        any(
+            w["code"] == "window_beyond_data"
+            for w in _ft_data_warnings(ft, _coverage_limits(data))
+        )
+        for data in spectra
+    )
+    if not affected:
+        return []
+    label = {"sites": "site", "frames": "frame"}[section]
+    return [
+        {
+            "code": "window_beyond_data",
+            "section": section,
+            "n_affected": affected,
+            "n_shown": len(spectra),
+            "message": "The Fourier-transform window reaches past the data of "
+            f"{affected} of {len(spectra)} shown {label} spectra. Their k outside "
+            "the data are zero-filled, which damps |chi(R)|; lower kmax or raise "
+            "kmin to the range the data cover.",
+        }
+    ]
+
+
 def _transform(data: dict[str, np.ndarray], ft: dict[str, Any]) -> dict[str, Any]:
-    """Fourier transform of one stored unweighted spectrum with ``ft``."""
+    """Fourier transform of one stored unweighted spectrum with ``ft``.
+
+    Coverage is reported once per series through ``ft_warnings``, not per
+    spectrum, so the transform itself stays quiet.
+    """
     res = xftf_arrays(
         np.asarray(data["k"], dtype=float),
         np.asarray(data["chi"], dtype=float),
         ft,
+        warn_uncovered=False,
     )
     return {name: res[name] for name in ("r", "chir_mag", "chir_re", "chir_im")}
 
@@ -440,11 +482,7 @@ def archive_series(
         )
 
     reader = ArchiveReader(path)
-    try:
-        is_ensemble = reader.is_ensemble
-    except AttributeError:  # an HDF5 file without a /meta group
-        is_ensemble = False
-    if not is_ensemble:
+    if not reader.is_ensemble:
         raise ValueError(f"{reader.path} is not an ensemble archive")
     try:
         overall_raw = reader.get_overall_average()
@@ -471,14 +509,18 @@ def archive_series(
 
     overall_limits = _coverage_limits(overall_raw)
     ft_warnings = _ft_data_warnings(ft, overall_limits)
-    warnings.extend(w["message"] for w in ft_warnings)
-
-    overall = _with_transform(overall_raw, ft, recompute)
 
     site_ids = reader.site_indices
     frame_ids = reader.frame_indices
     shown_sites = _even_subsample(site_ids, max_sites) if "sites" in include else []
     shown_frames = _even_subsample(frame_ids, max_frames) if "frames" in include else []
+    site_raw = [reader.get_site_average(i) for i in shown_sites]
+    frame_raw = [reader.get_frame_average(i) for i in shown_frames]
+    ft_warnings += _section_ft_warnings("sites", site_raw, ft)
+    ft_warnings += _section_ft_warnings("frames", frame_raw, ft)
+    warnings.extend(w["message"] for w in ft_warnings)
+
+    overall = _with_transform(overall_raw, ft, recompute)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -504,12 +546,10 @@ def archive_series(
                 {
                     "site_idx": i,
                     **_spectrum(
-                        _with_transform(reader.get_site_average(i), ft, recompute),
-                        max_points,
-                        kweight,
+                        _with_transform(data, ft, recompute), max_points, kweight
                     ),
                 }
-                for i in shown_sites
+                for i, data in zip(shown_sites, site_raw, strict=True)
             ],
         },
         "frames": {
@@ -519,12 +559,10 @@ def archive_series(
                 {
                     "frame_idx": i,
                     **_spectrum(
-                        _with_transform(reader.get_frame_average(i), ft, recompute),
-                        max_points,
-                        kweight,
+                        _with_transform(data, ft, recompute), max_points, kweight
                     ),
                 }
-                for i in shown_frames
+                for i, data in zip(shown_frames, frame_raw, strict=True)
             ],
         },
         "checks": {"stored_vs_recomputed": check},

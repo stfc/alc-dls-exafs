@@ -5,6 +5,7 @@ decaying sine with a known shell at R0, so the transform has a checkable peak.
 """
 
 import json
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -277,8 +278,9 @@ def test_kmax_beyond_data_warns_but_returns(tmp_path: Path):
     path = _archive(tmp_path / "ragged.h5", keep=lambda k: k <= 10.0)
     series = archive_series(path, ft_params={"kmax": 12.0})
     assert series["ft_params"]["kmax"] == 12.0
-    assert len(series["ft_warnings"]) == 1
-    warning = series["ft_warnings"][0]
+    overall = [w for w in series["ft_warnings"] if w["section"] == "overall"]
+    assert len(overall) == 1
+    warning = overall[0]
     assert warning["code"] == "window_beyond_data"
     assert warning["param"] == "kmax"
     assert warning["data_limit"] == pytest.approx(10.0, abs=0.05)
@@ -291,10 +293,34 @@ def test_kmax_beyond_data_warns_but_returns(tmp_path: Path):
     assert within["ft_limits"]["kmax_data"] == pytest.approx(10.0, abs=0.05)
 
 
+def test_recompute_logs_no_coverage_warnings_but_reports_them(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    path = _archive(tmp_path / "ragged.h5", keep=lambda k: k <= 10.0)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        series = archive_series(path, ft_params={"kmax": 12.0})
+    spectra_logs = [
+        r
+        for r in caplog.records
+        if r.name.startswith("md_exafs.spectra") and r.levelno >= logging.WARNING
+    ]
+    assert spectra_logs == []
+    assert [(w["code"], w["section"]) for w in series["ft_warnings"]] == [
+        ("window_beyond_data", "overall"),
+        ("window_beyond_data", "sites"),
+        ("window_beyond_data", "frames"),
+    ]
+    sites = series["ft_warnings"][1]
+    assert (sites["n_affected"], sites["n_shown"]) == (2, 2)
+    assert any("2 of 2 shown site spectra" in w for w in series["warnings"])
+
+
 def test_kmin_below_data_warns(tmp_path: Path):
     path = _archive(tmp_path / "high.h5", keep=lambda k: k >= 2.0)
     series = archive_series(path, ft_params={"kmin": 1.0})
-    assert [w["param"] for w in series["ft_warnings"]] == ["kmin"]
+    overall = [w for w in series["ft_warnings"] if w["section"] == "overall"]
+    assert [w["param"] for w in overall] == ["kmin"]
     assert series["ft_limits"]["kmin_data"] == pytest.approx(2.0, abs=0.05)
 
 

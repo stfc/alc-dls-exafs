@@ -207,6 +207,38 @@ def test_non_ensemble_archive_rejected(tmp_path: Path):
     with pytest.raises(ValueError):
         archive_series(path)
 
+    bare = tmp_path / "bare.h5"
+    with h5py.File(bare, "w") as f:
+        f.create_dataset("unrelated", data=np.zeros(3))
+    reader = ArchiveReader(bare)
+    assert not reader.is_ensemble
+    assert not reader.is_shard
+    assert reader.fourier_params == {}
+    with pytest.raises(ValueError, match="not an ensemble archive"):
+        archive_series(bare)
+
+
+def test_aggregates_only_archive_without_meta_group(tmp_path: Path):
+    import h5py
+
+    path = _write(tmp_path / "no_meta.h5")
+    with h5py.File(path, "r+") as f:
+        del f["meta"]
+
+    reader = ArchiveReader(path)
+    assert reader.is_ensemble
+    assert not reader.is_shard
+    assert reader.fourier_params == {}
+
+    series = archive_series(path)
+    assert series["ft_params_source"] == "archive"
+    assert any("records no Fourier-transform" in w for w in series["warnings"])
+    assert series["overall"]["chi"][0] is not None
+
+    recomputed = archive_series(path, ft_params={"kweight": 1})
+    assert recomputed["ft_params"]["kweight"] == 1
+    assert recomputed["overall"]["chir_mag"] is not None
+
 
 def _datasets(spec: dict) -> list[list[dict]]:
     out = []
