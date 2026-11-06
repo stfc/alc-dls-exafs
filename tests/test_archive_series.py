@@ -1,6 +1,12 @@
-"""Tests for md_exafs.archive_series on synthetic ensemble archives."""
+"""Tests for md_exafs.archive_series and series_to_vega_lite.
+
+Synthetic ensemble archives written with EnsembleWriter; chi(k) is a 1/k
+decaying sine with a known shell at R0, so the transform has a checkable peak.
+"""
 
 import json
+import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -8,38 +14,39 @@ import pytest
 
 from md_exafs import ArchiveReader, EnsembleWriter
 from md_exafs.archive_series import (
-    ViewUnavailableError,
+    KWEIGHTS,
+    RMAX_MAX,
+    InvalidFtParamsError,
     archive_series,
-    series_to_vega_lite,
 )
 from md_exafs.spectra import average_chi_arrays, xftf_arrays
+from md_exafs.viz import ViewUnavailableError, series_to_vega_lite
 
 K = np.arange(0.05, 16.0, 0.05)
+R0 = 2.5
 FT = {"kmin": 3.0, "kmax": 12.0, "kweight": 2, "dk": 1.0, "rmax": 6.0}
+STORED = {**FT, "window": "kaiser"}
+ALL = ("sites", "frames")
 
 
 def _chi(frame: int, site: int) -> np.ndarray:
-    amp = 0.5 + 0.05 * frame + 0.01 * site
-    return amp * np.sin(2 * 2.5 * K + 0.3 * site) * np.exp(-0.02 * K**2)
+    scale = 1.0 + 0.05 * frame + 0.01 * site
+    return scale * np.sin(2 * K * R0) / (K * R0**2)
 
 
-def _write(
+def _archive(
     path: Path,
+    *,
+    keep: Callable[[np.ndarray], np.ndarray] = lambda k: k > 0,
     n_frames: int = 3,
     n_sites: int = 2,
-    *,
-    overall_scale: float = 1.0,
-    ragged_last_frame: bool = False,
 ) -> Path:
-    """Archive whose aggregates are built the way the pipeline builds them.
-
-    With ``ragged_last_frame`` every spectrum of the last frame stops at k=10.
-    """
+    """Archive whose spectra cover the k-points selected by ``keep``."""
     k_of, chi_of = {}, {}
     for f in range(n_frames):
         for s in range(n_sites):
-            keep = K <= 10.0 if ragged_last_frame and f == n_frames - 1 else K > 0
-            k_of[f, s], chi_of[f, s] = K[keep], _chi(f, s)[keep]
+            m = keep(K)
+            k_of[f, s], chi_of[f, s] = K[m], _chi(f, s)[m]
 
     def avg(keys):
         return average_chi_arrays(
@@ -50,7 +57,7 @@ def _write(
     with EnsembleWriter(path, k_grid=K, fourier_params=FT) as w:
         w.set_overall_average(
             overall.k,
-            overall.mean * overall_scale,
+            overall.mean,
             chi_std=overall.std,
             n_contributors=overall.n_contributors,
         )
@@ -65,15 +72,16 @@ def _write(
 
 @pytest.fixture
 def archive(tmp_path: Path) -> Path:
-    return _write(tmp_path / "ens.h5")
+    return _archive(tmp_path / "ens.h5")
+
+
+# --- reading ---------------------------------------------------------------
 
 
 def test_series_is_versioned_and_json_safe(archive: Path):
-    series = archive_series(archive)
+    series = archive_series(archive, include=ALL)
     assert series["schema_version"] == 1
-    text = json.dumps(series, allow_nan=False)
-    assert json.loads(text) == series
-    assert series["ft_params"]["kweight"] == 2
+    assert json.loads(json.dumps(series, allow_nan=False)) == series
     assert series["units"]["k"] == "A^-1"
     assert series["units"]["chir"] == "A^-3"
     assert series["source"] == {"n_sites": 2, "n_frames": 3}
@@ -81,9 +89,8 @@ def test_series_is_versioned_and_json_safe(archive: Path):
 
 
 def test_overall_matches_stored_arrays(archive: Path):
-    series = archive_series(archive)
+    o = archive_series(archive)["overall"]
     reader = ArchiveReader(archive)
-    o = series["overall"]
     np.testing.assert_allclose(o["k"], reader.k)
     np.testing.assert_allclose(o["chi"], reader.chi)
     np.testing.assert_allclose(o["r"], reader.r)
@@ -92,231 +99,315 @@ def test_overall_matches_stored_arrays(archive: Path):
     assert o["chi_std"][0] is not None
 
 
-def test_chir_is_transform_of_kweighted_chi(archive: Path):
-    series = archive_series(archive)
-    ft = xftf_arrays(
-        np.array(series["overall"]["k"]), np.array(series["overall"]["chi"]), FT
-    )
-    np.testing.assert_allclose(series["overall"]["chir_mag"], ft["chir_mag"])
+def test_breakdowns_are_read_only_when_included(archive: Path):
+    bare = archive_series(archive)
+    assert bare["sites"] == {"total": 2, "shown_indices": [], "spectra": []}
+    assert bare["frames"]["total"] == 3 and bare["frames"]["spectra"] == []
+
+    sites_only = archive_series(archive, include=("sites",))
+    assert len(sites_only["sites"]["spectra"]) == 2
+    assert sites_only["frames"]["spectra"] == []
+
+    with pytest.raises(ValueError, match="Unknown section"):
+        archive_series(archive, include=("sites", "bogus"))
 
 
-def test_healthy_archive_check_ok(archive: Path):
-    check = archive_series(archive)["checks"]["stored_vs_recomputed"]
-    assert check["status"] == "ok"
-    assert check["max_rel_deviation"] < 1e-9
-    assert check["weighting"] == "n_contributors"
-
-
-def test_stale_overall_triggers_warning(tmp_path: Path):
-    path = _write(tmp_path / "stale.h5", overall_scale=1.1)
-    series = archive_series(path)
-    check = series["checks"]["stored_vs_recomputed"]
-    assert check["status"] == "mismatch"
-    assert check["max_rel_deviation"] == pytest.approx(0.1 / 1.1, rel=1e-2)
-    assert any("stale" in w for w in series["warnings"])
-    # the stored (stale) average is the one plotted
-    stored = ArchiveReader(path).chi
-    np.testing.assert_allclose(series["overall"]["chi"], stored)
-
-
-def test_rel_tol_is_a_parameter(tmp_path: Path):
-    path = _write(tmp_path / "stale.h5", overall_scale=1.001)
-    assert archive_series(path, rel_tol=1e-2)["warnings"] == []
-    assert archive_series(path, rel_tol=1e-5)["warnings"]
-
-
-def test_ragged_ensemble_does_not_trigger_warning(tmp_path: Path):
-    path = _write(tmp_path / "ragged.h5", ragged_last_frame=True)
-    series = archive_series(path)
-    check = series["checks"]["stored_vs_recomputed"]
-    assert check["status"] == "ok", series["warnings"]
-    assert series["overall"]["n_contributors"][0] == 6
-    assert series["overall"]["n_contributors"][-1] == 4
-    assert series["overall"]["chi"][-1] is not None
+def test_frame_cap_is_even_and_recorded(tmp_path: Path):
+    path = _archive(tmp_path / "many.h5", n_frames=45, n_sites=1)
+    frames = archive_series(path, max_frames=20, include=("frames",))["frames"]
+    shown = frames["shown_indices"]
+    assert frames["total"] == 45
+    assert len(shown) == 20
+    assert shown[0] == 0 and shown[-1] == 44
+    assert shown == sorted(set(shown))
+    assert [s["frame_idx"] for s in frames["spectra"]] == shown
 
 
 def test_nan_becomes_null(tmp_path: Path):
     path = tmp_path / "nan.h5"
     chi = np.sin(K)
-    chi_nan = chi.copy()
-    chi_nan[-5:] = np.nan
+    chi[-5:] = np.nan
     with EnsembleWriter(path, k_grid=K, fourier_params=FT) as w:
-        w.set_overall_average(
-            K, chi_nan, chi_std=np.where(np.isnan(chi_nan), np.nan, 0.1)
-        )
+        w.set_overall_average(K, chi, chi_std=np.where(np.isnan(chi), np.nan, 0.1))
     series = archive_series(path)
     assert series["overall"]["chi"][-1] is None
     assert series["overall"]["chi_std"][-1] is None
     assert series["overall"]["chi"][0] is not None
     json.dumps(series, allow_nan=False)
-    assert any("No frame averages" in w for w in series["warnings"])
-    assert series["checks"]["stored_vs_recomputed"]["status"] == "skipped"
+    json.dumps(series_to_vega_lite(series, view="chi_k"), allow_nan=False)
 
 
-def test_frame_cap_is_even_and_recorded(tmp_path: Path):
-    path = _write(tmp_path / "many.h5", n_frames=45, n_sites=1)
-    series = archive_series(path, max_frames=20)
-    shown = series["frames"]["shown_indices"]
-    assert series["frames"]["total"] == 45
-    assert len(shown) == 20
-    assert shown[0] == 0 and shown[-1] == 44
-    assert shown == sorted(set(shown))
-    gaps = np.diff(shown)
-    assert gaps.max() - gaps.min() <= 1
-    assert [s["frame_idx"] for s in series["frames"]["spectra"]] == shown
-    assert archive_series(path, max_frames=0)["frames"]["spectra"] == []
-
-
-def test_few_frames_all_shown(archive: Path):
-    series = archive_series(archive)
-    assert series["frames"]["shown_indices"] == [0, 1, 2]
-    assert series["sites"]["shown_indices"] == [0, 1]
-
-
-def test_max_points_caps_and_keeps_peaks(archive: Path):
-    full = archive_series(archive)
-    thin = archive_series(archive, max_points=64)
-    for key in ("k", "chi", "chi_std", "n_contributors"):
-        assert len(thin["overall"][key]) <= 64
-    assert len(thin["overall"]["r"]) <= 64
-    assert len(thin["overall"]["chir_mag"]) == len(thin["overall"]["r"])
-    assert thin["overall"]["k"][0] == full["overall"]["k"][0]
-    assert thin["overall"]["k"][-1] == full["overall"]["k"][-1]
-    assert max(thin["overall"]["chi"]) == max(full["overall"]["chi"])
-    assert min(thin["overall"]["chi"]) == min(full["overall"]["chi"])
-    assert max(thin["overall"]["chir_mag"]) == max(full["overall"]["chir_mag"])
-    assert len(thin["frames"]["spectra"][0]["chi"]) <= 64
-    assert thin["downsampling"]["max_points"] == 64
-
-
-def test_bad_parameters(archive: Path, tmp_path: Path):
-    with pytest.raises(ValueError):
-        archive_series(archive, max_points=4)
-    with pytest.raises(ValueError):
-        archive_series(archive, rel_tol=0)
-    with pytest.raises(FileNotFoundError):
-        archive_series(tmp_path / "missing.h5")
-
-
-def test_non_ensemble_archive_rejected(tmp_path: Path):
+def test_bad_arguments_and_non_ensemble_archives(archive: Path, tmp_path: Path):
     import h5py
 
-    path = tmp_path / "other.h5"
-    with h5py.File(path, "w") as f:
-        f.create_group("meta")
     with pytest.raises(ValueError):
-        archive_series(path)
+        archive_series(archive, max_frames=-1)
+    with pytest.raises(FileNotFoundError):
+        archive_series(tmp_path / "missing.h5")
 
     bare = tmp_path / "bare.h5"
     with h5py.File(bare, "w") as f:
         f.create_dataset("unrelated", data=np.zeros(3))
     reader = ArchiveReader(bare)
-    assert not reader.is_ensemble
-    assert not reader.is_shard
+    assert not reader.is_ensemble and not reader.is_shard
     assert reader.fourier_params == {}
     with pytest.raises(ValueError, match="not an ensemble archive"):
         archive_series(bare)
 
 
-def test_aggregates_only_archive_without_meta_group(tmp_path: Path):
+def test_aggregates_only_archive_without_meta_group(archive: Path):
     import h5py
 
-    path = _write(tmp_path / "no_meta.h5")
-    with h5py.File(path, "r+") as f:
+    with h5py.File(archive, "r+") as f:
         del f["meta"]
-
-    reader = ArchiveReader(path)
-    assert reader.is_ensemble
-    assert not reader.is_shard
+    reader = ArchiveReader(archive)
+    assert reader.is_ensemble and not reader.is_shard
     assert reader.fourier_params == {}
 
-    series = archive_series(path)
+    series = archive_series(archive)
     assert series["ft_params_source"] == "archive"
     assert any("records no Fourier-transform" in w for w in series["warnings"])
     assert series["overall"]["chi"][0] is not None
-
-    recomputed = archive_series(path, ft_params={"kweight": 1})
+    recomputed = archive_series(archive, ft_params={"kweight": 1})
     assert recomputed["ft_params"]["kweight"] == 1
-    assert recomputed["overall"]["chir_mag"] is not None
 
 
-def _datasets(spec: dict) -> list[list[dict]]:
-    out = []
-    if "data" in spec and "values" in spec["data"]:
-        out.append(spec["data"]["values"])
-    out.extend(spec.get("datasets", {}).values())
-    return out
+# --- Fourier-transform parameters -------------------------------------------
 
 
-def _encodings(spec: dict) -> set[tuple[str, str]]:
-    found = set()
-    if "encoding" in spec:
-        for channel, enc in spec["encoding"].items():
-            if isinstance(enc, dict) and "field" in enc:
-                found.add((channel, enc["field"]))
-    for key in ("layer", "vconcat"):
-        for sub in spec.get(key, []):
-            found |= _encodings(sub)
-    return found
+def test_kweight_scales_chi_and_moves_chir_consistently(archive: Path):
+    base = archive_series(archive)["overall"]
+    k = np.array(base["k"])
+    for n in KWEIGHTS:
+        series = archive_series(archive, ft_params={"kweight": n})
+        o = series["overall"]
+        np.testing.assert_allclose(o["chi"], base["chi"])
+        np.testing.assert_allclose(o["chi_weighted"], k**n * np.array(o["chi"]))
+        assert series["units"]["chir"] == f"A^-{n + 1}"
+        assert abs(np.array(o["r"])[np.argmax(o["chir_mag"])] - R0) < 0.1
+
+
+def test_chi_weighted_is_applied_to_std_sites_and_frames(archive: Path):
+    series = archive_series(archive, ft_params={"kweight": 3}, include=ALL)
+    o = series["overall"]
+    k = np.array(o["k"])
+    np.testing.assert_allclose(o["chi_std_weighted"], k**3 * np.array(o["chi_std"]))
+    for spectrum in (series["sites"]["spectra"][0], series["frames"]["spectra"][-1]):
+        np.testing.assert_allclose(
+            spectrum["chi_weighted"],
+            np.array(spectrum["k"]) ** 3 * np.array(spectrum["chi"]),
+        )
+
+
+@pytest.mark.parametrize(
+    "request_params",
+    [
+        {
+            "kmin": 4.0,
+            "kmax": 11.0,
+            "dk": 2.0,
+            "window": "hanning",
+            "kweight": 1,
+            "rmax": 5.0,
+        },
+        {"window": "parzen", "rmax": 4.0},
+    ],
+)
+def test_override_matches_direct_xftf(archive: Path, request_params: dict):
+    series = archive_series(archive, ft_params=request_params, include=("sites",))
+    reader = ArchiveReader(archive)
+    resolved = {**STORED, **request_params}
+    o = series["overall"]
+    direct = xftf_arrays(reader.k, reader.chi, resolved)
+    for name in ("r", "chir_mag", "chir_re", "chir_im"):
+        np.testing.assert_allclose(o[name], direct[name], rtol=1e-12, atol=1e-14)
+
+    site = series["sites"]["spectra"][1]
+    direct_site = xftf_arrays(
+        np.array(site["k"]), np.array(reader.get_site_average(1)["chi"]), resolved
+    )
+    np.testing.assert_allclose(site["chir_mag"], direct_site["chir_mag"])
+
+
+def test_override_equal_to_stored_reproduces_stored_chir(archive: Path):
+    stored = archive_series(archive, include=("frames",))
+    same = archive_series(archive, ft_params=dict(STORED), include=("frames",))
+    np.testing.assert_allclose(
+        same["overall"]["chir_mag"], stored["overall"]["chir_mag"]
+    )
+    np.testing.assert_allclose(
+        same["frames"]["spectra"][0]["chir_mag"],
+        stored["frames"]["spectra"][0]["chir_mag"],
+    )
+
+
+def test_source_and_partial_override_resolution(archive: Path):
+    stored = archive_series(archive)
+    assert stored["ft_params_source"] == "archive"
+    assert stored["ft_params"] == stored["ft_defaults"] == STORED
+
+    partial = archive_series(archive, ft_params={"kweight": 1})
+    assert partial["ft_params_source"] == "request"
+    assert partial["ft_params"] == {**STORED, "kweight": 1}
+    assert partial["ft_defaults"] == STORED
+
+
+@pytest.mark.parametrize(
+    ("request_params", "fragment"),
+    [
+        ({"foo": 1}, "unknown"),
+        ({"window": "bogus"}, "window"),
+        ({"kmin": float("nan")}, "kmin"),
+        ({"kmin": 12.0}, "below kmax"),
+        ({"rmax": RMAX_MAX + 1}, "rmax"),
+        ({"kweight": 5}, "kweight"),
+        ({"kweight": True}, "kweight"),
+    ],
+)
+def test_invalid_ft_params_raise_with_message(
+    archive: Path, request_params: dict, fragment: str
+):
+    with pytest.raises(InvalidFtParamsError, match=fragment) as info:
+        archive_series(archive, ft_params=request_params)
+    assert len(info.value.problems) == 1
+
+
+def test_invalid_ft_params_report_every_problem(archive: Path):
+    with pytest.raises(InvalidFtParamsError) as info:
+        archive_series(archive, ft_params={"kmin": -1.0, "bogus": 1, "kweight": 9})
+    assert len(info.value.problems) == 3
+
+
+def test_ft_limits_describe_the_archive(archive: Path):
+    limits = archive_series(archive)["ft_limits"]
+    assert limits["kmin_data"] == pytest.approx(0.05)
+    assert limits["kmax_data"] == pytest.approx(15.95)
+    assert limits["k_grid_max"] == pytest.approx(15.95)
+
+
+def test_window_beyond_data_warns_but_returns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    path = _archive(tmp_path / "ragged.h5", keep=lambda k: k <= 10.0)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        series = archive_series(path, ft_params={"kmax": 12.0}, include=ALL)
+    assert not [r for r in caplog.records if r.name.startswith("md_exafs.spectra")]
+    assert [(w["code"], w["section"]) for w in series["ft_warnings"]] == [
+        ("window_beyond_data", "overall"),
+        ("window_beyond_data", "sites"),
+        ("window_beyond_data", "frames"),
+    ]
+    assert series["ft_warnings"][0]["data_limit"] == pytest.approx(10.0, abs=0.05)
+    assert any("kmax=12" in w for w in series["warnings"])
+    assert series["overall"]["chi_weighted"][-1] is None
+    json.dumps(series, allow_nan=False)
+
+    assert archive_series(path, ft_params={"kmax": 9.0})["ft_warnings"] == []
+
+
+def test_kmin_below_data_warns(tmp_path: Path):
+    path = _archive(tmp_path / "high.h5", keep=lambda k: k >= 2.0)
+    series = archive_series(path, ft_params={"kmin": 1.0})
+    assert [w["param"] for w in series["ft_warnings"]] == ["kmin"]
+
+
+# --- Vega-Lite --------------------------------------------------------------
+
+
+def _walk(node):
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from _walk(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _walk(v)
+
+
+def _titles(spec: dict) -> set[str]:
+    return {
+        enc["title"]
+        for node in _walk(spec)
+        for enc in (node.get("encoding") or {}).values()
+        if isinstance(enc, dict) and "title" in enc
+    }
+
+
+def _y_fields(spec: dict) -> set[str]:
+    return {
+        node["encoding"]["y"]["field"]
+        for node in _walk(spec)
+        if isinstance(node.get("encoding"), dict)
+        and isinstance(node["encoding"].get("y"), dict)
+        and "field" in node["encoding"]["y"]
+    }
+
+
+def _rule_datums(spec: dict) -> list[float]:
+    return [
+        node["encoding"]["x"]["datum"]
+        for node in _walk(spec)
+        if (node.get("mark") or {}).get("type") == "rule"
+    ]
 
 
 @pytest.mark.parametrize("view", ["chi_k", "chi_r", "sites", "frames"])
 def test_vega_lite_views(archive: Path, view: str):
-    series = archive_series(archive)
-    spec = series_to_vega_lite(series, view=view)
+    spec = series_to_vega_lite(archive_series(archive, include=ALL), view=view)
     json.dumps(spec, allow_nan=False)
     assert "vega-lite" in spec["$schema"]
-    datasets = _datasets(spec)
+    datasets = [*spec.get("datasets", {}).values()]
     assert datasets and all(len(rows) > 0 for rows in datasets)
-    fields = _encodings(spec)
-    if view != "chi_r":
-        assert ("x", "k") in fields
-    if view == "chi_r":
-        assert ("x", "r") in fields and ("y", "chir_mag") in fields
-        labels = {row["path"] for rows in datasets for row in rows}
-        assert labels == {"|χ(R)|", "Re χ(R)", "Im χ(R)"}
-    if view == "chi_k":
-        assert ("y", "chi_weighted") in fields
-        assert ("y2", "hi") in fields
-        assert ("y", "n") in fields
     if view == "frames":
-        assert ("y", "chir_mag") in fields
         labels = {row["path"] for rows in datasets for row in rows}
         assert labels == {"frame 0", "frame 1", "frame 2"}
 
 
-def test_vega_lite_nan_is_null(tmp_path: Path):
-    path = tmp_path / "nan.h5"
-    chi = np.sin(K)
-    chi[-5:] = np.nan
-    with EnsembleWriter(path, k_grid=K, fourier_params=FT) as w:
-        w.set_overall_average(K, chi, chi_std=np.where(np.isnan(chi), np.nan, 0.1))
-    spec = series_to_vega_lite(archive_series(path), view="chi_k")
-    json.dumps(spec, allow_nan=False)
+@pytest.mark.parametrize("kweight", [0, 2])
+def test_chi_k_title_and_rules_follow_kweight(archive: Path, kweight: int):
+    series = archive_series(archive, ft_params={"kweight": kweight})
+    spec = series_to_vega_lite(series, view="chi_k")
+    assert {0: "χ(k)", 2: "k²χ(k) (Å⁻²)"}[kweight] in _titles(spec)
+    assert "chi_weighted" in _y_fields(spec)
+    assert _rule_datums(spec) == [3.0, 12.0]
 
 
-def test_vega_lite_errors(archive: Path, tmp_path: Path):
+def test_chi_r_view_uses_a_neutral_axis_for_mag_re_and_im(archive: Path):
+    series = archive_series(archive, ft_params={"kweight": 1, "rmax": 5.5})
+    spec = series_to_vega_lite(series, view="chi_r")
+    assert "χ(R) (Å⁻²)" in _titles(spec)
+    assert not any("|χ(R)| (" in t for t in _titles(spec))
+    assert _y_fields(spec) == {"chir"}
+    labels = {row["path"] for rows in spec["datasets"].values() for row in rows}
+    assert labels == {"|χ(R)|", "Re χ(R)", "Im χ(R)"}
+    assert _rule_datums(spec) == [5.5]
+
+
+def test_breakdown_views_use_weighted_chi_and_independent_zoom(archive: Path):
+    series = archive_series(archive, ft_params={"kweight": 1}, include=ALL)
+    for view in ("sites", "frames"):
+        spec = series_to_vega_lite(series, view=view)
+        assert "kχ(k) (Å⁻¹)" in _titles(spec)
+        assert _y_fields(spec) == {"chi_weighted", "chir_mag"}
+        assert sorted(p["name"] for p in spec["params"]) == ["zoom_k", "zoom_r"]
+
+
+def test_vega_lite_errors(archive: Path):
     series = archive_series(archive)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Unknown view"):
         series_to_vega_lite(series, view="nope")
-    series["frames"]["spectra"] = []
-    with pytest.raises(ViewUnavailableError):
+    with pytest.raises(ViewUnavailableError, match="include"):
         series_to_vega_lite(series, view="frames")
 
 
-def test_panels_have_independent_zoom(archive: Path):
-    spec = series_to_vega_lite(archive_series(archive), view="frames")
-    names = [p["name"] for p in spec["params"]]
-    assert sorted(names) == ["zoom_k", "zoom_r"]
-
-
-def test_vega_lite_carries_series_warnings_in_usermeta(tmp_path: Path):
-    stale = _write(tmp_path / "stale.h5", overall_scale=1.2)
-    series = archive_series(stale)
-    spec = series_to_vega_lite(series, view="chi_r")
-    meta = spec["usermeta"]
-    assert meta["warnings"] == series["warnings"] and meta["warnings"]
-    assert meta["ft_params"]["kweight"] == 2
-    assert meta["checks"]["stored_vs_recomputed"]["status"] == "mismatch"
+def test_vega_lite_usermeta_carries_series_context(archive: Path):
+    series = archive_series(archive, ft_params={"kmax": 11.0}, include=("frames",))
+    meta = series_to_vega_lite(series, view="chi_k")["usermeta"]
+    assert meta["view"] == "chi_k"
+    assert meta["warnings"] == series["warnings"]
+    assert meta["ft_params"]["kmax"] == 11.0
+    assert meta["ft_params_source"] == "request"
+    assert meta["ft_defaults"] == STORED
+    assert meta["ft_warnings"] == []
     assert meta["shown"]["frames"] == [0, 1, 2]
-    assert meta["view"] == "chi_r"

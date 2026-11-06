@@ -6,31 +6,26 @@
 
 - `md_exafs.archive_series.archive_series`, which reads an ensemble archive
   into a versioned, JSON-safe, plot-ready series: the stored overall average
-  (with std and contributor counts), per-site averages, and a capped, evenly
-  subsampled set of per-frame spectra, together with the Fourier-transform
-  parameters, units and warnings. The stored overall average is checked
-  against one recomputed from the stored frame averages with
-  `average_chi_arrays`; a disagreement beyond `rel_tol` is reported in the
-  series `warnings`. `max_points` thins curves by min/max per bucket so peaks
-  survive.
-- `series_to_vega_lite`, which turns a series into a Vega-Lite spec (views
-  `chi_k`, `chi_r`, `sites`, `frames`) using the `viz` chart builders.
-  Requires `altair`.
+  (with std and contributor counts) and, when requested with
+  `include=("sites", "frames")`, per-site averages and a capped, evenly
+  subsampled set of per-frame spectra. Breakdowns that are not requested are not
+  read. The series also carries the Fourier-transform parameters, units and
+  warnings.
+- `viz.series_to_vega_lite` (also `md_exafs.series_to_vega_lite`), which turns a
+  series into a Vega-Lite spec (views `chi_k`, `chi_r`, `sites`, `frames`) with
+  the existing chart builders. Requires `altair`. The `chi_r` view plots
+  |chi(R)|, Re and Im under a neutral `χ(R) (Å⁻ⁿ)` axis.
 - `ArchiveReader.fourier_params` and `ArchiveReader.get_overall_average`.
 - Fourier-transform parameters can be changed on the fly.
-  `archive_series(path, ft_params=..., include=...)` recomputes chi(R) with
-  `xftf_arrays` from the stored unweighted chi(k), for the overall average and
-  every included site and frame spectrum. `ft_params` takes any subset of
-  `kmin`, `kmax`, `dk`, `window`, `kweight` (integer 0 to 4) and `rmax`; the
-  rest default to the archive's own values. Invalid requests raise
-  `InvalidFtParamsError` (a `ValueError`) listing one message per problem. A
-  window that reaches past the k with data is reported in `ft_warnings` and
-  in `warnings`, and the series is still returned. The same check runs for the
-  included sites and frames, reported as one `window_beyond_data` entry per
-  section with `n_affected` and `n_shown`. `include` (a subset of
-  `overall`, `sites`, `frames`) skips the transform for sections a view does
-  not need. A full recompute of the overall average, 50 sites and 20 frames
-  takes about 0.1 s.
+  `archive_series(path, ft_params=...)` recomputes chi(R) with `xftf_arrays`
+  from the stored unweighted chi(k), for the overall average and every site and
+  frame spectrum read. `ft_params` takes any subset of `kmin`, `kmax`, `dk`,
+  `window`, `kweight` (integer 0 to 4) and `rmax`; the rest default to the
+  archive's own values. Invalid requests raise `InvalidFtParamsError` (a
+  `ValueError`) listing one message per problem. A window that reaches past the
+  k with data is reported in `ft_warnings` and in `warnings`, and the series is
+  still returned; sites and frames get one `window_beyond_data` entry per
+  section with `n_affected` and `n_shown`.
 - Series fields: `ft_params` (the resolved parameters used), `ft_params_source`
   (`"archive"` or `"request"`), `ft_defaults` (the archive's stored parameters),
   `ft_limits` (k with data, k-weights, windows and the R_max cap, so a UI can
@@ -39,7 +34,7 @@
   `chi` stays unweighted. `units` gains `chi_weighted`.
 - `spectra.FT_WINDOWS`, the window names the API accepts, derived from
   `feff_input.WindowType`.
-- `viz.build_chi_chart` takes `y_field` and `y_title`.
+- `viz.build_chi_chart` and `viz.build_chir_chart` take `y_field` and `y_title`.
 - `spectra.xftf_arrays` takes `warn_uncovered: bool = True`. Pass `False` to
   suppress the log warning when uncovered k fall inside the window; the
   default is unchanged. `archive_series` passes `False`, so a recompute no
