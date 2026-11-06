@@ -312,8 +312,9 @@ class ArchiveReader:
         with self._open() as f:
             if "aggregates" in f:
                 return True
-            version = f.get("meta", {}).attrs.get("format_version", 0)
-            atype = _as_str(f.get("meta", {}).attrs.get("archive_type", ""))
+            meta = f["meta"].attrs if "meta" in f else {}
+            version = meta.get("format_version", 0)
+            atype = _as_str(meta.get("archive_type", ""))
             return version in (2, ENSEMBLE_VERSION) or atype == "ensemble"
 
     @property
@@ -322,8 +323,9 @@ class ArchiveReader:
         with self._open() as f:
             if "tasks" in f:
                 return True
-            version = f.get("meta", {}).attrs.get("format_version", 0)
-            atype = _as_str(f.get("meta", {}).attrs.get("archive_type", ""))
+            meta = f["meta"].attrs if "meta" in f else {}
+            version = meta.get("format_version", 0)
+            atype = _as_str(meta.get("archive_type", ""))
             return version == SHARD_VERSION or atype == "batch_shard"
 
     @property
@@ -405,6 +407,24 @@ class ArchiveReader:
             if "aggregates/overall_average/chir_im" in f:
                 return np.array(f["aggregates/overall_average/chir_im"])
             return None
+
+    @property
+    def fourier_params(self) -> dict[str, Any]:
+        """Fourier transform parameters recorded in the archive metadata."""
+        with self._open() as f:
+            meta = f["meta"].attrs if "meta" in f else {}
+            raw = meta.get("fourier_params")
+            if raw is None:
+                return {}
+            return dict(json.loads(_as_str(raw)))
+
+    def get_overall_average(self) -> dict[str, np.ndarray]:
+        """Return the stored grand average, one array per stored dataset."""
+        with self._open() as f:
+            if "aggregates/overall_average" not in f:
+                raise KeyError(f"No overall average in {self.path}")
+            grp = f["aggregates/overall_average"]
+            return {name: np.array(ds) for name, ds in grp.items()}
 
     @property
     def site_indices(self) -> list[int]:
@@ -493,7 +513,8 @@ class ArchiveReader:
                     else np.zeros(len(r_eff), dtype=int)
                 )
                 if (
-                    "format_version" in f.get("meta", {}).attrs
+                    "meta" in f
+                    and "format_version" in f["meta"].attrs
                     and f["meta"].attrs["format_version"] == 1
                 ):
                     f_idx = np.full(

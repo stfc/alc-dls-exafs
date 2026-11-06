@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from .archive_series import InvalidFtParamsError, archive_series
 from .constants import ETOK, HBAR2_OVER_2M_EV_ANGSTROM2
 from .exafs_data import PathAggregator, PathContribution
 from .feff_input import FeffConfig, build_feff_inp, normalize_tag
@@ -27,8 +28,9 @@ from .spectra import (
     resample_chi,
     xftf_arrays,
 )
+from .viz import series_to_vega_lite
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 # Default cache directory for FEFF calculations and results
 DEFAULT_CACHE_DIR = Path.home() / ".larch_cache"
@@ -45,6 +47,9 @@ __all__ = [
     "path_chi",
     "make_path_key",
     "xftf_arrays",
+    "archive_series",
+    "series_to_vega_lite",
+    "InvalidFtParamsError",
     "average_chi_arrays",
     "ChiAverage",
     "resample_chi",

@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.3.1
+
+### Added
+
+- `md_exafs.archive_series.archive_series`, which reads an ensemble archive
+  into a versioned, JSON-safe, plot-ready series: the stored overall average
+  (with std and contributor counts) and, when requested with
+  `include=("sites", "frames")`, per-site averages and a capped, evenly
+  subsampled set of per-frame spectra. Breakdowns that are not requested are not
+  read. The series also carries the Fourier-transform parameters, units and
+  warnings.
+- `viz.series_to_vega_lite` (also `md_exafs.series_to_vega_lite`), which turns a
+  series into a Vega-Lite spec (views `chi_k`, `chi_r`, `sites`, `frames`) with
+  the existing chart builders. Requires `altair`. The `chi_r` view plots
+  |chi(R)|, Re and Im under a neutral `χ(R) (Å⁻ⁿ)` axis.
+- `ArchiveReader.fourier_params` and `ArchiveReader.get_overall_average`.
+- Fourier-transform parameters can be changed on the fly.
+  `archive_series(path, ft_params=...)` recomputes chi(R) with `xftf_arrays`
+  from the stored unweighted chi(k), for the overall average and every site and
+  frame spectrum read. `ft_params` takes any subset of `kmin`, `kmax`, `dk`,
+  `window`, `kweight` (integer 0 to 4) and `rmax`; the rest default to the
+  archive's own values. Invalid requests raise `InvalidFtParamsError` (a
+  `ValueError`) listing one message per problem. A window that reaches past the
+  k with data is reported in `ft_warnings` and in `warnings`, and the series is
+  still returned; sites and frames get one `window_beyond_data` entry per
+  section with `n_affected` and `n_shown`.
+- Series fields: `ft_params` (the resolved parameters used), `ft_params_source`
+  (`"archive"` or `"request"`), `ft_defaults` (the archive's stored parameters),
+  `ft_limits` (k with data, k-weights, windows and the R_max cap, so a UI can
+  build its controls from the series) and `ft_warnings`. Each spectrum gains
+  `chi_weighted` = k**kweight * chi, and the overall gains `chi_std_weighted`.
+  `chi` stays unweighted. `units` gains `chi_weighted`.
+- `spectra.FT_WINDOWS`, the window names the API accepts, derived from
+  `feff_input.WindowType`.
+- `viz.build_chi_chart` and `viz.build_chir_chart` take `y_field` and `y_title`.
+- `spectra.xftf_arrays` takes `warn_uncovered: bool = True`. Pass `False` to
+  suppress the log warning when uncovered k fall inside the window; the
+  default is unchanged. `archive_series` passes `False`, so a recompute no
+  longer logs one warning per spectrum.
+
+### Changed
+
+- The chi(k) views plot `chi_weighted`, and their y-axis states the k-weight
+  and units (for example `k²χ(k) (Å⁻²)`). The chi_k view draws dashed rules at
+  kmin and kmax, and the chi_r view draws one at rmax. Vega-Lite specs
+  carry `ft_params_source`, `ft_defaults`, `ft_limits` and `ft_warnings` in
+  `usermeta`. Consumers reading the chi_k `chi` field should read
+  `chi_weighted` instead.
+
+### Fixed
+
+- `ArchiveReader.is_ensemble`, `is_shard` and `fourier_params` raised
+  `AttributeError` on an HDF5 file with no `/meta` group (an aggregates-only
+  archive). They now treat a missing `/meta` as empty metadata, and
+  `archive_series` no longer relies on catching that error.
+
 ## 0.3.0
 
 Averaging χ(k) had four implementations with three different conventions for

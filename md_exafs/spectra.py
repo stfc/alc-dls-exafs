@@ -15,6 +15,8 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
+from .feff_input import WindowType
+
 logger = logging.getLogger("md_exafs.spectra")
 
 FT_DEFAULTS: dict[str, Any] = {
@@ -25,6 +27,11 @@ FT_DEFAULTS: dict[str, Any] = {
     "rmax": 8.0,
     "window": "kaiser",
 }
+
+# Window names the API accepts, from :class:`WindowType`. Larch's ``ftwindow``
+# also matches on the first three letters, but only these exact names are
+# accepted here.
+FT_WINDOWS: tuple[str, ...] = tuple(w.value for w in WindowType)
 
 
 def resolve_ft_params(ft_params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -121,6 +128,8 @@ def xftf_arrays(
     k: np.ndarray,
     chi: np.ndarray,
     ft_params: dict[str, Any] | None = None,
+    *,
+    warn_uncovered: bool = True,
 ) -> dict[str, Any]:
     """Fourier-transform χ(k) → χ(R) using Larch.
 
@@ -133,12 +142,15 @@ def xftf_arrays(
     Zero-padding is only harmless outside the window. If uncovered k fall
     *inside* it the transform is partly built from fabricated zeros, which
     damps |χ(R)|, so that case is logged as a warning naming the k-range at
-    fault. Lower ``kmax`` to the range the data actually cover.
+    fault. Lower ``kmax`` to the range the data actually cover. Callers that
+    transform many spectra and report coverage themselves pass
+    ``warn_uncovered=False``.
 
     Args:
         k: Photoelectron wavenumber grid (Å⁻¹).
         chi: χ(k) on that grid; NaN marks k with no data.
         ft_params: Optional Fourier transform parameters.
+        warn_uncovered: Log a warning when uncovered k fall inside the window.
 
     Returns:
         Dict with keys:
@@ -172,7 +184,7 @@ def xftf_arrays(
             window=str(p["window"]),
         )
         in_window = missing & (np.abs(window) > 1e-7)
-        if in_window.any():
+        if warn_uncovered and in_window.any():
             bad = k_arr[in_window]
             logger.warning(
                 "Fourier transform window covers k where no spectrum has data "
@@ -308,6 +320,7 @@ def format_chi_ascii(
 
 __all__ = [
     "FT_DEFAULTS",
+    "FT_WINDOWS",
     "ChiAverage",
     "average_chi_arrays",
     "format_chi_ascii",
