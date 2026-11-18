@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Python 3.10 is no longer supported. Requires Python 3.11 or newer.
+
 ### Added
 
 - `md_exafs.stop`: `STOP`, a `threading.Event` set by SIGTERM or SIGUSR1 once
