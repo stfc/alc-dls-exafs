@@ -30,6 +30,7 @@ from .feff_utils import (
     run_multi_site_feff_calculations,
     validate_absorber_indices,
 )
+from .stop import STOP, RunStoppedError
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +438,8 @@ class FeffExecutor:
         self.force_recalculate = force_recalculate
         self.hdf5_store = hdf5_store
         self.loaded_groups: dict[str, Any] = {}
+        #: True when the last :meth:`execute_batch` stopped early on a stop request.
+        self.stopped = False
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
         if self.cache_dir:
@@ -983,6 +986,7 @@ class FeffExecutor:
         total_tasks = len(batch.tasks)
         completed_tasks = 0
         self.loaded_groups.clear()
+        self.stopped = False
 
         # Scratch eviction needs somewhere durable to evict *to*, so it is only
         # ever attempted when results are being committed to an HDF5 archive.
@@ -1130,6 +1134,16 @@ class FeffExecutor:
             for chunk_idx, chunk_start in enumerate(
                 range(0, total_to_run, chunk_size), start=1
             ):
+                if STOP.is_set():
+                    n_done = sum(1 for ok in cached_results.values() if ok)
+                    self.logger.warning(
+                        f"Stop requested before chunk {chunk_idx}/{n_chunks}: "
+                        f"{n_done}/{total_tasks} calculations completed. Rerun "
+                        "the same command to resume from saved results."
+                    )
+                    self.stopped = True
+                    break
+
                 chunk = tasks_to_run[chunk_start : chunk_start + chunk_size]
 
                 if batch.lazy:
@@ -1664,6 +1678,15 @@ class PipelineProcessor:
             chunk_progress_callback=chunk_progress_callback,
             copy_progress_callback=copy_progress_callback,
         )
+
+        # A partial run must not be averaged and written up as complete.
+        if self.feff_executor.stopped:
+            if self._hdf5_store is not None:
+                self._hdf5_store.close()
+            raise RunStoppedError(
+                "Run stopped before all calculations finished; the output is "
+                "incomplete. Rerun the same command to resume."
+            )
 
         # Stage C: Process results
         groups = self.result_processor.load_successful_results(

@@ -25,6 +25,7 @@ from .hdf5 import ArchiveReader, BatchShardWriter, EnsembleWriter
 from .paths import PathResult, path_chi, read_paths_from_dir
 from .potentials import PotentialsManager
 from .spectra import average_chi_arrays, resample_chi, xftf_arrays
+from .stop import STOP, RunStoppedError
 from .viz import group_path_results
 
 logger = logging.getLogger("md_exafs.execution")
@@ -267,7 +268,11 @@ class BatchExecutor:
         self.progress_callback = progress_callback
 
     def run(self) -> Path:
-        """Execute all tasks in streaming chunks, writing to output_h5."""
+        """Execute all tasks in streaming chunks, writing to output_h5.
+
+        Raises RunStoppedError if :data:`md_exafs.stop.STOP` is set; the shard
+        is then left incomplete.
+        """
         if not self.tasks:
             logger.warning("BatchExecutor received 0 tasks.")
             return self.output_h5
@@ -291,11 +296,20 @@ class BatchExecutor:
         total_tasks = len(self.tasks)
         completed = 0
 
+        stopped = False
         with BatchShardWriter(
             self.output_h5, k_grid=k_reference, threshold=self.threshold
         ) as writer:
             # Process in chunks of chunk_size
             for chunk_start in range(0, total_tasks, self.chunk_size):
+                if STOP.is_set():
+                    logger.warning(
+                        f"Stop requested before task {chunk_start}/{total_tasks}; "
+                        f"{completed} tasks processed, written so far to "
+                        f"{self.output_h5}. The shard is incomplete."
+                    )
+                    stopped = True
+                    break
                 chunk = self.tasks[chunk_start : chunk_start + self.chunk_size]
 
                 # Run FEFF in parallel for this chunk
@@ -316,6 +330,7 @@ class BatchExecutor:
                         _execute_feff_subprocess(t.input_dir, self.feff_executable)
 
                 # Parse and write results sequentially to HDF5
+                scratch_to_remove: list[Path] = []
                 for t in chunk:
                     written = collect_task_into_shard(
                         writer,
@@ -329,19 +344,30 @@ class BatchExecutor:
                             f"No parseable chi.dat for {t.input_dir}; task omitted from shard."
                         )
 
-                    # Bounded disk cleanup: remove scratch directory contents immediately
-                    if self.clean_scratch:
-                        try:
-                            shutil.rmtree(t.input_dir)
-                        except Exception as exc:
-                            logger.debug(
-                                f"Failed to remove scratch dir {t.input_dir}: {exc}"
-                            )
+                    # A failed run in a stopped chunk may have been killed mid-way;
+                    # keep its scratch for inspection.
+                    if self.clean_scratch and (written or not STOP.is_set()):
+                        scratch_to_remove.append(t.input_dir)
 
                     completed += 1
                     if self.progress_callback:
                         self.progress_callback(completed, total_tasks)
 
+                # Scratch goes only after this chunk's results are on disk.
+                writer.flush()
+                for scratch_dir in scratch_to_remove:
+                    try:
+                        shutil.rmtree(scratch_dir)
+                    except Exception as exc:
+                        logger.debug(
+                            f"Failed to remove scratch dir {scratch_dir}: {exc}"
+                        )
+
+        if stopped:
+            raise RunStoppedError(
+                f"BatchExecutor stopped with {completed}/{total_tasks} tasks "
+                f"processed; {self.output_h5} is incomplete."
+            )
         logger.info(
             f"Batch execution complete: {completed}/{total_tasks} written to {self.output_h5}"
         )

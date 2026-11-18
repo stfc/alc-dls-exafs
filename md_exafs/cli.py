@@ -35,6 +35,7 @@ from .pipeline import (
     PipelineProcessor,
     ResultProcessor,
 )
+from .stop import RunStoppedError, install_sigterm_handler
 
 
 class PlotComponent(str, Enum):
@@ -1462,6 +1463,9 @@ def run_full_pipeline(
         console.print(f"[red]Error: Structure file {structure} not found[/red]")
         raise typer.Exit(1)
 
+    # Scheduler time limits send SIGTERM; stop at the next chunk boundary.
+    install_sigterm_handler()
+
     # Ensure library-level warnings (logger.warning calls) are visible in the terminal.
     import logging as _logging
 
@@ -2040,6 +2044,9 @@ def run_full_pipeline(
                 "  Use EXAFSDataCollection.load_larch_groups() to load them back"
             )
 
+    except RunStoppedError as e:
+        console.print(f"[yellow]Stopped: {e}[/yellow]")
+        raise typer.Exit(1) from e
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from e

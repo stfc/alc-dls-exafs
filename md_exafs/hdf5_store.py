@@ -113,6 +113,7 @@ def _ensure_feff_encoding_patch() -> None:
 
 
 if TYPE_CHECKING:
+    import h5py
     from larch import Group
 
     from .exafs_data import EXAFSDataCollection, PathContribution
@@ -135,6 +136,30 @@ _COMPRESS = {"compression": "gzip", "compression_opts": 1, "shuffle": True}
 # averaged aggregates stay float64 for accurate interpolation / Fourier
 # transforms.
 _ARRAY_DTYPE = np.float32
+
+
+class UnreadableHDF5Error(OSError):
+    """An existing HDF5 results file cannot be opened."""
+
+
+def _open_h5(path: Path, mode: str) -> h5py.File:
+    """Open an HDF5 file, explaining unreadable existing files.
+
+    Lock errors and missing files propagate unchanged, so that a file held by
+    another process is not reported as corrupt.
+    """
+    import h5py
+
+    try:
+        return h5py.File(path, mode)
+    except OSError as exc:
+        if mode == "w" or not path.exists() or "unable to lock file" in str(exc):
+            raise
+        raise UnreadableHDF5Error(
+            f"HDF5 file {path} is unreadable ({exc}). It was most likely left "
+            "behind by an interrupted run that did not close it. Move it aside "
+            "to recompute; it has not been modified."
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +213,6 @@ class ExafsHDF5Store:
         store_path_params: bool | None = None,
     ) -> None:
         """Open or create the HDF5 file at *path*."""
-        import h5py
-
         self.path = Path(path)
         self.store_paths = store_paths
         self.dedup_k = dedup_k
@@ -215,7 +238,7 @@ class ExafsHDF5Store:
         )
         self._lock = threading.Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._h5 = h5py.File(self.path, mode)
+        self._h5 = _open_h5(self.path, mode)
 
         if mode == "a":
             self._init_metadata(config)
@@ -237,12 +260,14 @@ class ExafsHDF5Store:
         self.close()
 
     def close(self) -> None:
-        """Flush and close the HDF5 file."""
+        """Flush and close the HDF5 file.  Errors are logged, not raised."""
+        if not self._h5.id.valid:
+            return
         try:
             self._h5.flush()
             self._h5.close()
-        except Exception:  # noqa: BLE001, S110
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Failed to flush/close HDF5 file {self.path}: {exc}")
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -1068,6 +1093,10 @@ class ExafsHDF5Store:
                     grp_paths["lam"][n_existing_paths:] = p_lams
                     grp_paths["rep"][n_existing_paths:] = p_reps
 
+            # Without a flush, a killed run leaves the superblock and root group
+            # at their creation-time state and the whole file is unreadable.
+            self._h5.flush()
+
     # ------------------------------------------------------------------
     # Migration helper
     # ------------------------------------------------------------------
@@ -1462,11 +1491,9 @@ class AveragedPathsStore:
         mode: str = "a",
     ) -> None:
         """Open or create the averaged-paths HDF5 file."""
-        import h5py
-
         self.path = Path(path)
         self._lock = threading.Lock()
-        self._h5 = h5py.File(self.path, mode)
+        self._h5 = _open_h5(self.path, mode)
         if mode == "a":
             self._init_metadata(source_h5_path)
 
@@ -1626,9 +1653,11 @@ class AveragedPathsStore:
                         p_grp.attrs["angle_std"] = float(pc.angle_std)
 
     def close(self) -> None:
-        """Flush and close the HDF5 file."""
+        """Flush and close the HDF5 file.  Errors are logged, not raised."""
+        if not self._h5.id.valid:
+            return
         try:
             self._h5.flush()
             self._h5.close()
-        except Exception:  # noqa: BLE001, S110
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Failed to flush/close HDF5 file {self.path}: {exc}")

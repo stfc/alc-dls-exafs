@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `md_exafs.stop`: `STOP`, a `threading.Event` set by SIGTERM or SIGUSR1 once
+  `install_sigterm_handler()` has been called, and `RunStoppedError`.
+  `md-exafs pipeline` installs the handler. Library code does not.
+- `BatchShardWriter.flush()`.
+
+### Fixed
+
+- HDF5 results survive a killed run. `ExafsHDF5Store.write_site_results_batch`
+  flushes after each batch, and `BatchExecutor` flushes once per chunk, before
+  removing that chunk's scratch directories. Previously a run killed at a Slurm
+  time limit left an unreadable `results.h5`.
+- On a stop request, the pipeline and `BatchExecutor` finish the chunk in
+  flight and start no new one. `process_trajectory` then raises
+  `RunStoppedError` without averaging, and `md-exafs pipeline` exits with
+  status 1.
+- An existing results file that cannot be opened raises `UnreadableHDF5Error`
+  (an `OSError`) naming the file. Lock errors are re-raised unchanged.
+  `ExafsHDF5Store.close()` logs flush errors instead of silently discarding
+  them.
+
 ## 0.3.1
 
 ### Added

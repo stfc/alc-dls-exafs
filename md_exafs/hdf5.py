@@ -130,6 +130,10 @@ class BatchShardWriter:
         self._task_count += 1
         self._f["meta"].attrs["n_tasks"] = self._task_count
 
+    def flush(self) -> None:
+        """Flush written tasks to disk so an interrupted run stays readable."""
+        self._f.flush()
+
     def close(self) -> None:
         """Flush and close the HDF5 archive."""
         if self._f:
