@@ -57,7 +57,7 @@ import logging
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -291,7 +291,7 @@ class ExafsHDF5Store:
 
     def _init_metadata(self, config: FeffConfig | None) -> None:
         meta = self._h5.require_group("meta")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         meta.attrs["version"] = _STORE_VERSION
         # Set created_at only on first creation; always record last updated_at.
         if "created_at" not in meta.attrs:
@@ -1518,7 +1518,7 @@ class AveragedPathsStore:
         meta = self._h5.require_group("meta")
         if "version" not in meta.attrs:
             meta.attrs["version"] = "1.0"
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         if "created_at" not in meta.attrs:
             meta.attrs["created_at"] = now
         meta.attrs["updated_at"] = now

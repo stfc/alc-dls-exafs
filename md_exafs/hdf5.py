@@ -12,7 +12,7 @@ import json
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +59,7 @@ class BatchShardWriter:
         meta = self._f.create_group("meta")
         meta.attrs["format_version"] = SHARD_VERSION
         meta.attrs["archive_type"] = "batch_shard"
-        meta.attrs["created_at"] = datetime.now(timezone.utc).isoformat()
+        meta.attrs["created_at"] = datetime.now(UTC).isoformat()
         meta.attrs["threshold"] = self.threshold
         if config is not None:
             try:
@@ -168,7 +168,7 @@ class EnsembleWriter:
         meta = self._f.create_group("meta")
         meta.attrs["format_version"] = ENSEMBLE_VERSION
         meta.attrs["archive_type"] = "ensemble"
-        meta.attrs["created_at"] = datetime.now(timezone.utc).isoformat()
+        meta.attrs["created_at"] = datetime.now(UTC).isoformat()
         meta.attrs["fourier_params"] = json.dumps(self.fourier_params)
         meta.create_dataset("k_grid", data=self.k_grid)
 
