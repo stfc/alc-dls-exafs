@@ -24,7 +24,7 @@ Only nlegs=2 FEFF paths are matched to DW σ² directly.
 For nlegs=4 collinear rattle paths: σ²_rattle ≈ 4 × σ²_single (approximate).
 """
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
 #     "altair>=6.0.0",
 #     "ase>=3.27.0",

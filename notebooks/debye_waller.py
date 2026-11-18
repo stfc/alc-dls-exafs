@@ -3,7 +3,7 @@
 Computes Debye-Waller factors and MSRD for EXAFS/FEFF from MD trajectories.
 """
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
 #     "altair==6.0.0",
 #     "ase==3.27.0",

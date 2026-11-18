@@ -6,7 +6,7 @@ authors = [
 ]
 description = "Core engine and CLI for ensemble-averaged EXAFS spectroscopy from MD trajectories"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 classifiers = [
@@ -14,7 +14,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Physics",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -102,7 +101,7 @@ source-include = [
 # =======================
 [tool.ruff]
 line-length = 88
-target-version = "py310"
+target-version = "py311"
 exclude = [
     ".eggs",
     ".git",
@@ -158,7 +157,7 @@ convention = "google"
 # Type checking: mypy
 # =======================
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 strict = true
 # Note: `strict = true` enables:
 #   disallow_untyped_defs, check_untyped_defs, no_implicit_optional, warn_no_return, etc.

@@ -17,6 +17,8 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from md_exafs.stop import RunStoppedError, install_sigterm_handler
+
 from . import DEFAULT_CACHE_DIR
 from .exafs_data import (
     EXAFSDataCollection,
@@ -1462,6 +1464,9 @@ def run_full_pipeline(
         console.print(f"[red]Error: Structure file {structure} not found[/red]")
         raise typer.Exit(1)
 
+    # Scheduler time limits send SIGTERM; stop at the next chunk boundary.
+    install_sigterm_handler()
+
     # Ensure library-level warnings (logger.warning calls) are visible in the terminal.
     import logging as _logging
 
@@ -1848,12 +1853,6 @@ def run_full_pipeline(
         )
         console.print(f"  Successful calculations: {len(individual_groups)}")
 
-        # Close the HDF5 write handle before the plot section opens a new read handle.
-        # This ensures all buffered writes are fully committed to disk before
-        # iter_path_contributions() opens the same file in a separate handle.
-        if processor._hdf5_store is not None:
-            processor._hdf5_store.close()
-
         # Generate plots if show_plot is enabled or plot components specified
         if show_plot or plot_include != "all":
             console.print("\n[cyan]Generating plots...[/cyan]")
@@ -1869,7 +1868,7 @@ def run_full_pipeline(
                     from .exafs_data import PathAggregator
                     from .hdf5_store import ExafsHDF5Store
 
-                    store = ExafsHDF5Store(effective_hdf5_path, config=config)
+                    store = ExafsHDF5Store(effective_hdf5_path, config=config, mode="r")
                     agg = PathAggregator()
                     for (
                         path_key,
@@ -2040,6 +2039,9 @@ def run_full_pipeline(
                 "  Use EXAFSDataCollection.load_larch_groups() to load them back"
             )
 
+    except RunStoppedError as e:
+        console.print(f"[yellow]Stopped: {e}[/yellow]")
+        raise typer.Exit(1) from e
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from e
