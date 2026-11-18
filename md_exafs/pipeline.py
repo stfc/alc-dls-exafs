@@ -22,6 +22,8 @@ from ase import Atoms
 from ase.geometry import wrap_positions
 from larch import Group
 
+from md_exafs.stop import STOP, RunStoppedError
+
 from .feff_utils import (
     FeffConfig,
     WindowType,
@@ -31,7 +33,6 @@ from .feff_utils import (
     run_multi_site_feff_calculations,
     validate_absorber_indices,
 )
-from .stop import STOP, RunStoppedError
 
 logger = logging.getLogger(__name__)
 
@@ -1351,6 +1352,12 @@ class FeffExecutor:
                         # Retained for recovery, but not at full size.
                         for task in validated_tasks_this_chunk:
                             cleanup_feff_output(task.feff_dir, keep_essential=False)
+
+                if STOP.is_set() and any(
+                    not cached_results.get(t.task_id, False) for t, _ in chunk
+                ):
+                    self.stopped = True
+                    break
 
         # Skipped tasks are merged in last so they never inflate the progress
         # accounting above, which is based on ``len(batch.tasks)``.

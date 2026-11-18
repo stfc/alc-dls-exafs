@@ -144,6 +144,28 @@ def test_batch_executor_finishes_in_flight_chunk_then_stops(
     assert _shard_task_count(out) == 2
 
 
+def test_batch_executor_single_chunk_stop_with_failure_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def feff_killed_on_second(input_dir, feff_executable="feff", timeout=300.0) -> bool:
+        STOP.set()
+        if Path(input_dir).name == "t01":
+            return False
+        return _fake_feff(input_dir)
+
+    monkeypatch.setattr(execution, "_execute_feff_subprocess", feff_killed_on_second)
+    tasks = _scratch_tasks(tmp_path, 2)
+    out = tmp_path / "shard.h5"
+
+    executor = BatchExecutor(tasks, out, chunk_size=4, n_workers=2, clean_scratch=True)
+    with pytest.raises(RunStoppedError):
+        executor.run()
+
+    assert _shard_task_count(out) == 1
+    assert not tasks[0].input_dir.exists()
+    assert tasks[1].input_dir.exists()
+
+
 def test_batch_executor_removes_scratch_only_after_flush(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -287,6 +309,53 @@ def test_pipeline_failed_task_in_stopped_chunk_is_not_complete(
     assert results[failed_id] is False
     assert not batch.tasks[0].feff_dir.exists()
     assert batch.tasks[1].feff_dir.exists()
+
+
+def test_pipeline_single_chunk_stop_with_failure_marks_stopped(
+    tmp_path: Path, fake_feff
+) -> None:
+    batch = _pipeline_batch(tmp_path, 2, chunk_size=4)
+    h5 = tmp_path / "results.h5"
+    store = ExafsHDF5Store(h5, config=batch.config, store_paths=False)
+    executor = FeffExecutor(max_workers=2, hdf5_store=store)
+
+    def feff_killed_on_second(input_files, **kwargs):
+        results = fake_feff(input_files, **kwargs)
+        STOP.set()
+        feff_dir, _ = results[1]
+        return [results[0], (feff_dir, False)]
+
+    with patch.object(pl, "run_multi_site_feff_calculations", feff_killed_on_second):
+        executor.execute_batch(batch, parallel=True)
+    store.close()
+
+    assert executor.stopped
+
+
+def test_feff_retry_skips_retries_and_sleep_when_stopped(tmp_path: Path) -> None:
+    from md_exafs import feff_utils
+
+    inp = tmp_path / "feff.inp"
+    inp.write_text("CONTROL 0 0 0 1 1 1\n")
+    attempts = 0
+
+    def killed_feff(*_args, **_kwargs) -> bool:
+        nonlocal attempts
+        attempts += 1
+        STOP.set()
+        return False
+
+    with (
+        patch.object(feff_utils, "run_feff_calculation", side_effect=killed_feff),
+        patch.object(feff_utils.time, "sleep") as mock_sleep,
+    ):
+        res = feff_utils.run_multi_site_feff_calculations(
+            [inp], parallel=False, max_retries=2
+        )
+
+    assert res == [(tmp_path, False)]
+    assert attempts == 1
+    mock_sleep.assert_not_called()
 
 
 def test_cli_pipeline_reports_stop_as_failure(tmp_structure_file: Path) -> None:

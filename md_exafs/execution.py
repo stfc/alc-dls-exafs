@@ -14,18 +14,19 @@ import os
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from md_exafs.stop import STOP, RunStoppedError
+
 from .hdf5 import ArchiveReader, BatchShardWriter, EnsembleWriter
 from .paths import PathResult, path_chi, read_paths_from_dir
 from .potentials import PotentialsManager
 from .spectra import average_chi_arrays, resample_chi, xftf_arrays
-from .stop import STOP, RunStoppedError
 from .viz import group_path_results
 
 logger = logging.getLogger("md_exafs.execution")
@@ -314,7 +315,7 @@ class BatchExecutor:
 
                 # Run FEFF in parallel for this chunk
                 if self.n_workers > 1 and len(chunk) > 1:
-                    with ProcessPoolExecutor(max_workers=self.n_workers) as pool:
+                    with ThreadPoolExecutor(max_workers=self.n_workers) as pool:
                         futures = {
                             pool.submit(
                                 _execute_feff_subprocess,
@@ -331,6 +332,7 @@ class BatchExecutor:
 
                 # Parse and write results sequentially to HDF5
                 scratch_to_remove: list[Path] = []
+                chunk_complete = True
                 for t in chunk:
                     written = collect_task_into_shard(
                         writer,
@@ -340,6 +342,7 @@ class BatchExecutor:
                         store_paths=self.store_paths,
                     )
                     if not written:
+                        chunk_complete = False
                         logger.warning(
                             f"No parseable chi.dat for {t.input_dir}; task omitted from shard."
                         )
@@ -362,6 +365,10 @@ class BatchExecutor:
                         logger.debug(
                             f"Failed to remove scratch dir {scratch_dir}: {exc}"
                         )
+
+                if STOP.is_set() and not chunk_complete:
+                    stopped = True
+                    break
 
         if stopped:
             raise RunStoppedError(

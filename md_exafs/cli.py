@@ -17,6 +17,8 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from md_exafs.stop import RunStoppedError, install_sigterm_handler
+
 from . import DEFAULT_CACHE_DIR
 from .exafs_data import (
     EXAFSDataCollection,
@@ -35,7 +37,6 @@ from .pipeline import (
     PipelineProcessor,
     ResultProcessor,
 )
-from .stop import RunStoppedError, install_sigterm_handler
 
 
 class PlotComponent(str, Enum):
