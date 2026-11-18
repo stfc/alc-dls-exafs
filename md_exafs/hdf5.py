@@ -70,6 +70,7 @@ class BatchShardWriter:
         meta.create_dataset("k_grid", data=self.k_grid)
         self._tasks_grp = self._f.create_group("tasks")
         self._task_count = 0
+        self._f.flush()
 
     def add_task_result(
         self,
@@ -307,7 +308,7 @@ class ArchiveReader:
 
     @contextmanager
     def _open(self) -> Iterator[h5py.File]:
-        with h5py.File(self.path, "r") as f:
+        with _open_h5(self.path, "r") as f:
             yield f
 
     @property
@@ -630,7 +631,11 @@ BatchShardReader = ArchiveReader
 EnsembleReader = ArchiveReader
 
 # Re-export ExafsHDF5Store for backwards compatibility
-from .hdf5_store import ExafsHDF5Store  # noqa: E402
+from md_exafs.hdf5_store import (  # noqa: E402
+    ExafsHDF5Store,
+    UnreadableHDF5Error,
+    _open_h5,
+)
 
 __all__ = [
     "SHARD_VERSION",
@@ -641,4 +646,5 @@ __all__ = [
     "EnsembleReader",
     "ArchiveReader",
     "ExafsHDF5Store",
+    "UnreadableHDF5Error",
 ]

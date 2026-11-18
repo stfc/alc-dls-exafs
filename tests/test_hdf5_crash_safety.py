@@ -14,6 +14,7 @@ import h5py
 import numpy as np
 import pytest
 
+from md_exafs.hdf5 import ArchiveReader
 from md_exafs.hdf5_store import (
     AveragedPathsStore,
     ExafsHDF5Store,
@@ -116,6 +117,46 @@ def test_shard_writer_flush_survives_kill(tmp_path: Path, sig: signal.Signals) -
     assert n_tasks == N_COMMITTED
 
 
+@pytest.mark.parametrize("sig", [signal.SIGKILL, signal.SIGTERM])
+def test_newly_opened_files_survive_kill_before_first_batch(
+    tmp_path: Path, sig: signal.Signals
+) -> None:
+    script = textwrap.dedent(
+        """
+        import sys
+        import numpy as np
+        from md_exafs.hdf5 import BatchShardWriter
+        from md_exafs.hdf5_store import ExafsHDF5Store
+
+        ExafsHDF5Store(sys.argv[1], store_paths=False)
+        BatchShardWriter(sys.argv[2], k_grid=np.linspace(0.0, 10.0, 5))
+        print("ready", flush=True)
+        sys.stdin.readline()
+        """
+    )
+    store_path, shard_path = tmp_path / "results.h5", tmp_path / "shard.h5"
+    proc = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-c", script, str(store_path), str(shard_path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None and proc.stdout.readline().strip() == "ready"
+        proc.send_signal(sig)
+    finally:
+        proc.wait(timeout=60)
+        if proc.stdin is not None:
+            proc.stdin.close()
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+    with h5py.File(store_path, "r") as f:
+        assert "meta" in f
+    with h5py.File(shard_path, "r") as f:
+        assert len(f["tasks"]) == 0
+
+
 def _write_one_batch(path: Path) -> None:
     store = ExafsHDF5Store(path, store_paths=False)
     k = np.linspace(0.0, 10.0, 20)
@@ -189,6 +230,30 @@ def test_lock_error_is_not_reported_as_corruption(
     assert not isinstance(exc_info.value, UnreadableHDF5Error)
 
 
+def test_archive_reader_raises_unreadable_error(tmp_path: Path) -> None:
+    path = tmp_path / "shard.h5"
+    path.write_bytes(b"garbage" * 100)
+
+    with pytest.raises(UnreadableHDF5Error, match="unreadable"):
+        _ = ArchiveReader(path).is_shard
+
+
+def test_permission_error_is_not_reported_as_corruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "results.h5"
+    _write_one_batch(path)
+
+    def denied(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(h5py, "File", denied)
+
+    with pytest.raises(PermissionError) as exc_info:
+        ExafsHDF5Store(path)
+    assert not isinstance(exc_info.value, UnreadableHDF5Error)
+
+
 def test_close_logs_flush_failure_instead_of_raising(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -201,6 +266,30 @@ def test_close_logs_flush_failure_instead_of_raising(
 
     real_h5.close()
     assert "disk full" in caplog.text
+    store._h5.close.assert_called_once()
+
+
+def test_pipeline_processor_closes_store_without_paths(
+    tmp_path: Path, fake_feff
+) -> None:
+    from unittest.mock import patch
+
+    from ase import Atoms
+
+    from md_exafs.feff_utils import FeffConfig
+    from md_exafs.pipeline import PipelineProcessor
+
+    atoms = Atoms("Fe2", positions=[[0, 0, 0], [2.5, 0, 0]], cell=[6, 6, 6], pbc=True)
+    h5 = tmp_path / "results.h5"
+    cfg = FeffConfig(keep_path_files=False)
+    proc = PipelineProcessor(cfg, max_workers=1, hdf5_path=h5)
+
+    with patch("md_exafs.pipeline.run_multi_site_feff_calculations", fake_feff):
+        proc.process_trajectory([atoms], absorber=0, output_dir=tmp_path / "out")
+
+    assert proc._hdf5_store is not None and not proc._hdf5_store._h5.id.valid
+    with h5py.File(h5, "r") as f:
+        assert "aggregates/overall_average/chi" in f
 
 
 def test_close_twice_is_silent(

@@ -51,6 +51,7 @@ results.h5
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import threading
@@ -145,21 +146,42 @@ class UnreadableHDF5Error(OSError):
 def _open_h5(path: Path, mode: str) -> h5py.File:
     """Open an HDF5 file, explaining unreadable existing files.
 
-    Lock errors and missing files propagate unchanged, so that a file held by
-    another process is not reported as corrupt.
+    Lock, permission, and missing-file errors propagate unchanged, so that OS
+    access failures are not reported as corruption.
     """
     import h5py
 
     try:
         return h5py.File(path, mode)
     except OSError as exc:
-        if mode == "w" or not path.exists() or "unable to lock file" in str(exc):
+        if (
+            mode == "w"
+            or not path.exists()
+            or isinstance(exc, PermissionError | IsADirectoryError | FileExistsError)
+            or exc.errno == errno.EROFS
+            or "unable to lock file" in str(exc)
+        ):
             raise
         raise UnreadableHDF5Error(
             f"HDF5 file {path} is unreadable ({exc}). It was most likely left "
             "behind by an interrupted run that did not close it. Move it aside "
             "to recompute; it has not been modified."
         ) from exc
+
+
+def _close_h5(h5: h5py.File, path: Path) -> None:
+    """Flush and close *h5*, logging errors without raising."""
+    if not h5.id.valid:
+        return
+    try:
+        h5.flush()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Failed to flush HDF5 file {path}: {exc}")
+    finally:
+        try:
+            h5.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Failed to close HDF5 file {path}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -261,13 +283,7 @@ class ExafsHDF5Store:
 
     def close(self) -> None:
         """Flush and close the HDF5 file.  Errors are logged, not raised."""
-        if not self._h5.id.valid:
-            return
-        try:
-            self._h5.flush()
-            self._h5.close()
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"Failed to flush/close HDF5 file {self.path}: {exc}")
+        _close_h5(self._h5, self.path)
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -295,6 +311,7 @@ class ExafsHDF5Store:
         # Pre-create top-level groups
         self._h5.require_group("frames")
         self._h5.require_group("aggregates")
+        self._h5.flush()
 
     # ------------------------------------------------------------------
     # Writing – per-site results
@@ -1507,6 +1524,7 @@ class AveragedPathsStore:
         meta.attrs["updated_at"] = now
         if source_h5_path is not None:
             meta.attrs["source_h5_path"] = str(source_h5_path)
+        self._h5.flush()
 
     def write_average(
         self,
@@ -1654,10 +1672,4 @@ class AveragedPathsStore:
 
     def close(self) -> None:
         """Flush and close the HDF5 file.  Errors are logged, not raised."""
-        if not self._h5.id.valid:
-            return
-        try:
-            self._h5.flush()
-            self._h5.close()
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"Failed to flush/close HDF5 file {self.path}: {exc}")
+        _close_h5(self._h5, self.path)

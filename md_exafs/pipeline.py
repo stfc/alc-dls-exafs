@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
 from shutil import copy2
@@ -1648,101 +1649,103 @@ class PipelineProcessor:
             Tuple of (overall_average, frame_averages, actual_site_averages,
                      individual_groups)
         """
-        # Stage A: Plan (or write) the inputs for all frames.  Planning them
-        # lazily only pays off when the directories are going to be evicted
-        # again chunk by chunk, which needs an HDF5 archive to evict into.
-        use_lazy = (
-            self.config.clean_scratch
-            and self._hdf5_store is not None
-            and self.config.cleanup_feff_files
-        )
-        batch = self.input_generator.generate_trajectory_inputs(
-            structures=structures,
-            absorber=absorber,
-            output_dir=output_dir,
-            precompute_potentials=precompute_potentials,
-            precompute_potentials_structure=precompute_potentials_structure,
-            input_progress_callback=input_progress_callback,
-            lazy=use_lazy,
-        )
-
-        # Stage B: Execute all FEFF calculations
-        task_results = self.feff_executor.execute_batch(
-            batch,
-            parallel=parallel,
-            progress_callback=progress_callback,
-            hdf5_progress_callback=hdf5_progress_callback
-            if not self._hdf5_store or not self._hdf5_store.store_paths
-            else None,
-            path_read_progress_callback=path_read_progress_callback,
-            chunk_progress_callback=chunk_progress_callback,
-            copy_progress_callback=copy_progress_callback,
-        )
-
-        # A partial run must not be averaged and written up as complete.
-        if self.feff_executor.stopped:
-            if self._hdf5_store is not None:
-                self._hdf5_store.close()
-            raise RunStoppedError(
-                "Run stopped before all calculations finished; the output is "
-                "incomplete. Rerun the same command to resume."
+        try:
+            # Stage A: Plan (or write) the inputs for all frames.  Planning them
+            # lazily only pays off when the directories are going to be evicted
+            # again chunk by chunk, which needs an HDF5 archive to evict into.
+            use_lazy = (
+                self.config.clean_scratch
+                and self._hdf5_store is not None
+                and self.config.cleanup_feff_files
+            )
+            batch = self.input_generator.generate_trajectory_inputs(
+                structures=structures,
+                absorber=absorber,
+                output_dir=output_dir,
+                precompute_potentials=precompute_potentials,
+                precompute_potentials_structure=precompute_potentials_structure,
+                input_progress_callback=input_progress_callback,
+                lazy=use_lazy,
             )
 
-        # Stage C: Process results
-        groups = self.result_processor.load_successful_results(
-            batch,
-            task_results,
-            loaded_groups=self.feff_executor.loaded_groups,
-            hdf5_store=self._hdf5_store,
-        )
-        frame_averages = self.result_processor.create_frame_averages(
-            groups, batch
-        )  # These are frame averages
-        site_averages = self.result_processor.create_site_averages(
-            groups, batch
-        )  # These are site averages
-        overall_average = self.result_processor.create_overall_average(
-            list(groups.values())
-        )
+            # Stage B: Execute all FEFF calculations
+            task_results = self.feff_executor.execute_batch(
+                batch,
+                parallel=parallel,
+                progress_callback=progress_callback,
+                hdf5_progress_callback=hdf5_progress_callback
+                if not self._hdf5_store or not self._hdf5_store.store_paths
+                else None,
+                path_read_progress_callback=path_read_progress_callback,
+                chunk_progress_callback=chunk_progress_callback,
+                copy_progress_callback=copy_progress_callback,
+            )
 
-        # Write aggregates to HDF5 store if one is active
-        if self._hdf5_store is not None:
-            try:
-                if overall_average is not None:
-                    self._hdf5_store.write_overall_average(
-                        overall_average, n_components=len(groups)
-                    )
-                for frame_idx, grp in frame_averages.items():
-                    self._hdf5_store.write_frame_average(
-                        frame_idx,
-                        grp,
-                        n_components=getattr(grp, "n_components", 1),
-                    )
-                for site_idx, grp in site_averages.items():
-                    self._hdf5_store.write_site_average(
-                        site_idx,
-                        grp,
-                        n_components=getattr(grp, "n_components", 1),
-                    )
-            except Exception as exc:  # noqa: BLE001
-                self.logger.warning(f"HDF5 aggregate write failed: {exc}")
+            # A partial run must not be averaged and written up as complete.
+            if self.feff_executor.stopped:
+                raise RunStoppedError(
+                    "Run stopped before all calculations finished; the output is "
+                    "incomplete. Rerun the same command to resume."
+                )
 
-            # Second HDF5 file: MD-averaged path contributions
-            if self._hdf5_store.store_paths:
+            # Stage C: Process results
+            groups = self.result_processor.load_successful_results(
+                batch,
+                task_results,
+                loaded_groups=self.feff_executor.loaded_groups,
+                hdf5_store=self._hdf5_store,
+            )
+            frame_averages = self.result_processor.create_frame_averages(
+                groups, batch
+            )  # These are frame averages
+            site_averages = self.result_processor.create_site_averages(
+                groups, batch
+            )  # These are site averages
+            overall_average = self.result_processor.create_overall_average(
+                list(groups.values())
+            )
+
+            # Write aggregates to HDF5 store if one is active
+            if self._hdf5_store is not None:
                 try:
-                    self._write_averaged_paths(
-                        overall_average=overall_average,
-                        site_averages=site_averages,
-                        fourier_params=self.config.fourier_params,
-                        hdf5_progress_callback=hdf5_progress_callback,
-                    )
+                    if overall_average is not None:
+                        self._hdf5_store.write_overall_average(
+                            overall_average, n_components=len(groups)
+                        )
+                    for frame_idx, grp in frame_averages.items():
+                        self._hdf5_store.write_frame_average(
+                            frame_idx,
+                            grp,
+                            n_components=getattr(grp, "n_components", 1),
+                        )
+                    for site_idx, grp in site_averages.items():
+                        self._hdf5_store.write_site_average(
+                            site_idx,
+                            grp,
+                            n_components=getattr(grp, "n_components", 1),
+                        )
                 except Exception as exc:  # noqa: BLE001
-                    self.logger.warning(f"Averaged paths write failed: {exc}")
+                    self.logger.warning(f"HDF5 aggregate write failed: {exc}")
 
-        # Collect individual groups for plotting
-        individual_groups = list(groups.values())
+                # Second HDF5 file: MD-averaged path contributions
+                if self._hdf5_store.store_paths:
+                    try:
+                        self._write_averaged_paths(
+                            overall_average=overall_average,
+                            site_averages=site_averages,
+                            fourier_params=self.config.fourier_params,
+                            hdf5_progress_callback=hdf5_progress_callback,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self.logger.warning(f"Averaged paths write failed: {exc}")
 
-        return overall_average, frame_averages, site_averages, individual_groups
+            # Collect individual groups for plotting
+            individual_groups = list(groups.values())
+
+            return overall_average, frame_averages, site_averages, individual_groups
+        finally:
+            if self._hdf5_store is not None:
+                self._hdf5_store.close()
 
     def _write_averaged_paths(
         self,
@@ -1767,8 +1770,6 @@ class PipelineProcessor:
         # re-open).  Nothing writes to this store again after this point.
         n_total_overall = sum(1 for _ in self._hdf5_store.iter_site_results())
         self._hdf5_store.close()
-
-        store = AveragedPathsStore(avg_path, source_h5_path=self.hdf5_path)
 
         # Phase 1: aggregate all stored path contributions.  This reads every
         # path row back from HDF5, clusters into physical path populations and
@@ -1800,35 +1801,37 @@ class PipelineProcessor:
         if hdf5_progress_callback:
             hdf5_progress_callback(current_step, total_steps, "writing")
 
-        if overall_average is not None:
-            overall_paths = overall_paths_all
-            _add_contribution_pct(overall_paths, overall_average, n_total_overall)
-            store.write_average(
-                "overall_average",
-                overall_average,
-                overall_paths,
-                n_total=n_total_overall,
-            )
-            current_step += 1
-            if hdf5_progress_callback:
-                hdf5_progress_callback(current_step, total_steps, "writing")
+        with closing(
+            AveragedPathsStore(avg_path, source_h5_path=self.hdf5_path)
+        ) as store:
+            if overall_average is not None:
+                overall_paths = overall_paths_all
+                _add_contribution_pct(overall_paths, overall_average, n_total_overall)
+                store.write_average(
+                    "overall_average",
+                    overall_average,
+                    overall_paths,
+                    n_total=n_total_overall,
+                )
+                current_step += 1
+                if hdf5_progress_callback:
+                    hdf5_progress_callback(current_step, total_steps, "writing")
 
-        for site_idx, site_group in site_averages.items():
-            site_paths = per_site_paths.get(site_idx, {})
-            n_total_site = (
-                max((pc.n_samples for pc in site_paths.values()), default=1)
-                if site_paths
-                else 1
-            )
-            _add_contribution_pct(site_paths, site_group, n_total_site)
-            store.write_average(
-                f"site_averages/site_{site_idx:04d}", site_group, site_paths
-            )
-            current_step += 1
-            if hdf5_progress_callback:
-                hdf5_progress_callback(current_step, total_steps, "writing")
+            for site_idx, site_group in site_averages.items():
+                site_paths = per_site_paths.get(site_idx, {})
+                n_total_site = (
+                    max((pc.n_samples for pc in site_paths.values()), default=1)
+                    if site_paths
+                    else 1
+                )
+                _add_contribution_pct(site_paths, site_group, n_total_site)
+                store.write_average(
+                    f"site_averages/site_{site_idx:04d}", site_group, site_paths
+                )
+                current_step += 1
+                if hdf5_progress_callback:
+                    hdf5_progress_callback(current_step, total_steps, "writing")
 
-        store.close()
         self.logger.info(f"Wrote averaged paths store: {avg_path}")
 
     def get_cache_info(self) -> dict:
