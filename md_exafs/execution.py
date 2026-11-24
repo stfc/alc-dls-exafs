@@ -23,11 +23,18 @@ import numpy as np
 
 from md_exafs.stop import STOP, RunStoppedError
 
+from .debye_waller import canonical_scatterer_key
+from .feff_input import FeffConfig
 from .hdf5 import ArchiveReader, BatchShardWriter, EnsembleWriter
-from .paths import PathResult, path_chi, read_paths_from_dir
+from .paths import (
+    PathResult,
+    cluster_path_category,
+    make_path_key,
+    path_chi,
+    read_paths_from_dir,
+)
 from .potentials import PotentialsManager
 from .spectra import average_chi_arrays, resample_chi, xftf_arrays
-from .viz import group_path_results
 
 logger = logging.getLogger("md_exafs.execution")
 
@@ -204,6 +211,7 @@ def write_batch_shard(
     k_grid: np.ndarray | None = None,
     threshold: float = 5.0,
     store_paths: bool = True,
+    config: FeffConfig | None = None,
 ) -> tuple[Path, int]:
     """Collect already-completed FEFF runs on disk into a batch shard.
 
@@ -217,6 +225,8 @@ def write_batch_shard(
         k_grid: Wavenumber grid; defaults to :data:`DEFAULT_K_GRID`.
         threshold: Minimum curved-wave amplitude ratio (percent) for path retention.
         store_paths: Whether to read and store individual scattering paths.
+        config: Optional FEFF configuration recorded in the shard metadata (its
+            ``radius`` is carried into merged ensemble archives).
 
     Returns:
         ``(path, n_written)`` — the shard path and how many of ``tasks`` produced a
@@ -225,7 +235,9 @@ def write_batch_shard(
     out = Path(output_h5)
     grid = DEFAULT_K_GRID if k_grid is None else k_grid
     n_written = 0
-    with BatchShardWriter(out, k_grid=grid, threshold=threshold) as writer:
+    with BatchShardWriter(
+        out, k_grid=grid, threshold=threshold, config=config
+    ) as writer:
         for task in tasks:
             if collect_task_into_shard(
                 writer, task, k_grid=grid, threshold=threshold, store_paths=store_paths
@@ -254,6 +266,7 @@ class BatchExecutor:
         store_paths: bool = True,
         clean_scratch: bool = False,
         progress_callback: Callable[[int, int], None] | None = None,
+        config: FeffConfig | None = None,
     ) -> None:
         """Initialize BatchExecutor."""
         self.tasks = tasks
@@ -267,6 +280,7 @@ class BatchExecutor:
         self.store_paths = store_paths
         self.clean_scratch = clean_scratch
         self.progress_callback = progress_callback
+        self.config = config
 
     def run(self) -> Path:
         """Execute all tasks in streaming chunks, writing to output_h5.
@@ -299,7 +313,10 @@ class BatchExecutor:
 
         stopped = False
         with BatchShardWriter(
-            self.output_h5, k_grid=k_reference, threshold=self.threshold
+            self.output_h5,
+            k_grid=k_reference,
+            threshold=self.threshold,
+            config=self.config,
         ) as writer:
             # Process in chunks of chunk_size
             for chunk_start in range(0, total_tasks, self.chunk_size):
@@ -386,6 +403,7 @@ def merge_shards(
     ensemble_path: Path | str,
     fourier_params: dict[str, Any] | None = None,
     top_n_paths: int = 25,
+    radius: float | None = None,
 ) -> Path:
     """Merge K batch shard archives into a single consolidated ensemble archive (ADR 0002).
 
@@ -393,13 +411,16 @@ def merge_shards(
     - Grand ensemble average <chi(k)> with sample standard deviation.
     - Per-frame and per-site average spectra.
     - Fourier transforms of all averages via Larch xftf.
-    - Pre-evaluated top-N composite paths on standard fine k and R grids (ADR 0003).
+    - Top-N path groups (clustered by ``r_eff`` and, for 3-leg paths, angle), each
+      stored as its exact ensemble-weighted contribution to the overall average.
 
     Args:
         shard_paths: List of paths to batch_shard.h5 files.
         ensemble_path: Target path for ensemble_results.h5.
         fourier_params: Optional Fourier transform settings.
-        top_n_paths: Number of dominant composite paths to evaluate and store.
+        top_n_paths: Number of dominant path groups to evaluate and store.
+        radius: FEFF cluster radius in Å to record in the archive. Defaults to
+            the radius stored in the shards' FEFF config, or ``None`` if absent.
 
     Returns:
         Path to the generated ensemble_results.h5.
@@ -442,9 +463,25 @@ def merge_shards(
     k_ref = overall.k
     ft_overall = xftf_arrays(k_ref, overall.mean, fourier_params)
 
+    resolved_radius: float | None = None
+    if radius is not None:
+        resolved_radius = float(radius)
+    else:
+        shard_radii = [r.radius for r in readers if r.radius is not None]
+        if shard_radii:
+            resolved_radius = float(shard_radii[0])
+            if len({float(x) for x in shard_radii}) > 1:
+                logger.warning(
+                    f"Shards have differing radii {sorted(set(shard_radii))}; "
+                    f"using {resolved_radius}."
+                )
+
     out_path = Path(ensemble_path).resolve()
     with EnsembleWriter(
-        out_path, k_grid=k_ref, fourier_params=fourier_params
+        out_path,
+        k_grid=k_ref,
+        fourier_params=fourier_params,
+        radius=resolved_radius,
     ) as writer:
         writer.set_overall_average(
             k_ref,
@@ -468,34 +505,86 @@ def merge_shards(
                 s_idx, k_ref, avg.mean, n_contributors=avg.n_contributors
             )
 
-        # Top-N composite paths (ADR 0003)
+        # Top-N path groups: exact ensemble-weighted contribution to the average
+        n_tasks = len(all_chis)
+        top_evaluated: list[dict[str, Any]] = []
         if all_paths:
-            grouped = group_path_results(all_paths, r_bin_width=0.15)
-            # Rank by cw_ratio * degeneracy or cw_ratio
-            ranked = sorted(grouped, key=lambda x: x["cw_ratio"], reverse=True)[
-                :top_n_paths
-            ]
+            categories: dict[tuple[tuple[str, ...], int], list[PathResult]] = {}
+            for p in all_paths:
+                cat = (canonical_scatterer_key(p.scatterer), int(p.nlegs))
+                categories.setdefault(cat, []).append(p)
 
-            top_evaluated = []
-            for g in ranked:
-                if g["feff_data"] is not None and g["k"] is not None:
-                    p_chi = path_chi(
-                        k_native=g["k"],
-                        feff_data=g["feff_data"],
-                        r_eff=g["r_eff"],
-                        degeneracy=g["degeneracy"],
-                        k_out=k_ref,
-                        sigma2=g.get("sig2", 0.0),
+            scored: list[tuple[float, tuple[str, ...], int, list[PathResult]]] = []
+            for (canon_scatterer, nlegs), cat_paths in categories.items():
+                for cluster in cluster_path_category(
+                    nlegs, cat_paths, r_bin=0.15, angle_tol=15.0
+                ):
+                    if not cluster:
+                        continue
+                    mean_cw = float(np.mean([p.cw_ratio for p in cluster]))
+                    score = (len(cluster) / n_tasks) * mean_cw
+                    scored.append((score, canon_scatterer, nlegs, cluster))
+            scored.sort(key=lambda x: x[0], reverse=True)
+
+            denom = overall.n_contributors
+            safe_denom = np.where(denom > 0, denom, 1)
+            used_keys: set[str] = set()
+            for _score, canon_scatterer, nlegs, cluster in scored[:top_n_paths]:
+                chi_sum = np.zeros_like(k_ref, dtype=np.float64)
+                for p in cluster:
+                    if len(p.k) == 0:
+                        continue
+                    # Avoid UnivariateSpline extrapolation outside the FEFF k range
+                    in_range = (k_ref >= float(p.k[0]) - 1e-12) & (
+                        k_ref <= float(p.k[-1]) + 1e-12
                     )
-                    ft_p = xftf_arrays(k_ref, p_chi, fourier_params)
-                    g_eval = dict(g)
-                    g_eval["chi"] = p_chi
-                    g_eval["chir_mag"] = ft_p["chir_mag"]
-                    top_evaluated.append(g_eval)
-                else:
-                    top_evaluated.append(g)
+                    if np.any(in_range):
+                        chi_sum[in_range] += path_chi(
+                            k_native=p.k,
+                            feff_data=p.feff_data,
+                            r_eff=p.r_eff,
+                            degeneracy=p.degeneracy,
+                            k_out=k_ref[in_range],
+                            sigma2=p.sig2,
+                        )
+                chi_g = np.where(denom > 0, chi_sum / safe_denom, 0.0)
+                ft_p = xftf_arrays(k_ref, chi_g, fourier_params, warn_uncovered=False)
 
-            writer.add_top_paths(top_evaluated)
+                mean_reff = float(np.mean([p.r_eff for p in cluster]))
+                angles = [
+                    float(p.angle)
+                    for p in cluster
+                    if p.angle is not None and np.isfinite(p.angle)
+                ]
+                mean_angle = float(np.mean(angles)) if angles else None
+                key = make_path_key(
+                    "-".join(canon_scatterer),
+                    nlegs,
+                    mean_reff,
+                    r_bin=0.15,
+                    angle=mean_angle,
+                )
+                if key in used_keys:
+                    key = f"{key}_{len(used_keys)}"
+                used_keys.add(key)
+
+                top_evaluated.append(
+                    {
+                        "path_key": key,
+                        "scatterer": "-".join(canon_scatterer),
+                        "nlegs": nlegs,
+                        "r_eff": mean_reff,
+                        "degeneracy": float(np.mean([p.degeneracy for p in cluster])),
+                        "cw_ratio": float(np.mean([p.cw_ratio for p in cluster])),
+                        "sig2": float(np.mean([p.sig2 for p in cluster])),
+                        "count": len(cluster),
+                        "angle": mean_angle,
+                        "chi": chi_g,
+                        "chir_mag": ft_p["chir_mag"],
+                    }
+                )
+
+        writer.add_top_paths(top_evaluated, n_tasks=n_tasks)
 
     logger.info(f"Consolidated ensemble archive written to {out_path}")
     return out_path

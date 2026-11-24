@@ -6,6 +6,22 @@
 
 - Python 3.10 is no longer supported. Requires Python 3.11 or newer.
 - Requires h5py 3.5 or newer (for the `locking` argument to `h5py.File`).
+- **Breaking:** The ensemble archive format is bumped from version 3 to 4
+  (`ENSEMBLE_VERSION = 4`). Version 2 and 3 archives remain readable through
+  `ArchiveReader`.
+- **Breaking:** `/top_paths/*/chi` in ensemble archives now stores the
+  ensemble-weighted path contribution (per-instance `path_chi` summed and
+  divided by the per-k `n_contributors`), not `path_chi` evaluated on the
+  group-mean parameters. Path contributions therefore keep the disorder damping
+  and sum with `unassigned` to the overall average. `/top_paths` groups paths
+  with angle-aware clustering (`cluster_path_category`), ranks them by
+  ensemble-weighted importance, and stores a per-path `count` and a file-level
+  `top_paths.attrs["n_tasks"]`.
+- **Breaking:** Removed the duplicate `exafs_data.make_path_key` (`SS_`/`MS3_`
+  labels). All callers now use `paths.make_path_key`, which gives labels such as
+  `Cu_2_2.55` and `Cu-Cu_3_3.60_A120`. Keys already stored in old archives are
+  unchanged. `aiida-feff` carries a separate downstream copy of
+  `make_path_key`, which is not updated by this release.
 
 ### Added
 
@@ -13,6 +29,12 @@
   `install_sigterm_handler()` has been called, and `RunStoppedError`.
   `md-exafs pipeline` installs the handler. Library code does not.
 - `BatchShardWriter.flush()`.
+- `EnsembleWriter` stores `radius` in archive metadata. It is threaded from
+  `FeffConfig` through `BatchExecutor`, `write_batch_shard` and `merge_shards`.
+- `ArchiveReader` gains `get_top_paths()`, `n_tasks`, `radius` and
+  `format_version`.
+- `paths.cluster_path_category`, a shared angle-aware clustering helper used by
+  `PathAggregator` and archive path grouping.
 
 ### Fixed
 

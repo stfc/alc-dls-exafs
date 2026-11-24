@@ -26,7 +26,7 @@ from .spectra import resolve_ft_params, xftf_arrays
 logger = logging.getLogger("md_exafs.hdf5")
 
 SHARD_VERSION = 1
-ENSEMBLE_VERSION = 3
+ENSEMBLE_VERSION = 4
 
 _COMPRESS = {"compression": "gzip", "compression_opts": 1, "shuffle": True}
 _ARRAY_DTYPE = np.float32
@@ -157,12 +157,21 @@ class EnsembleWriter:
         output_path: Path | str,
         k_grid: np.ndarray,
         fourier_params: dict[str, Any] | None = None,
+        radius: float | None = None,
     ) -> None:
-        """Initialize EnsembleWriter."""
+        """Initialize EnsembleWriter.
+
+        Args:
+            output_path: Destination HDF5 file.
+            k_grid: Wavenumber grid (Å⁻¹) shared by all stored spectra.
+            fourier_params: Fourier transform parameters; defaults are used if None.
+            radius: FEFF cluster radius (Å) used to build the paths, if known.
+        """
         self.path = Path(output_path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.k_grid = np.asarray(k_grid, dtype=float)
         self.fourier_params = resolve_ft_params(fourier_params)
+        self.radius = float(radius) if radius is not None else None
 
         self._f = h5py.File(self.path, "w", locking=False)
         meta = self._f.create_group("meta")
@@ -170,6 +179,8 @@ class EnsembleWriter:
         meta.attrs["archive_type"] = "ensemble"
         meta.attrs["created_at"] = datetime.now(UTC).isoformat()
         meta.attrs["fourier_params"] = json.dumps(self.fourier_params)
+        if self.radius is not None:
+            meta.attrs["radius"] = self.radius
         meta.create_dataset("k_grid", data=self.k_grid)
 
         self._aggregates = self._f.create_group("aggregates")
@@ -261,8 +272,19 @@ class EnsembleWriter:
             "chir_mag", data=np.asarray(ft_results["chir_mag"], dtype=float)
         )
 
-    def add_top_paths(self, top_paths: list[dict[str, Any]]) -> None:
-        """Store pre-evaluated top-N composite paths (ADR 0003)."""
+    def add_top_paths(
+        self,
+        top_paths: list[dict[str, Any]],
+        n_tasks: int | None = None,
+    ) -> None:
+        """Store pre-evaluated top-N composite paths (ADR 0003).
+
+        Args:
+            top_paths: Path dicts with metadata attrs and optional ``chi``/``chir_mag``.
+            n_tasks: Number of tasks (snapshots x absorbers) behind the averages.
+        """
+        if n_tasks is not None:
+            self._top_paths_grp.attrs["n_tasks"] = int(n_tasks)
         for i, p in enumerate(top_paths):
             pkey = p.get("path_key", f"path_{i:04d}")
             pgrp = self._top_paths_grp.create_group(f"path_{i:04d}")
@@ -273,6 +295,10 @@ class EnsembleWriter:
             pgrp.attrs["degeneracy"] = float(p.get("degeneracy", 1.0))
             pgrp.attrs["cw_ratio"] = float(p.get("cw_ratio", 0.0))
             pgrp.attrs["sig2"] = float(p.get("sig2", 0.0))
+            pgrp.attrs["count"] = int(p.get("count", 0))
+            angle = p.get("angle")
+            if angle is not None and np.isfinite(angle):
+                pgrp.attrs["angle"] = float(angle)
 
             if "chi" in p:
                 pgrp.create_dataset(
@@ -320,7 +346,42 @@ class ArchiveReader:
             meta = f["meta"].attrs if "meta" in f else {}
             version = meta.get("format_version", 0)
             atype = _as_str(meta.get("archive_type", ""))
-            return version in (2, ENSEMBLE_VERSION) or atype == "ensemble"
+            return version in (2, 3, ENSEMBLE_VERSION) or atype == "ensemble"
+
+    @property
+    def format_version(self) -> int | None:
+        """Archive format version recorded in the metadata, if any."""
+        with self._open() as f:
+            if "meta" in f and "format_version" in f["meta"].attrs:
+                return int(f["meta"].attrs["format_version"])
+            return None
+
+    @property
+    def radius(self) -> float | None:
+        """FEFF cluster radius (Å), from metadata or the stored FEFF config."""
+        with self._open() as f:
+            if "meta" not in f:
+                return None
+            meta = f["meta"].attrs
+            val = meta.get("radius")
+            if val is not None:
+                return float(val)
+            raw = meta.get("feff_config")
+            if raw is not None:
+                cfg = json.loads(_as_str(raw))
+                if cfg.get("radius") is not None:
+                    return float(cfg["radius"])
+            return None
+
+    @property
+    def n_tasks(self) -> int | None:
+        """Number of tasks (snapshots x absorbers) behind the stored averages."""
+        with self._open() as f:
+            if "top_paths" in f and "n_tasks" in f["top_paths"].attrs:
+                return int(f["top_paths"].attrs["n_tasks"])
+            if "meta" in f and "n_tasks" in f["meta"].attrs:
+                return int(f["meta"].attrs["n_tasks"])
+            return None
 
     @property
     def is_shard(self) -> bool:
@@ -487,6 +548,32 @@ class ArchiveReader:
                 out["chir_mag"] = np.array(grp["chir_mag"])
             if "n_contributors" in grp:
                 out["n_contributors"] = np.array(grp["n_contributors"])
+            return out
+
+    def get_top_paths(self) -> list[dict[str, Any]]:
+        """Return the stored top paths, one dict per ``/top_paths`` group."""
+        with self._open() as f:
+            if "top_paths" not in f:
+                return []
+            top = f["top_paths"]
+            out: list[dict[str, Any]] = []
+            for name in sorted(top.keys()):
+                pgrp = top[name]
+                entry: dict[str, Any] = {}
+                for key, val in pgrp.attrs.items():
+                    if isinstance(val, bytes | str):
+                        entry[key] = _as_str(val)
+                    elif isinstance(val, np.integer):
+                        entry[key] = int(val)
+                    elif isinstance(val, np.floating):
+                        entry[key] = float(val)
+                    else:
+                        entry[key] = val
+                if "chi" in pgrp:
+                    entry["chi"] = np.array(pgrp["chi"])
+                if "chir_mag" in pgrp:
+                    entry["chir_mag"] = np.array(pgrp["chir_mag"])
+                out.append(entry)
             return out
 
     def iter_paths(self) -> Iterator[PathResult]:

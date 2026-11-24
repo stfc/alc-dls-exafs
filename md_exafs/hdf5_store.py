@@ -510,7 +510,7 @@ class ExafsHDF5Store:
         (up to 1024× redundant work per chunk, per array).  Reading a full
         block at once decompresses each chunk exactly once.
         """
-        from .exafs_data import make_path_key
+        from .paths import make_path_key
 
         path_res = self._h5.get("path_results")
         if path_res is None or "chi" not in path_res:
@@ -562,7 +562,16 @@ class ExafsHDF5Store:
                 r_eff = float(r_effs[i])
                 nlegs = int(nlegs_arr[i])
                 scatterer = scatterers[i]
-                path_key = make_path_key(scatterer, nlegs, r_eff)
+                # NaN sentinel (used for HDF5 storage, which has no native
+                # "missing" for float datasets) is converted back to None
+                # here so all in-memory/dict representations of "no angle"
+                # (2-/4-leg paths, or angle extraction failures) agree.
+                angle = (
+                    float(angles[i])
+                    if angles is not None and np.isfinite(angles[i])
+                    else None
+                )
+                path_key = make_path_key(scatterer, nlegs, r_eff, angle=angle)
 
                 info = {
                     "k": pk,
@@ -572,15 +581,7 @@ class ExafsHDF5Store:
                     "degeneracy": float(degeneracies[i]),
                     "scatterer": scatterer,
                     "cw_ratio": float(cw_ratios[i]),
-                    # NaN sentinel (used for HDF5 storage, which has no native
-                    # "missing" for float datasets) is converted back to None
-                    # here so all in-memory/dict representations of "no angle"
-                    # (2-/4-leg paths, or angle extraction failures) agree.
-                    "angle": (
-                        float(angles[i])
-                        if angles is not None and np.isfinite(angles[i])
-                        else None
-                    ),
+                    "angle": angle,
                     # Provenance included directly so callers need not copy the
                     # dict just to attach these.
                     "frame_index": frame_index,

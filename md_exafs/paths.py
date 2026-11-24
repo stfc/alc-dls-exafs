@@ -7,15 +7,18 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 
 from .constants import ETOK
 
 logger = logging.getLogger("md_exafs.paths")
+
+T = TypeVar("T")
 
 FEFF_DATA_COLS: tuple[str, ...] = (
     "real_phc",
@@ -370,9 +373,73 @@ def group_paths_by_key(
     return dict(groups)
 
 
+def _item_value(item: Any, name: str) -> Any:
+    """Read ``name`` from a dict item or an attribute-bearing object."""
+    if isinstance(item, dict):
+        return item.get(name)
+    return getattr(item, name, None)
+
+
+def _usable_angle(item: Any) -> bool:
+    angle = _item_value(item, "angle")
+    return angle is not None and bool(np.isfinite(angle))
+
+
+def cluster_path_category(
+    nlegs: int,
+    items: Sequence[T],
+    *,
+    r_bin: float = 0.15,
+    angle_tol: float = 15.0,
+) -> list[list[T]]:
+    """Split one (scatterer, nlegs) category into path populations.
+
+    Non-3-leg paths are gap-clustered on ``r_eff``. 3-leg paths are clustered by
+    angle first, then by ``r_eff`` within each angle cluster; items without a
+    usable (finite) angle fall back to ``r_eff``-only clustering as their own
+    sub-population.
+
+    Args:
+        nlegs: Number of path legs shared by all ``items``.
+        items: Dicts with ``r_eff`` / ``angle`` keys, or objects with those
+            attributes (e.g. :class:`PathResult`).
+        r_bin: Gap tolerance for ``r_eff`` clustering in Å.
+        angle_tol: Gap tolerance for angle clustering in degrees.
+
+    Returns:
+        List of clusters, each a list of the original items.
+    """
+    from .debye_waller import cluster_1d_sorted
+
+    if not items:
+        return []
+
+    if nlegs != 3:
+        r_effs = np.array([float(_item_value(s, "r_eff")) for s in items])
+        return [[items[i] for i in idx] for idx in cluster_1d_sorted(r_effs, r_bin)]
+
+    with_angle = [s for s in items if _usable_angle(s)]
+    without_angle = [s for s in items if not _usable_angle(s)]
+
+    clusters: list[list[T]] = []
+    if with_angle:
+        angles = np.array([float(_item_value(s, "angle")) for s in with_angle])
+        for angle_idx in cluster_1d_sorted(angles, angle_tol):
+            angle_cluster = [with_angle[i] for i in angle_idx]
+            r_effs = np.array([float(_item_value(s, "r_eff")) for s in angle_cluster])
+            for dist_idx in cluster_1d_sorted(r_effs, r_bin):
+                clusters.append([angle_cluster[i] for i in dist_idx])
+    if without_angle:
+        r_effs = np.array([float(_item_value(s, "r_eff")) for s in without_angle])
+        for idx in cluster_1d_sorted(r_effs, r_bin):
+            clusters.append([without_angle[i] for i in idx])
+    return clusters
+
+
 __all__ = [
     "FEFF_DATA_COLS",
     "PathResult",
+    "cluster_path_category",
     "make_path_key",
     "parse_files_dat",
     "read_feff_path_dat",
