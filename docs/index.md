@@ -106,5 +106,6 @@ interactive/nanoparticle_builder
 architecture
 cli
 python_api
+analysis
 ecosystem
 ```

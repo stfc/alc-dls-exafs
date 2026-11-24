@@ -58,7 +58,7 @@ We resolve this tension through a hybrid storage scheme:
   Each surviving scattering path is stored using its raw 6-column FEFF scattering factors: (i) central-atom phase shift `real_phc`, (ii) backscattering magnitude `mag_feff`, (iii) backscattering phase shift `pha_feff`, (iv) reduction factor `red_fact`, (v) mean free path `lam`, and (vi) real momentum `rep`. These are saved on FEFF's native coarse $k$-grid alongside geometric attributes ($R_\text{eff}$, leg count $N_\text{legs}$, degeneracy $N$, scatterer label, amplitude ratio `cw_ratio`, and $\sigma^2$). Because the raw parameters are preserved, one can recompute $\chi(k)$ with modified values of $S_0^2$, $\sigma^2$, or $\Delta E_0$ without re-running FEFF.
 
 - **Ensemble-averaged paths (ensemble archive only)**:
-  For the top-$N$ composite paths (defaulting to 25), the archive additionally stores pre-evaluated $\chi(k)$ and $|\tilde{\chi}(R)|$ arrays on the standard fine grids. This enables instant rendering in visualisation widgets and CLI plots without reconstruction latency.
+  Path instances are clustered into groups by scatterer, leg count, $R_\text{eff}$ and (for 3-leg paths) the reversal-invariant angle. For the top-$N$ groups (defaulting to 25, ranked by $(\text{count}/N_\text{tasks}) \times \overline{\text{cw\_ratio}}$), the archive stores the group's **ensemble-weighted contribution** to $\chi(k)$ on the standard fine grid, together with its $|\tilde{\chi}(R)|$. Each instance's `path_chi` is evaluated with its own $R_\text{eff}$ and $\sigma^2$, summed, and divided by the per-$k$ contributor count. Disorder damping is therefore preserved, and the stored contributions sum with `unassigned` to the overall average. Stored paths are often only a subset of the spectrum, so `unassigned` is the residual that makes up the difference. This enables instant rendering and attribution without reconstruction latency.
 
 ---
 
@@ -90,6 +90,9 @@ Molecular dynamics simulations often feature variable ordering, reactive events,
     created_at      = ISO-8601 string
     threshold       = float
     k_grid          = float64[N]
+    n_tasks         = int (tasks written to the shard)
+    feff_config     = JSON string (optional; present when a FeffConfig was
+                      supplied, and includes "radius", the FEFF cluster radius in Å)
 /tasks/
     frame_0000_site_0000/
         attrs: frame_idx, site_idx, absorber_element
@@ -102,29 +105,38 @@ Molecular dynamics simulations often feature variable ordering, reactive events,
             degeneracy    = float64[P]
             cw_ratio      = float64[P]
             sig2          = float64[P]
+            angle         = float64[P] (3-body angle in degrees; -1 where absent)
             scatterer     = str[P]
 ```
 
 ### Ensemble archive (`ensemble_results.h5`)
 ```
 /meta/
-    format_version  = 2
+    format_version  = 4
     archive_type    = "ensemble"
     fourier_params  = JSON string
     k_grid          = float64[N]
+    radius          = float (optional; FEFF cluster radius in Å)
 /aggregates/
     overall_average/
         k, chi, chi_std, r, chir_mag, chir_re, chir_im
+        n_contributors = int32[N] (per-k count of contributing tasks)
     frame_averages/
         frame_0000/ ... frame_NNNN/
+            k, chi, r, chir_mag, n_contributors
     site_averages/
         site_0000/ ... site_MMMM/
+            k, chi, r, chir_mag, n_contributors
 /top_paths/
+    attrs: n_tasks (tasks behind the averages)
     path_0000/ ... path_0024/
-        attrs: path_key, scatterer, nlegs, r_eff, degeneracy, cw_ratio, sig2
-        chi         = float32[N]
-        chir_mag    = float32[K]
+        attrs: path_key, scatterer, nlegs, r_eff, degeneracy, cw_ratio, sig2,
+               count (instances in the group), angle (optional, degrees)
+        chi         = float32[N] (ensemble-weighted contribution, see section 3)
+        chir_mag    = float32[K] (|FT| of chi)
 ```
+
+Format version 4 supersedes 3 and 2; readers still accept v2 and v3 archives. In v3 and earlier, `/top_paths/*/chi` held the group-mean path evaluated on the group's mean geometry, so it does not sum with `unassigned` to the overall average. Version 4 records the radius and the per-k contributor counts, and it stores the ensemble-weighted contributions.
 
 ---
 
