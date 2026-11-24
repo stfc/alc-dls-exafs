@@ -122,13 +122,14 @@ def _resolve_rrange(
 ) -> tuple[float, float]:
     if rrange is None:
         rmin, rmax = DEFAULT_RRANGE
-        return (rmin, rmax if rmax_valid is None else min(rmax, rmax_valid))
-    try:
-        rmin, rmax = (float(v) for v in rrange)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"rrange must be (rmin, rmax), got {rrange!r}") from exc
+        rmax = rmax if rmax_valid is None else min(rmax, rmax_valid)
+    else:
+        try:
+            rmin, rmax = (float(v) for v in rrange)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"rrange must be (rmin, rmax), got {rrange!r}") from exc
     if not (math.isfinite(rmin) and math.isfinite(rmax) and 0.0 <= rmin < rmax):
-        raise ValueError(f"rrange must satisfy 0 <= rmin < rmax, got {rrange!r}")
+        raise ValueError(f"rrange must satisfy 0 <= rmin < rmax, got {(rmin, rmax)!r}")
     return rmin, rmax
 
 
@@ -455,7 +456,10 @@ def _optimise(
                 par.stderr *= np.sqrt(err_scale)
         covar = covar * err_scale
         stats["correlations"] = _correlations(list(result.var_names), covar)
-        stats["stderr"] = {n: _number(result.params[n].stderr) for n in VARY_NAMES}
+        stats["stderr"] = {
+            n: (_number(result.params[n].stderr) if n in setup.vary else None)
+            for n in VARY_NAMES
+        }
     values = {n: float(result.params[n].value) for n in VARY_NAMES}
     return values, stats
 
@@ -596,4 +600,20 @@ def fit_ensemble(
     }
 
 
-__all__ = ["FIT_SCHEMA_VERSION", "fit_ensemble"]
+from .fit_static import (  # noqa: E402
+    PooledPath,
+    fit_static,
+    pool_paths,
+    static_paths,
+    to_feffit_path,
+)
+
+__all__ = [
+    "FIT_SCHEMA_VERSION",
+    "PooledPath",
+    "fit_ensemble",
+    "fit_static",
+    "pool_paths",
+    "static_paths",
+    "to_feffit_path",
+]

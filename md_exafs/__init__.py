@@ -7,7 +7,7 @@ from .attribution import group_sites, peak_attribution
 from .constants import ETOK, HBAR2_OVER_2M_EV_ANGSTROM2
 from .exafs_data import PathAggregator, PathContribution
 from .feff_input import FeffConfig, build_feff_inp, normalize_tag
-from .fit import fit_ensemble
+from .fit import fit_ensemble, fit_static
 from .hdf5 import (
     ArchiveReader,
     BatchShardReader,
@@ -53,6 +53,7 @@ __all__ = [
     "group_sites",
     "peak_attribution",
     "fit_ensemble",
+    "fit_static",
     "series_to_vega_lite",
     "InvalidFtParamsError",
     "average_chi_arrays",

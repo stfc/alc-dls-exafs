@@ -68,6 +68,14 @@
   projections that sum to 1 with an explicit `unassigned` component, leave-one-out
   peak deltas, peak windows between neighbouring minima with shoulder detection,
   and hierarchical clustering of sites by their complex $\chi(R)$ spectra.
+- `md_exafs.fit_static` (re-exported via `md_exafs.fit` and `md_exafs.fit_static`):
+  conventional single-structure Larch `feffit` fitting (Fit B) using
+  complete-linkage exact complex-sum path pooling (`pool_paths`), synthetic
+  `FeffPathGroup` adapters (`to_feffit_path`), multi-absorber static FEFF path
+  collection (`static_paths`), thermal-only MD Debye–Waller factors
+  (`sigma2_thermal_A2` via `match_paths_within_tolerance`, dropping and flagging
+  unmatched MS paths), isotropic or per-shell $\Delta R$ modes, static
+  path-truncation diagnostics, and side-by-side Fit A / B0 / Fit B comparisons.
 
 ### Fixed
 
