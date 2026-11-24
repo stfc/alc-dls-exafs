@@ -6,6 +6,7 @@ from .archive_series import InvalidFtParamsError, archive_series
 from .constants import ETOK, HBAR2_OVER_2M_EV_ANGSTROM2
 from .exafs_data import PathAggregator, PathContribution
 from .feff_input import FeffConfig, build_feff_inp, normalize_tag
+from .fit import fit_ensemble
 from .hdf5 import (
     ArchiveReader,
     BatchShardReader,
@@ -48,6 +49,7 @@ __all__ = [
     "make_path_key",
     "xftf_arrays",
     "archive_series",
+    "fit_ensemble",
     "series_to_vega_lite",
     "InvalidFtParamsError",
     "average_chi_arrays",

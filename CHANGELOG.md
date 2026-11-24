@@ -54,6 +54,13 @@
   `format_version`.
 - `paths.cluster_path_category`, a shared angle-aware clustering helper used by
   `PathAggregator` and archive path grouping.
+- `md_exafs.fit.fit_ensemble` (also re-exported as `md_exafs.fit_ensemble`) fits
+  global $S_0^2$ and $\Delta E_0$ to an ensemble archive's overall $\chi(k)$
+  against experimental data over several $k$-weights (default `(1, 2, 3)`) in
+  R-, k-, or q-space. It uses Larch's `TransformGroup`, per-$k$-weight
+  `estimate_noise` normalization, and $\chi^2$ and uncertainty rescaling matched
+  to Larch's $N_{\mathrm{idp}}$. It returns a versioned, JSON-safe report with
+  R-factors and aligned theory and experiment curves.
 
 ### Fixed
 
