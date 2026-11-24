@@ -22,6 +22,12 @@
   `Cu_2_2.55` and `Cu-Cu_3_3.60_A120`. Keys already stored in old archives are
   unchanged. `aiida-feff` carries a separate downstream copy of
   `make_path_key`, which is not updated by this release.
+- **Breaking:** The $\Delta E_0$ sign convention is fixed in
+  `experimental.shifted_k_mask` and `experimental.scaled_chi_arrays`. Both now
+  use $k^2 + \Delta E_0 / (\hbar^2/2m_e)$, matching `paths.path_chi` and Larch's
+  `feffdat._calc_chi`; the previous sign was opposite to both. Downstream `aiida-feff` and
+  `aiidalab-exafs` code that applies `e0_shift` through these functions must be
+  checked and updated, because results for a nonzero `e0_shift` change.
 
 ### Added
 
@@ -31,6 +37,19 @@
 - `BatchShardWriter.flush()`.
 - `EnsembleWriter` stores `radius` in archive metadata. It is threaded from
   `FeffConfig` through `BatchExecutor`, `write_batch_shard` and `merge_shards`.
+- `experimental.read_experimental_spectrum` accepts a Larch `Group`, a dict
+  (`{"k", "chi"}` or `{"energy", "mu"}`), or a 2-tuple, in addition to file
+  paths. A 2-tuple is read as `(k, chi)` unless `kind="energy_mu"` is given.
+- `archive_series` accepts `experiment=`, `s02=` and `e0_shift=`. An
+  `experiment` entry is added in the same shape as `overall`. When `s02` or
+  `e0_shift` is set, a `comparison` block holds
+  `{"s02", "e0_shift", "overall_adjusted"}`. `overall` stays raw, so the schema
+  version is unchanged.
+- `archive_series` reports `ft_limits["rmax_valid"]` (the archive `radius` minus
+  0.5 Å) and adds a structured warning when the requested `rmax` exceeds it.
+- `viz.series_to_vega_lite` overlays `experiment` as a dashed line in the
+  `chi_k` and `chi_r` views, and plots `comparison["overall_adjusted"]` when it
+  is present.
 - `ArchiveReader` gains `get_top_paths()`, `n_tasks`, `radius` and
   `format_version`.
 - `paths.cluster_path_category`, a shared angle-aware clustering helper used by

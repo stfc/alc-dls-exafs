@@ -19,7 +19,8 @@ from md_exafs.archive_series import (
     InvalidFtParamsError,
     archive_series,
 )
-from md_exafs.spectra import average_chi_arrays, xftf_arrays
+from md_exafs.experimental import scaled_chi_arrays
+from md_exafs.spectra import average_chi_arrays, resample_chi, xftf_arrays
 from md_exafs.viz import ViewUnavailableError, series_to_vega_lite
 
 K = np.arange(0.05, 16.0, 0.05)
@@ -40,6 +41,7 @@ def _archive(
     keep: Callable[[np.ndarray], np.ndarray] = lambda k: k > 0,
     n_frames: int = 3,
     n_sites: int = 2,
+    radius: float | None = 7.0,
 ) -> Path:
     """Archive whose spectra cover the k-points selected by ``keep``."""
     k_of, chi_of = {}, {}
@@ -54,7 +56,7 @@ def _archive(
         )
 
     overall = avg(list(k_of))
-    with EnsembleWriter(path, k_grid=K, fourier_params=FT) as w:
+    with EnsembleWriter(path, k_grid=K, fourier_params=FT, radius=radius) as w:
         w.set_overall_average(
             overall.k,
             overall.mean,
@@ -310,6 +312,72 @@ def test_kmin_below_data_warns(tmp_path: Path):
     path = _archive(tmp_path / "high.h5", keep=lambda k: k >= 2.0)
     series = archive_series(path, ft_params={"kmin": 1.0})
     assert [w["param"] for w in series["ft_warnings"]] == ["kmin"]
+
+
+# --- experimental overlay and rmax_valid -----------------------------------
+
+
+def test_experiment_overlay_comparison_and_rmax_valid(archive: Path, tmp_path: Path):
+    import h5py
+
+    exp_k = np.arange(0.05, 15.0, 0.05)
+    exp_chi = 0.85 * np.sin(2 * exp_k * R0) / (exp_k * R0**2)
+    request = {"kweight": 2, "rmax": 5.5}
+    series = archive_series(
+        archive,
+        experiment={"k": exp_k, "chi": exp_chi},
+        s02=0.85,
+        e0_shift=4.0,
+        ft_params=request,
+    )
+    json.dumps(series, allow_nan=False)
+    assert series["schema_version"] == 1
+    reader = ArchiveReader(archive)
+    ft = series["ft_params"]
+
+    exp = xftf_arrays(exp_k, exp_chi, ft)
+    np.testing.assert_allclose(series["experiment"]["r"], exp["r"], rtol=1e-10)
+    np.testing.assert_allclose(
+        series["experiment"]["chir_mag"], exp["chir_mag"], rtol=1e-10, atol=1e-12
+    )
+
+    raw = archive_series(archive, ft_params=request)["overall"]
+    assert series["overall"] == raw
+    comparison = series["comparison"]
+    assert comparison["s02"] == 0.85 and comparison["e0_shift"] == 4.0
+    k_adj, chi_adj = scaled_chi_arrays(reader.k, reader.chi, s02=0.85, e0_shift=4.0)
+    adj = xftf_arrays(reader.k, resample_chi(k_adj, chi_adj, reader.k), ft)
+    np.testing.assert_allclose(
+        comparison["overall_adjusted"]["chir_mag"], adj["chir_mag"], rtol=1e-10
+    )
+
+    assert series["ft_limits"]["rmax_valid"] == pytest.approx(6.5)
+    for view, label in (("chi_k", "experiment"), ("chi_r", "experiment |χ(R)|")):
+        spec = series_to_vega_lite(series, view=view)
+        json.dumps(spec, allow_nan=False)
+        labels = {row.get("path") for rows in spec["datasets"].values() for row in rows}
+        assert label in labels
+
+    beyond = archive_series(archive, ft_params={"rmax": 7.0})
+    assert any(w["code"] == "rmax_beyond_valid" for w in beyond["ft_warnings"])
+
+    no_radius = _archive(tmp_path / "no_radius.h5", radius=None)
+    bare = archive_series(no_radius)
+    assert bare["ft_limits"]["rmax_valid"] is None
+    assert any("radius" in w for w in bare["warnings"])
+
+    stripped = _archive(tmp_path / "stripped.h5")
+    with h5py.File(stripped, "r+") as f:
+        del f["meta"].attrs["fourier_params"]
+    recomputed = archive_series(stripped, experiment={"k": exp_k, "chi": exp_chi})
+    stripped_reader = ArchiveReader(stripped)
+    np.testing.assert_allclose(
+        recomputed["overall"]["r"],
+        xftf_arrays(stripped_reader.k, stripped_reader.chi, recomputed["ft_params"])[
+            "r"
+        ],
+        rtol=1e-10,
+    )
 
 
 # --- Vega-Lite --------------------------------------------------------------

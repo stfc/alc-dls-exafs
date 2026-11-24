@@ -25,10 +25,17 @@ from typing import Any
 
 import numpy as np
 
+from .experimental import read_experimental_spectrum, scaled_chi_arrays
 from .hdf5 import ArchiveReader
-from .spectra import FT_WINDOWS, resolve_ft_params, xftf_arrays
+from .spectra import FT_WINDOWS, resample_chi, resolve_ft_params, xftf_arrays
 
 SCHEMA_VERSION = 1
+
+# Distance (A) subtracted from the FEFF cluster radius to get the largest R
+# where chi(R) is trustworthy: peaks sit about this far below the true
+# distance because of the scattering phase shift, so a shell at the cluster
+# edge shows up inside it.
+PHASE_SHIFT_ALLOWANCE_A = 0.5
 
 # Breakdown sections ``include`` can request. The overall average is always read.
 SECTIONS = ("sites", "frames")
@@ -328,6 +335,9 @@ def archive_series(
     max_frames: int = 20,
     max_sites: int = 50,
     include: Collection[str] = (),
+    experiment: Any = None,
+    s02: float = 1.0,
+    e0_shift: float = 0.0,
 ) -> dict[str, Any]:
     """Read an ensemble archive into a plot-ready, JSON-safe series.
 
@@ -344,22 +354,46 @@ def archive_series(
         include: Breakdowns to read, a subset of :data:`SECTIONS`. The overall
             average is always read. A section left out keeps its ``total`` and
             comes back with no spectra, and none of its data is read.
+        experiment: Experimental spectrum to overlay: anything
+            :func:`md_exafs.experimental.read_experimental_spectrum` accepts
+            (a path, a Larch ``Group``, a dict with ``k``/``chi`` or
+            ``energy``/``mu``, or a ``(k, chi)`` tuple). It is transformed with
+            the same Fourier-transform parameters as ``overall``; when the
+            archive stores none, ``overall`` is recomputed with the defaults so
+            both share them. ``None`` omits the ``experiment`` entry.
+        s02: Amplitude factor applied to the simulated spectrum for the
+            ``comparison`` block only. Must be finite and positive.
+        e0_shift: Energy shift (eV) applied to the simulated spectrum for the
+            ``comparison`` block only, as in
+            :func:`md_exafs.experimental.scaled_chi_arrays`. Must be finite.
+            The experiment is never adjusted.
 
     Returns:
         A dict with ``schema_version``, ``units``, ``ft_params`` (the resolved
         parameters used), ``ft_params_source`` (``"archive"`` or ``"request"``),
         ``ft_defaults`` (the archive's stored parameters), ``ft_limits`` (what a
-        UI can offer: k with data, k-weights, windows, R_max cap),
-        ``ft_warnings`` (structured), ``source``, ``overall``, ``sites``,
-        ``frames`` and ``warnings``. Non-finite values are ``None``.
+        UI can offer: k with data, k-weights, windows, R_max cap, and
+        ``rmax_valid``, the largest trustworthy R from the FEFF cluster radius
+        or ``None`` when the archive records none), ``ft_warnings``
+        (structured), ``source``, ``overall`` (always raw, never adjusted),
+        ``sites``, ``frames`` and ``warnings``. When ``experiment`` is given,
+        ``experiment`` has the same shape as ``overall``. When ``s02`` or
+        ``e0_shift`` differ from their defaults, ``comparison`` holds ``s02``,
+        ``e0_shift`` and ``overall_adjusted``. Non-finite values are ``None``.
 
     Raises:
         FileNotFoundError: ``path`` does not exist.
         InvalidFtParamsError: ``ft_params`` is unusable (a ``ValueError``).
-        ValueError: Not an ensemble archive, no overall average, or bad parameters.
+        ValueError: Not an ensemble archive, no overall average, or bad
+            parameters (including a non-finite or non-positive ``s02`` or a
+            non-finite ``e0_shift``).
     """
     if max_frames < 0 or max_sites < 0:
         raise ValueError("max_frames and max_sites must be non-negative")
+    if not _finite_number(s02) or s02 <= 0:
+        raise ValueError(f"s02 must be a finite number > 0, got {s02!r}")
+    if not _finite_number(e0_shift):
+        raise ValueError(f"e0_shift must be a finite number, got {e0_shift!r}")
     unknown_sections = sorted(set(include) - set(SECTIONS))
     if unknown_sections:
         raise ValueError(
@@ -387,9 +421,39 @@ def archive_series(
     else:
         ft = _resolve_ft_request(ft_params, defaults)
         source, recompute = "request", True
+    if experiment is not None and not stored:
+        recompute = True
 
+    radius = reader.radius
+    rmax_valid: float | None = (
+        max(0.0, float(radius - PHASE_SHIFT_ALLOWANCE_A))
+        if radius is not None
+        else None
+    )
     overall_limits = _coverage_limits(overall_raw)
+    overall_limits["rmax_valid"] = rmax_valid
     ft_warnings = _ft_data_warnings(ft, overall_limits)
+    if rmax_valid is None:
+        warnings.append(
+            "The archive records no FEFF cluster radius, so rmax_valid cannot "
+            "be determined."
+        )
+    elif ft["rmax"] > rmax_valid:
+        ft_warnings.append(
+            {
+                "code": "rmax_beyond_valid",
+                "section": "overall",
+                "param": "rmax",
+                "value": ft["rmax"],
+                "data_limit": rmax_valid,
+                "message": f"rmax={ft['rmax']:g} A lies above rmax_valid="
+                f"{rmax_valid:g} A (FEFF cluster radius {radius:g} A minus a "
+                f"{PHASE_SHIFT_ALLOWANCE_A:g} A phase-shift allowance). chi(R) "
+                "beyond it is not reliable because the cluster is truncated "
+                "there; lower rmax to at most "
+                f"{rmax_valid:g} A.",
+            }
+        )
     sites, site_raw = _section(
         "sites",
         reader.site_indices,
@@ -410,9 +474,47 @@ def archive_series(
     )
     ft_warnings += _section_ft_warnings("sites", site_raw, ft)
     ft_warnings += _section_ft_warnings("frames", frame_raw, ft)
+
+    experiment_entry: dict[str, Any] | None = None
+    if experiment is not None:
+        exp_k, exp_chi, _exp_meta = read_experimental_spectrum(experiment)
+        exp_raw = {"k": exp_k, "chi": exp_chi}
+        experiment_entry = _spectrum(
+            _with_transform(exp_raw, ft, recompute=True), ft["kweight"]
+        )
+        for w in _ft_data_warnings(ft, _coverage_limits(exp_raw)):
+            ft_warnings.append(
+                {
+                    **w,
+                    "section": "experiment",
+                    "message": w["message"].replace(
+                        "overall average", "experimental spectrum"
+                    ),
+                }
+            )
+
+    comparison: dict[str, Any] | None = None
+    if float(s02) != 1.0 or float(e0_shift) != 0.0:
+        k_overall = np.asarray(overall_raw["k"], dtype=float)
+        k_adj, chi_adj = scaled_chi_arrays(
+            k_overall,
+            overall_raw["chi"],
+            s02=float(s02),
+            e0_shift=float(e0_shift),
+        )
+        finite = np.isfinite(chi_adj)
+        chi_adj_grid = resample_chi(k_adj[finite], chi_adj[finite], k_overall)
+        adj_raw = {"k": k_overall, "chi": chi_adj_grid}
+        comparison = {
+            "s02": float(s02),
+            "e0_shift": float(e0_shift),
+            "overall_adjusted": _spectrum(
+                _with_transform(adj_raw, ft, recompute=True), ft["kweight"]
+            ),
+        }
     warnings.extend(w["message"] for w in ft_warnings)
 
-    return {
+    result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "units": _units(ft["kweight"]),
         "ft_params": ft,
@@ -428,12 +530,18 @@ def archive_series(
         "frames": frames,
         "warnings": warnings,
     }
+    if experiment_entry is not None:
+        result["experiment"] = experiment_entry
+    if comparison is not None:
+        result["comparison"] = comparison
+    return result
 
 
 __all__ = [
     "FT_REQUEST_KEYS",
     "InvalidFtParamsError",
     "KWEIGHTS",
+    "PHASE_SHIFT_ALLOWANCE_A",
     "RMAX_MAX",
     "SCHEMA_VERSION",
     "SECTIONS",
