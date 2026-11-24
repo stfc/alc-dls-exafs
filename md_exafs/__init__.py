@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from .archive_series import InvalidFtParamsError, archive_series
+from .attribution import group_sites, peak_attribution
 from .constants import ETOK, HBAR2_OVER_2M_EV_ANGSTROM2
 from .exafs_data import PathAggregator, PathContribution
 from .feff_input import FeffConfig, build_feff_inp, normalize_tag
@@ -49,6 +50,8 @@ __all__ = [
     "make_path_key",
     "xftf_arrays",
     "archive_series",
+    "group_sites",
+    "peak_attribution",
     "fit_ensemble",
     "series_to_vega_lite",
     "InvalidFtParamsError",

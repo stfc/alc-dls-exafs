@@ -61,6 +61,13 @@
   `estimate_noise` normalization, and $\chi^2$ and uncertainty rescaling matched
   to Larch's $N_{\mathrm{idp}}$. It returns a versioned, JSON-safe report with
   R-factors and aligned theory and experiment curves.
+- `md_exafs.attribution.peak_attribution` and `md_exafs.attribution.group_sites`
+  (also re-exported at top-level `md_exafs`): decomposes $\chi(R)$ peaks by
+  scattering path (`by="paths"`, requiring archive format version 4), absorber
+  site (`by="sites"`), or site group (`by="site_groups"`), reporting signed
+  projections that sum to 1 with an explicit `unassigned` component, leave-one-out
+  peak deltas, peak windows between neighbouring minima with shoulder detection,
+  and hierarchical clustering of sites by their complex $\chi(R)$ spectra.
 
 ### Fixed
 
