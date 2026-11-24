@@ -24,6 +24,7 @@ from larch import Group
 from larch.math import realimag
 from larch.xafs.feffit import FeffitDataSet, TransformGroup
 from lmfit import Minimizer, Parameters  # type: ignore[import-untyped]
+from scipy.optimize import minimize
 
 from .archive_series import (
     KWEIGHT_RANGE,
@@ -600,6 +601,253 @@ def fit_ensemble(
     }
 
 
+def _group_list(groups: Any) -> list[dict[str, Any]]:
+    """Validate and return the ``groups`` list of a ``group_sites`` result."""
+    grp_list = groups.get("groups") if isinstance(groups, dict) else None
+    if not isinstance(grp_list, list) or not grp_list:
+        raise ValueError(
+            "groups must be the output of group_sites with a non-empty 'groups' list"
+        )
+    for g in grp_list:
+        spectrum = g.get("spectrum") if isinstance(g, dict) else None
+        if (
+            not isinstance(spectrum, dict)
+            or any(key not in g for key in ("group_id", "site_indices", "weight"))
+            or "k" not in spectrum
+            or "chi" not in spectrum
+        ):
+            raise ValueError(
+                "Each group needs 'group_id', 'site_indices', 'weight' and a "
+                "'spectrum' with 'k' and 'chi'"
+            )
+    return grp_list
+
+
+def _simplex_least_squares(a: np.ndarray, y: np.ndarray, w0: np.ndarray) -> Any:
+    """Minimise ``0.5 * ||a @ w - y||^2`` over ``w >= 0``, ``sum(w) == 1``."""
+    n = len(w0)
+    scale = float(np.linalg.norm(y))
+    if scale > 0:
+        a, y = a / scale, y / scale
+
+    def objective(w: np.ndarray) -> tuple[float, np.ndarray]:
+        # Accelerate-backed numpy raises spurious FP warnings from matmul on
+        # finite input.
+        with np.errstate(all="ignore"):
+            resid = a @ w - y
+            return 0.5 * float(resid @ resid), a.T @ resid
+
+    return minimize(
+        objective,
+        x0=w0,
+        jac=True,
+        method="SLSQP",
+        bounds=[(0.0, 1.0)] * n,
+        constraints={
+            "type": "eq",
+            "fun": lambda w: float(np.sum(w) - 1.0),
+            "jac": lambda w: np.ones(n),
+        },
+        options={"ftol": 1e-12, "maxiter": 500},
+    )
+
+
+def fit_site_group_weights(
+    path: Path | str,
+    experiment: Any,
+    groups: dict[str, Any],
+    *,
+    ft_params: dict[str, Any] | None = None,
+    rrange: tuple[float, float] | None = None,
+    kweights: Sequence[int] | int = (1, 2, 3),
+    s02: float | None = None,
+    e0_shift: float | None = None,
+) -> dict[str, Any]:
+    """Reweight site-group spectra to fit an experiment (simplex least squares).
+
+    The experiment's chi(R) (Re and Im, over ``rrange``, every k-weight divided
+    by its own noise estimate as in :func:`fit_ensemble`) is fitted as
+    ``sum_g w_g * mean_g`` with ``w_g >= 0`` and ``sum(w_g) == 1``, starting from
+    the MD weights. ``mean_g`` is each group's mean chi(k) after
+    :func:`md_exafs.experimental.scaled_chi_arrays` with S0^2 and delta-E0.
+
+    S0^2 and delta-E0 are not fitted here: when either is ``None``, Fit A
+    (:func:`fit_ensemble`, R space, same window and k-weights) supplies it.
+    ``e0_shift`` is held fixed at that value (or the caller's) throughout.
+
+    Args:
+        path: Ensemble archive.
+        experiment: Anything
+            :func:`md_exafs.experimental.read_experimental_spectrum` accepts.
+        groups: Output of :func:`md_exafs.attribution.group_sites`.
+        ft_params: Fourier-transform overrides, as for :func:`fit_ensemble`.
+        rrange: Fit window ``(rmin, rmax)`` in Angstrom. Defaults to
+            ``(1.0, min(3.0, rmax_valid))``.
+        kweights: One k-weight or several (each 0 to 4), fitted simultaneously.
+        s02: S0^2 (finite, positive), or ``None`` to take Fit A's.
+        e0_shift: delta-E0 in eV (finite), or ``None`` to take Fit A's.
+
+    Returns:
+        A JSON-safe dict with ``schema_version``, ``fit_type``, ``fit_space``,
+        ``ft_params``, ``rrange``, ``kweights``, ``rmax_valid``, ``s02``,
+        ``e0_shift``, ``e0_shift_held_fixed``, ``n_idp``, ``n_groups``,
+        ``nvarys``, ``success``, the R-factors with the MD weights
+        (``rfactor_md``, ``rfactor_r_md``, ``rfactor_k_md``) and the fitted
+        weights (``rfactor_fit``, ``rfactor_r_fit``, ``rfactor_k_fit``),
+        ``weights`` (``group_id``, ``site_indices``, ``n_sites``,
+        ``md_weight``, ``fitted_weight``, ``delta_weight`` per group),
+        ``warnings``, ``units`` and the ``experiment``, ``theory_md`` and
+        ``theory_fit`` curves on the archive's k grid.
+
+    Raises:
+        FileNotFoundError: ``path`` does not exist.
+        ValueError: Not an ensemble archive, malformed ``groups``, or bad
+            arguments.
+    """
+    grp_list = _group_list(groups)
+    setup = _resolve_fit_setup(
+        path,
+        experiment,
+        ft_params=ft_params,
+        rrange=rrange,
+        kweights=kweights,
+        fit_space="r",
+        vary=(),
+        s02=1.0 if s02 is None else s02,
+        e0_shift=0.0 if e0_shift is None else e0_shift,
+    )
+    ft, (rmin, rmax) = setup.ft, setup.rrange
+    kw_list = setup.kweights
+    warnings = setup.warnings
+
+    if s02 is None or e0_shift is None:
+        fit_a = fit_ensemble(
+            path,
+            experiment,
+            ft_params=ft_params,
+            rrange=(rmin, rmax),
+            kweights=kw_list,
+            fit_space="r",
+        )
+        if s02 is None:
+            s02 = fit_a["params"]["s02"]["value"]
+        if e0_shift is None:
+            e0_shift = fit_a["params"]["e0_shift"]["value"]
+    if not _finite_number(s02) or s02 <= 0:
+        raise ValueError(f"s02 must be a finite number > 0, got {s02!r}")
+    if not _finite_number(e0_shift):
+        raise ValueError(f"e0_shift must be a finite number, got {e0_shift!r}")
+    s02_val, e0_val = float(s02), float(e0_shift)
+    warnings.append(
+        f"e0_shift is held fixed at {e0_val:g} eV (Fit A's value unless supplied)."
+    )
+
+    trans, k_fit = _make_transform(setup)
+    exp_fit = _onto_grid(setup.exp_k, setup.exp_chi, k_fit)
+    eps_r, eps_k = _estimate_noise_weights(
+        trans, k_fit, exp_fit, kw_list, "r", warnings
+    )
+
+    series_k = np.asarray(setup.overall_raw["k"], dtype=float)
+    columns: list[np.ndarray] = []
+    g_fits: list[np.ndarray] = []
+    g_series: list[np.ndarray] = []
+    for g in grp_list:
+        gk, gchi = _clean_spectrum(
+            [np.nan if v is None else v for v in g["spectrum"]["k"]],
+            [np.nan if v is None else v for v in g["spectrum"]["chi"]],
+            f"group {g['group_id']}",
+        )
+        k_adj, chi_adj = scaled_chi_arrays(gk, gchi, s02=s02_val, e0_shift=e0_val)
+        g_fit = _onto_grid(k_adj, chi_adj, k_fit)
+        g_fits.append(g_fit)
+        g_series.append(resample_chi(k_adj, chi_adj, series_k))
+        columns.append(
+            np.concatenate(
+                _transform_blocks(trans, k_fit, g_fit, kw_list, "r", eps_r, eps_k)
+            )
+        )
+    a = np.column_stack(columns)
+    y = np.concatenate(
+        _transform_blocks(trans, k_fit, exp_fit, kw_list, "r", eps_r, eps_k)
+    )
+
+    n_groups = len(grp_list)
+    md_w = np.array([float(g["weight"]) for g in grp_list])
+    total = float(md_w.sum())
+    md_w = md_w / total if total > 0 else np.full(n_groups, 1.0 / n_groups)
+
+    if n_groups == 1:
+        w_fit, success = np.array([1.0]), True
+    else:
+        res = _simplex_least_squares(a, y, md_w)
+        w_fit = np.clip(res.x, 0.0, 1.0)
+        w_fit /= w_fit.sum()
+        success = bool(res.success)
+        if not success:
+            warnings.append(f"The weight optimisation did not converge: {res.message}")
+
+    n_idp = float(1.0 + 2.0 * (rmax - rmin) * (ft["kmax"] - ft["kmin"]) / np.pi)
+    if n_groups > n_idp / 2.0:
+        warnings.append(
+            f"{n_groups} site groups exceed n_idp/2={n_idp / 2.0:.1f}; the weights "
+            "are poorly determined by the fit window."
+        )
+
+    rfactors: dict[str, dict[str, float | None]] = {}
+    for tag, w in (("md", md_w), ("fit", w_fit)):
+        theory = sum(wi * gi for wi, gi in zip(w, g_fits, strict=True))
+        rf = _compute_rfactors(
+            trans, k_fit, exp_fit, theory, kw_list, "r", eps_r, eps_k
+        )
+        rfactors[tag] = {f"{key}_{tag}": value for key, value in rf.items()}
+
+    curves = {
+        "experiment": resample_chi(setup.exp_k, setup.exp_chi, series_k),
+        **{
+            f"theory_{tag}": sum(wi * gi for wi, gi in zip(w, g_series, strict=True))
+            for tag, w in (("md", md_w), ("fit", w_fit))
+        },
+    }
+    return {
+        "schema_version": FIT_SCHEMA_VERSION,
+        "fit_type": "site_group_weights",
+        "fit_space": "r",
+        "ft_params": ft,
+        "rrange": [rmin, rmax],
+        "kweights": kw_list,
+        "rmax_valid": setup.rmax_valid,
+        "s02": s02_val,
+        "e0_shift": e0_val,
+        "e0_shift_held_fixed": True,
+        "n_idp": n_idp,
+        "n_groups": n_groups,
+        "nvarys": max(0, n_groups - 1),
+        "success": success,
+        **rfactors["md"],
+        **rfactors["fit"],
+        "weights": [
+            {
+                "group_id": g["group_id"],
+                "site_indices": [int(i) for i in g["site_indices"]],
+                "n_sites": len(g["site_indices"]),
+                "md_weight": float(m),
+                "fitted_weight": float(f),
+                "delta_weight": float(f - m),
+            }
+            for g, m, f in zip(grp_list, md_w, w_fit, strict=True)
+        ],
+        "warnings": warnings,
+        "units": _units(ft["kweight"]),
+        **{
+            name: _spectrum(
+                _with_transform({"k": series_k, "chi": chi}, ft, True), ft["kweight"]
+            )
+            for name, chi in curves.items()
+        },
+    }
+
+
 from .fit_static import (  # noqa: E402
     PooledPath,
     fit_static,
@@ -612,6 +860,7 @@ __all__ = [
     "FIT_SCHEMA_VERSION",
     "PooledPath",
     "fit_ensemble",
+    "fit_site_group_weights",
     "fit_static",
     "pool_paths",
     "static_paths",

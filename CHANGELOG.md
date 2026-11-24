@@ -61,6 +61,13 @@
   `estimate_noise` normalization, and $\chi^2$ and uncertainty rescaling matched
   to Larch's $N_{\mathrm{idp}}$. It returns a versioned, JSON-safe report with
   R-factors and aligned theory and experiment curves.
+- `md_exafs.fit.fit_site_group_weights` (also re-exported at top-level
+  `md_exafs`) fits simplex-constrained ($w_g \ge 0$, $\sum_g w_g = 1$) site-group
+  weights to experimental $\chi(R)$ over several $k$-weights, normalized per
+  $k$-weight with `estimate_noise`. It uses $S_0^2$ and a fixed $\Delta E_0$ from
+  `fit_ensemble` or caller-supplied values. The report gives MD and fitted
+  weights, R-factors before and after reweighting, and warns of overfitting when
+  the number of groups exceeds $N_{\mathrm{idp}}/2$.
 - `md_exafs.attribution.peak_attribution` and `md_exafs.attribution.group_sites`
   (also re-exported at top-level `md_exafs`): decomposes $\chi(R)$ peaks by
   scattering path (`by="paths"`, requiring archive format version 4), absorber
