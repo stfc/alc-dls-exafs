@@ -151,3 +151,26 @@ def test_fit_site_group_weights_recovers_simplex_weights(tmp_path: Path):
     auto = fit_site_group_weights(path, experiment, groups, rrange=(1.0, 4.0))
     assert auto["success"] is True
     assert auto["rfactor_fit"] < auto["rfactor_md"]
+
+
+def test_score_spectrum_matches_fit_ensemble_at_optimum(archive: Path):
+    from md_exafs import score_spectrum
+
+    exp_k = np.arange(0.0, 16.0, 0.05)
+    experiment = (exp_k, _chi(exp_k, s02=0.82, e0_shift=3.5))
+    fa = fit_ensemble(archive, experiment, rrange=RRANGE, kweights=(1, 2, 3))
+
+    scored = score_spectrum(
+        experiment,
+        (np.asarray(fa["theory"]["k"]), np.asarray(fa["theory"]["chi"])),
+        ft_params=fa["ft_params"],
+        rrange=RRANGE,
+        kweights=(1, 2, 3),
+        k_grid=DEFAULT_K_GRID,
+    )
+    assert json.loads(json.dumps(scored, allow_nan=False)) == scored
+    assert scored["fit_type"] == "score"
+    assert scored["rfactor"] == pytest.approx(fa["rfactor"], abs=1e-5)
+    assert scored["rfactor_r"] == pytest.approx(fa["rfactor_r"], abs=1e-5)
+    assert scored["n_idp"] == pytest.approx(fa["n_idp"])
+    assert scored["nvarys"] == 0

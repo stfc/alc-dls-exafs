@@ -109,6 +109,9 @@ def _read_spectrum_file(
     return grp, meta
 
 
+_DESCRIPTOR_KEYS = frozenset({"path", "group", "autobk", "labels", "kind"})
+
+
 def read_experimental_spectrum(
     source: Any,
     group: str | None = None,
@@ -122,7 +125,10 @@ def read_experimental_spectrum(
     Args:
         source: One of
             - ``Path | str``: data file (.prj, .dat, .xdi, .chi, etc.) read with Larch;
-            - ``Mapping``: ``{"k", "chi"}`` (or ``"chi_k"``) or
+            - ``Mapping`` with ``"path"``: file descriptor
+              ``{"path": ..., "labels": ..., "group": ..., "autobk": ..., "kind": ...}``
+              so reader options can be forwarded through high-level functions;
+            - ``Mapping`` with array data: ``{"k", "chi"}`` (or ``"chi_k"``) or
               ``{"energy", "mu"}`` (or ``"omega"``/``"xmu"``), optional ``"e0"``;
             - 2-tuple ``(x, y)``: ``(k, chi)`` by default, ``(energy, mu)`` when
               ``kind="energy_mu"``;
@@ -137,7 +143,23 @@ def read_experimental_spectrum(
         tuple (k, chi, metadata_dict). ``metadata["e0"]`` is set when a finite e0 is known.
     """
     meta: dict[str, Any]
-    if isinstance(source, str | Path):
+    if isinstance(source, Mapping) and "path" in source:
+        unknown = sorted(str(k) for k in source if k not in _DESCRIPTOR_KEYS)
+        if unknown:
+            raise ValueError(
+                f"Unknown experimental descriptor key(s): {', '.join(unknown)}. "
+                f"Allowed: {', '.join(sorted(_DESCRIPTOR_KEYS))}"
+            )
+        p = Path(source["path"])
+        if not p.exists():
+            raise FileNotFoundError(f"Experimental spectrum file not found: {p}")
+        eff_group = source.get("group", group)
+        eff_autobk = bool(source.get("autobk", autobk))
+        eff_labels = source.get("labels", labels)
+        grp, meta = _read_spectrum_file(p, eff_group, eff_autobk, eff_labels)
+        autobk = eff_autobk
+        label = str(p)
+    elif isinstance(source, str | Path):
         p = Path(source)
         if not p.exists():
             raise FileNotFoundError(f"Experimental spectrum file not found: {source}")

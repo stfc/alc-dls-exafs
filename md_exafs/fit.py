@@ -17,6 +17,7 @@ import math
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -584,6 +585,8 @@ def fit_ensemble(
             for name in VARY_NAMES
         },
         **rfactors,
+        "epsilon_r": [_number(e) for e in eps_r],
+        "epsilon_k": [_number(e) for e in eps_k],
         "chi_square": _number(stats["chi_square"]),
         "chi2_reduced": _number(stats["chi2_reduced"]),
         "n_idp": n_idp,
@@ -826,6 +829,8 @@ def fit_site_group_weights(
         "success": success,
         **rfactors["md"],
         **rfactors["fit"],
+        "epsilon_r": [_number(e) for e in eps_r],
+        "epsilon_k": [_number(e) for e in eps_k],
         "weights": [
             {
                 "group_id": g["group_id"],
@@ -848,6 +853,126 @@ def fit_site_group_weights(
     }
 
 
+def score_spectrum(
+    experiment: Any,
+    model: Any,
+    *,
+    ft_params: dict[str, Any] | None = None,
+    rrange: tuple[float, float] | None = None,
+    kweights: Sequence[int] = (1, 2, 3),
+    fit_space: str = "r",
+    k_grid: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Score an external model chi(k) against an experiment using fit conventions.
+
+    Uses the exact same Fourier-transform settings, Larch ``estimate_noise``
+    per-kweight weighting, R-factor definition, ``chi_square``, and ``n_idp``
+    as :func:`fit_ensemble` and :func:`fit_static` (with ``nvarys=0``), so
+    manual Artemis fits or reference theoretical curves can be compared
+    directly alongside MD fits.
+
+    Args:
+        experiment: Experimental spectrum in any format accepted by
+            :func:`md_exafs.experimental.read_experimental_spectrum`.
+        model: Model chi(k) in any format accepted by
+            :func:`md_exafs.experimental.read_experimental_spectrum`
+            (e.g. ``(k, chi)`` tuple or ``{"k": k, "chi": chi}``).
+        ft_params: Fourier-transform parameters (library defaults filled in).
+        rrange: ``(rmin, rmax)`` fit window in Å; defaults to ``(1.0, 3.0)``.
+        kweights: Sequence of integer k-weights (default ``(1, 2, 3)``).
+        fit_space: ``"r"`` (default) or ``"k"``.
+        k_grid: Optional output k grid for the returned ``experiment`` and
+            ``theory`` display curves; defaults to the experiment's k grid.
+
+    Returns:
+        JSON-safe dict with ``schema_version``, ``fit_type``, ``fit_space``,
+        ``ft_params``, ``rrange``, ``kweights``, ``rfactor``, ``rfactor_r``,
+        ``rfactor_k``, ``epsilon_r``, ``epsilon_k``, ``chi_square``,
+        ``chi2_reduced``, ``n_idp``, ``nvarys``, ``warnings``, ``units``,
+        ``experiment``, and ``theory``.
+    """
+    if fit_space not in FIT_SPACES:
+        raise ValueError(f"fit_space must be one of {FIT_SPACES}, got {fit_space!r}")
+    kw_list = _resolve_kweights(kweights)
+    ft = _resolve_ft_request(ft_params or {}, _archive_ft_defaults({}))
+    rmin, rmax = _resolve_rrange(rrange, None)
+
+    exp_k, exp_chi, _ = read_experimental_spectrum(experiment)
+    mod_k, mod_chi, _ = read_experimental_spectrum(model)
+
+    exp_ok = np.isfinite(exp_k) & np.isfinite(exp_chi)
+    mod_ok = np.isfinite(mod_k) & np.isfinite(mod_chi)
+    if not exp_ok.any():
+        raise ValueError("Experimental spectrum has no finite (k, chi) points")
+    if not mod_ok.any():
+        raise ValueError("Model spectrum has no finite (k, chi) points")
+    exp_k, exp_chi = exp_k[exp_ok], exp_chi[exp_ok]
+    mod_k, mod_chi = mod_k[mod_ok], mod_chi[mod_ok]
+
+    warnings: list[str] = []
+    setup = SimpleNamespace(
+        ft=ft,
+        kweights=kw_list,
+        rrange=(rmin, rmax),
+        fit_space=fit_space,
+        exp_k=exp_k,
+        overall_k=mod_k,
+    )
+    trans, k_fit = _make_transform(setup)  # type: ignore[arg-type]
+    exp_fit = _onto_grid(exp_k, exp_chi, k_fit)
+    mod_fit = _onto_grid(mod_k, mod_chi, k_fit)
+    eps_r, eps_k = _estimate_noise_weights(
+        trans, k_fit, exp_fit, kw_list, fit_space, warnings
+    )
+    rfactors = _compute_rfactors(
+        trans, k_fit, exp_fit, mod_fit, kw_list, fit_space, eps_r, eps_k
+    )
+    n_idp = float(1.0 + 2.0 * (rmax - rmin) * (ft["kmax"] - ft["kmin"]) / np.pi)
+    blocks = np.concatenate(
+        _transform_blocks(
+            trans, k_fit, exp_fit - mod_fit, kw_list, fit_space, eps_r, eps_k
+        )
+    )
+    chi2 = (
+        _number(float(np.sum(blocks**2)) * n_idp / len(blocks))
+        if len(blocks) > 0
+        else None
+    )
+    chi2_red = _number(chi2 / n_idp) if chi2 is not None and n_idp > 0 else None
+
+    series_k = (
+        np.asarray(k_grid, dtype=float)
+        if k_grid is not None
+        else np.asarray(k_fit, dtype=float)
+    )
+    exp_curve = np.nan_to_num(_onto_grid(exp_k, exp_chi, series_k))
+    mod_curve = np.nan_to_num(_onto_grid(mod_k, mod_chi, series_k))
+    kw = int(ft["kweight"])
+    return {
+        "schema_version": FIT_SCHEMA_VERSION,
+        "fit_type": "score",
+        "fit_space": fit_space,
+        "ft_params": ft,
+        "rrange": [rmin, rmax],
+        "kweights": kw_list,
+        **rfactors,
+        "epsilon_r": [_number(e) for e in eps_r],
+        "epsilon_k": [_number(e) for e in eps_k],
+        "chi_square": chi2,
+        "chi2_reduced": chi2_red,
+        "n_idp": n_idp,
+        "nvarys": 0,
+        "warnings": warnings,
+        "units": _units(kw),
+        "experiment": _spectrum(
+            _with_transform({"k": series_k, "chi": exp_curve}, ft, True), kw
+        ),
+        "theory": _spectrum(
+            _with_transform({"k": series_k, "chi": mod_curve}, ft, True), kw
+        ),
+    }
+
+
 from .fit_static import (  # noqa: E402
     PooledPath,
     fit_static,
@@ -863,6 +988,7 @@ __all__ = [
     "fit_site_group_weights",
     "fit_static",
     "pool_paths",
+    "score_spectrum",
     "static_paths",
     "to_feffit_path",
 ]

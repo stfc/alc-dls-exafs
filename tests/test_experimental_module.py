@@ -125,3 +125,20 @@ def test_read_experimental_spectrum_energy_mu_sources():
 
     with pytest.raises(ValueError, match="autobk"):
         read_experimental_spectrum({"energy": energy, "mu": mu}, autobk=False)
+
+
+def test_read_experimental_spectrum_file_descriptor_mapping(tmp_path):
+    k = np.linspace(1.0, 12.0, 100)
+    chi = 0.08 * np.sin(2 * 2.55 * k)
+    f = tmp_path / "reversed_chi_k.txt"
+    np.savetxt(f, np.column_stack([chi, k]))
+
+    k_out, chi_out, meta = read_experimental_spectrum(
+        {"path": str(f), "labels": "chi,k"}
+    )
+    assert np.allclose(k_out, k)
+    assert np.allclose(chi_out, chi)
+    assert meta["source_file"] == str(f)
+
+    with pytest.raises(ValueError, match="Unknown experimental descriptor key"):
+        read_experimental_spectrum({"path": str(f), "bogus": 123})
