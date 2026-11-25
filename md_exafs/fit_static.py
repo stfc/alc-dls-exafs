@@ -97,9 +97,67 @@ MATCH_DR_WARN_A = 0.05
 CORRELATION_WARN = 0.9
 TRUNCATION_WARN = 0.10
 IDP_FRACTION_LIMIT = 2.0 / 3.0
+COLLINEAR_SNAP_DEG = 10.0
+FOUR_LEG_BETA_TOL_DEG = 20.0
+FOUR_LEG_RLEG_RTOL = 0.05
 
 _COL = {name: i for i, name in enumerate(FEFF_DATA_COLS)}
 _DEFAULT_MASS = (29, 63.546)
+
+
+def _snap_collinear(angle: float | None) -> float | None:
+    """Snap near-collinear angles (within ``COLLINEAR_SNAP_DEG``) to 0 or 180 deg."""
+    if angle is None or not np.isfinite(angle):
+        return None
+    a = float(angle)
+    if a <= COLLINEAR_SNAP_DEG:
+        return 0.0
+    if a >= 180.0 - COLLINEAR_SNAP_DEG:
+        return 180.0
+    return a
+
+
+def _classify_4leg(
+    p: PathResult,
+    leg_rtol: float = FOUR_LEG_RLEG_RTOL,
+    beta_tol_deg: float = FOUR_LEG_BETA_TOL_DEG,
+) -> str | None:
+    """Classify a 4-leg path from its FEFF leg geometry.
+
+    Returns:
+        - ``None`` when no geometry is attached (legacy/synthetic paths, treated
+          as rattle for backward compatibility);
+        - ``"rattle"`` for ``0 -> A -> 0 -> A -> 0`` (all betas ~ 180 deg, equal legs);
+        - ``"collinear_focus"`` for ``0 -> A -> B -> A -> 0`` (betas ~ 180, 0, 180, 0);
+        - ``"collinear_thru_abs"`` for ``0 -> S1 -> 0 -> S2 -> 0``
+          (betas ~ 0, 180, 0, 180);
+        - ``"bent"`` for any other 4-leg geometry.
+    """
+    if p.betas is None or len(p.betas) != 4:  # noqa: PLR2004
+        return None
+    b = p.betas
+    equal_legs = True
+    if p.rlegs is not None and len(p.rlegs) == 4:  # noqa: PLR2004
+        r = np.asarray(p.rlegs, dtype=float)
+        mean_r = max(float(np.mean(r)), 1e-12)
+        equal_legs = float(np.max(r) - np.min(r)) <= leg_rtol * mean_r
+    if equal_legs and all(abs(x - 180.0) <= beta_tol_deg for x in b):
+        return "rattle"
+    if (
+        abs(b[0] - 180.0) <= beta_tol_deg
+        and abs(b[2] - 180.0) <= beta_tol_deg
+        and b[1] <= beta_tol_deg
+        and b[3] <= beta_tol_deg
+    ):
+        return "collinear_focus"
+    if (
+        b[0] <= beta_tol_deg
+        and b[2] <= beta_tol_deg
+        and abs(b[1] - 180.0) <= beta_tol_deg
+        and abs(b[3] - 180.0) <= beta_tol_deg
+    ):
+        return "collinear_thru_abs"
+    return "bent"
 
 
 @dataclass
@@ -128,6 +186,8 @@ class PooledPath:
     lam: np.ndarray
     absorber: str = ""
     warnings: list[str] = field(default_factory=list)
+    path_kind: str | None = None
+    leg_elements: tuple[str, ...] | None = None
 
 
 def _complete_linkage(values: np.ndarray, tol: float) -> list[list[int]]:
@@ -179,7 +239,11 @@ def _member_columns(p: PathResult, k: np.ndarray) -> np.ndarray:
 
 
 def _pool_cluster(
-    members: list[PathResult], n_abs: int, absorber: str, scatterer: str
+    members: list[PathResult],
+    n_abs: int,
+    absorber: str,
+    scatterer: str,
+    path_kind: str | None = None,
 ) -> PooledPath:
     """Exact complex-sum pooling of one cluster (handoff section 6.1)."""
     k = np.asarray(members[0].k, dtype=float)
@@ -270,6 +334,8 @@ def _pool_cluster(
         lam=np.asarray(lam_eff, dtype=float),
         absorber=absorber,
         warnings=warnings,
+        path_kind=path_kind,
+        leg_elements=members[0].leg_elements,
     )
 
 
@@ -312,21 +378,27 @@ def pool_paths(
     if not angle_tol > 0:
         raise ValueError(f"angle_tol must be > 0, got {angle_tol!r}")
 
-    buckets: dict[tuple[tuple[str, ...], int], list[PathResult]] = {}
+    buckets: dict[tuple[tuple[str, ...], int, str | None], list[PathResult]] = {}
     for p in paths:
-        key = (canonical_scatterer_key(p.scatterer), int(p.nlegs))
+        nlegs_p = int(p.nlegs)
+        kind = _classify_4leg(p) if nlegs_p == 4 else None  # noqa: PLR2004
+        key = (canonical_scatterer_key(p.scatterer), nlegs_p, kind)
         buckets.setdefault(key, []).append(p)
 
     pooled: list[PooledPath] = []
-    for (scat_key, nlegs), items in buckets.items():
+    for (scat_key, nlegs, kind), items in buckets.items():
         scatterer = "-".join(scat_key)
         for members in _cluster_category(items, nlegs, r_tol, angle_tol):
-            pooled.append(_pool_cluster(members, n_abs, absorber, scatterer))
+            pooled.append(
+                _pool_cluster(members, n_abs, absorber, scatterer, path_kind=kind)
+            )
 
-    pooled.sort(key=lambda q: (q.r_eff, q.scatterer, q.nlegs))
+    pooled.sort(key=lambda q: (q.r_eff, q.scatterer, q.nlegs, q.path_kind or ""))
     used: set[str] = set()
     for idx, q in enumerate(pooled):
         label = make_path_key(q.scatterer, q.nlegs, q.r_eff, r_bin=0.01, angle=q.angle)
+        if q.path_kind is not None:
+            label = f"{label}_{q.path_kind}"
         if label in used:
             label = f"{label}_{idx}"
         while label in used:
@@ -569,37 +641,114 @@ def _md_sigma2(
 ) -> tuple[dict[int, dict[str, Any]], list[str]]:
     """Thermal MD sigma^2 of each pooled path, matched by R tolerance.
 
-    Uses ``match_paths_within_tolerance`` directly so 4-leg rattle paths get a
-    group too. The ``count``-weighted mean of ``sigma2_thermal_A2`` is taken
-    (times 4 for a rattle path); the spread between instances is excluded as
-    the pooled static path already carries it.
+    Uses ``match_paths_within_tolerance`` directly so 4-leg collinear paths get
+    physically matched MD groups:
+    - 3-leg near-collinear angles (within ``COLLINEAR_SNAP_DEG`` of 0 or 180 deg)
+      are snapped on both sides and compared via the anchored scatterer angle,
+      preventing thermal-bending fold bias from rejecting collinear MS paths.
+    - 4-leg rattle paths (``0 -> A -> 0 -> A -> 0``) match the 2-body group at
+      ``r_eff / 2`` with ``4 * sigma2_thermal_A2``.
+    - 4-leg collinear forward-focusing paths (``0 -> A -> B -> A -> 0``) match
+      the 2-body group ``(0, B)`` at ``r_eff`` with ``1 * sigma2_thermal_A2``.
+    - 4-leg collinear absorber-crossing paths (``0 -> S1 -> 0 -> S2 -> 0``)
+      match the 3-body collinear ``A000`` group ``(0, S1, S2)`` at ``r_eff``
+      with ``1 * sigma2_thermal_A2``.
+    - Bent 4-leg paths are left unmatched and cleanly dropped.
+
+    The ``count``-weighted mean of ``sigma2_thermal_A2`` is taken; the spread
+    between instances is excluded as the pooled static path already carries it.
     """
-    groups = [
+    res_3b_matched = [
         {
-            "r_eff_ref": p.r_eff,
-            "r_effs": [p.r_eff],
-            "nlegs": p.nlegs,
-            "scatterer": p.scatterer,
-            "angle": p.angle,
-            "absorber": p.absorber,
+            **g,
+            "angle": _snap_collinear(g.get("angle")),
+            "scatterer_angles_deg": (),
         }
-        for p in kept
+        for g in res_3b
     ]
-    feff_to_dw = match_paths_within_tolerance(res_2b, res_3b, groups, match_r_tol)[
-        "feff_to_dw"
-    ]
+
+    groups: list[dict[str, Any]] = []
+    query_meta: list[tuple[int, float]] = []  # (kept_idx, sigma2_scale)
+    for gi, p in enumerate(kept):
+        if p.nlegs == 4:  # noqa: PLR2004
+            if p.path_kind == "bent":
+                continue
+            if p.path_kind == "collinear_focus":
+                far = (
+                    p.leg_elements[2]
+                    if p.leg_elements and len(p.leg_elements) >= 3
+                    else p.scatterer.split("-")[0]
+                )
+                groups.append(
+                    {
+                        "r_eff_ref": p.r_eff,
+                        "r_effs": [p.r_eff],
+                        "nlegs": 2,
+                        "scatterer": far,
+                        "angle": None,
+                        "absorber": p.absorber,
+                    }
+                )
+                query_meta.append((gi, 1.0))
+                continue
+            if p.path_kind == "collinear_thru_abs":
+                thru = (
+                    "-".join(sorted((p.leg_elements[1], p.leg_elements[3])))
+                    if p.leg_elements and len(p.leg_elements) >= 4
+                    else "-".join(sorted(p.scatterer.split("-")[:2]))
+                )
+                groups.append(
+                    {
+                        "r_eff_ref": p.r_eff,
+                        "r_effs": [p.r_eff],
+                        "nlegs": 3,
+                        "scatterer": thru,
+                        "angle": 0.0,
+                        "absorber": p.absorber,
+                    }
+                )
+                query_meta.append((gi, 1.0))
+                continue
+            # True rattle or legacy 4-leg without geometry -> 4 * sigma2_1NN
+            groups.append(
+                {
+                    "r_eff_ref": p.r_eff,
+                    "r_effs": [p.r_eff],
+                    "nlegs": 4,
+                    "scatterer": p.scatterer,
+                    "angle": None,
+                    "absorber": p.absorber,
+                }
+            )
+            query_meta.append((gi, 4.0))
+            continue
+
+        groups.append(
+            {
+                "r_eff_ref": p.r_eff,
+                "r_effs": [p.r_eff],
+                "nlegs": p.nlegs,
+                "scatterer": p.scatterer,
+                "angle": _snap_collinear(p.angle) if p.nlegs == 3 else p.angle,  # noqa: PLR2004
+                "absorber": p.absorber,
+            }
+        )
+        query_meta.append((gi, 1.0))
+
+    feff_to_dw = match_paths_within_tolerance(
+        res_2b, res_3b_matched, groups, match_r_tol
+    )["feff_to_dw"]
     out: dict[int, dict[str, Any]] = {}
     warnings: list[str] = []
-    for gi, p in enumerate(kept):
-        entries = feff_to_dw.get(gi)
+    for qi, (gi, scale) in enumerate(query_meta):
+        p = kept[gi]
+        entries = feff_to_dw.get(qi)
         if not entries:
             continue
         rows = [(res_2b if body == "2b" else res_3b)[di] for _d, body, di in entries]
         weights = np.array([float(r["count"]) for r in rows])
         thermal = np.array([float(r["sigma2_thermal_A2"]) for r in rows])
-        value = float(np.sum(weights * thermal) / np.sum(weights))
-        if p.nlegs == 4:  # noqa: PLR2004
-            value *= 4.0
+        value = float(np.sum(weights * thermal) / np.sum(weights)) * scale
         dist = float(max(d for d, _b, _i in entries))
         if dist > MATCH_DR_WARN_A:
             warnings.append(
@@ -629,7 +778,7 @@ def _deltar_spec(
             specs.append((f"dr_{idx}", 1.0, False))
             continue
         spec = iso
-        if p.nlegs == 4:  # noqa: PLR2004
+        if p.nlegs == 4 and p.path_kind in (None, "rattle"):  # noqa: PLR2004
             key = _rattle_scatterer_key(p.scatterer, absorber=p.absorber or None)
             near = [
                 i
@@ -640,6 +789,22 @@ def _deltar_spec(
             if near:
                 best = min(near, key=lambda i: abs(kept[i].r_eff - p.r_eff / 2.0))
                 spec = (f"dr_{best}", 2.0, False)
+        elif p.nlegs == 4 and p.path_kind == "collinear_focus":  # noqa: PLR2004
+            far = (
+                p.leg_elements[2]
+                if p.leg_elements and len(p.leg_elements) >= 3
+                else p.scatterer.split("-")[0]
+            )
+            key = canonical_scatterer_key(far)
+            near = [
+                i
+                for i in ss
+                if canonical_scatterer_key(kept[i].scatterer) == key
+                and abs(kept[i].r_eff - p.r_eff) <= match_r_tol
+            ]
+            if near:
+                best = min(near, key=lambda i: abs(kept[i].r_eff - p.r_eff))
+                spec = (f"dr_{best}", 1.0, False)
         specs.append(spec)
     return specs
 
@@ -725,6 +890,7 @@ def fit_static(
     angle_tol: float = 10.0,
     match_r_tol: float = 0.15,
     force: bool = False,
+    cluster_mode: str = "running_mean",
 ) -> dict[str, Any]:
     """Fit an experiment with one static structure and MD thermal sigma^2.
 
@@ -765,6 +931,9 @@ def fit_static(
         r_tol: Pooling tolerance on ``r_eff`` (Angstrom).
         angle_tol: Pooling tolerance on the 3-leg angle (degrees).
         match_r_tol: Tolerance for matching MD groups to pooled paths.
+        cluster_mode: MSRD distance grouping, ``"running_mean"`` (default) or
+            ``"valley"``; see :func:`md_exafs.debye_waller.cluster_1d_sorted`.
+            Ignored when ``msrd`` is supplied.
         force: Run even when the varied parameters exceed 2/3 of ``n_idp``.
 
     Returns:
@@ -864,6 +1033,7 @@ def fit_static(
             cutoff=config.radius,
             cutoff_3body=config.radius,
             exclude_hydrogen=config.exclude_hydrogen,
+            cluster_mode=cluster_mode,
         )
     res_2b, res_3b = msrd
     matched, match_warnings = _md_sigma2(pooled, res_2b, res_3b, match_r_tol)
@@ -1016,6 +1186,8 @@ def fit_static(
         "dropped_paths": dropped,
         "truncation_fraction": truncation,
         **rfactors,
+        "epsilon_r": [_number(e) for e in eps_r],
+        "epsilon_k": [_number(e) for e in eps_k],
         "chi_square": _number(result.chi_square),
         "chi2_reduced": _number(result.chi2_reduced),
         "n_idp": n_idp,
@@ -1063,6 +1235,10 @@ def fit_static(
                 _number(b0_chi2 / n_idp) if b0_chi2 is not None and n_idp > 0 else None
             ),
             "nvarys": 0,
+            "theory": _spectrum(
+                _with_transform({"k": k_fit, "chi": b0_theory}, ft, True),
+                ft["kweight"],
+            ),
         }
         out["comparison"] = {
             "fit_a": _summary(fit_a),

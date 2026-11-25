@@ -47,6 +47,9 @@ class PathResult:
     sig2: float = 0.0
     angle: float | None = None
     path_index: int = 0
+    rlegs: tuple[float, ...] | None = None
+    betas: tuple[float, ...] | None = None
+    leg_elements: tuple[str, ...] | None = None
 
 
 def make_path_key(
@@ -189,6 +192,34 @@ def read_feff_path_dat(
             except Exception:
                 pass
 
+        rlegs: tuple[float, ...] | None = None
+        betas: tuple[float, ...] | None = None
+        leg_elements: tuple[str, ...] | None = None
+        if nlegs >= 2 and len(fd.geom) == nlegs:
+            try:
+                pts = [np.array([float(x) for x in g[4:7]]) for g in fd.geom]
+                loop = pts + [pts[0]]
+                rlegs = tuple(
+                    float(np.linalg.norm(loop[i + 1] - loop[i])) for i in range(nlegs)
+                )
+                leg_elements = tuple(str(g[0]) for g in fd.geom)
+                if nlegs >= 3:
+                    b_list: list[float] = []
+                    for i in range(nlegs):
+                        v_in = loop[i] - loop[i - 1 if i > 0 else nlegs - 1]
+                        v_out = loop[i + 1] - loop[i]
+                        n_in = float(np.linalg.norm(v_in))
+                        n_out = float(np.linalg.norm(v_out))
+                        if n_in > 1e-10 and n_out > 1e-10:
+                            cos_b = np.clip(
+                                float(np.dot(v_in, v_out)) / (n_in * n_out), -1.0, 1.0
+                            )
+                            b_list.append(float(np.degrees(np.arccos(cos_b))))
+                    if len(b_list) == nlegs:
+                        betas = tuple(b_list)
+            except Exception:
+                pass
+
         meta = (files_meta or {}).get(dat_file.name, {})
         cw_ratio = float(meta.get("cw_ratio", 100.0))
         sig2 = float(meta.get("sig2", 0.0))
@@ -207,6 +238,9 @@ def read_feff_path_dat(
             sig2=sig2,
             angle=angle,
             path_index=path_idx,
+            rlegs=rlegs,
+            betas=betas,
+            leg_elements=leg_elements,
         )
     except Exception as exc:
         logger.debug(f"Failed to read path file {dat_file}: {exc}")
@@ -391,10 +425,11 @@ def cluster_path_category(
     *,
     r_bin: float = 0.15,
     angle_tol: float = 15.0,
+    cluster_mode: str = "running_mean",
 ) -> list[list[T]]:
     """Split one (scatterer, nlegs) category into path populations.
 
-    Non-3-leg paths are gap-clustered on ``r_eff``. 3-leg paths are clustered by
+    Non-3-leg paths are clustered on ``r_eff``. 3-leg paths are clustered by
     angle first, then by ``r_eff`` within each angle cluster; items without a
     usable (finite) angle fall back to ``r_eff``-only clustering as their own
     sub-population.
@@ -403,8 +438,14 @@ def cluster_path_category(
         nlegs: Number of path legs shared by all ``items``.
         items: Dicts with ``r_eff`` / ``angle`` keys, or objects with those
             attributes (e.g. :class:`PathResult`).
-        r_bin: Gap tolerance for ``r_eff`` clustering in Å.
-        angle_tol: Gap tolerance for angle clustering in degrees.
+        r_bin: Distance tolerance for ``r_eff`` clustering in Å (see
+            ``cluster_mode``).
+        angle_tol: Angle tolerance for clustering in degrees (see
+            ``cluster_mode``).
+        cluster_mode: ``"running_mean"`` (width-capped, historical default) or
+            ``"valley"`` (split ``r_eff`` only at density valleys between
+            shells, smoothed by ``r_bin``; 3-leg angle clustering always uses
+            ``running_mean`` with ``angle_tol``, matching MSRD grouping).
 
     Returns:
         List of clusters, each a list of the original items.
@@ -416,7 +457,10 @@ def cluster_path_category(
 
     if nlegs != 3:
         r_effs = np.array([float(_item_value(s, "r_eff")) for s in items])
-        return [[items[i] for i in idx] for idx in cluster_1d_sorted(r_effs, r_bin)]
+        return [
+            [items[i] for i in idx]
+            for idx in cluster_1d_sorted(r_effs, r_bin, cluster_mode)
+        ]
 
     with_angle = [s for s in items if _usable_angle(s)]
     without_angle = [s for s in items if not _usable_angle(s)]
@@ -427,11 +471,11 @@ def cluster_path_category(
         for angle_idx in cluster_1d_sorted(angles, angle_tol):
             angle_cluster = [with_angle[i] for i in angle_idx]
             r_effs = np.array([float(_item_value(s, "r_eff")) for s in angle_cluster])
-            for dist_idx in cluster_1d_sorted(r_effs, r_bin):
+            for dist_idx in cluster_1d_sorted(r_effs, r_bin, cluster_mode):
                 clusters.append([angle_cluster[i] for i in dist_idx])
     if without_angle:
         r_effs = np.array([float(_item_value(s, "r_eff")) for s in without_angle])
-        for idx in cluster_1d_sorted(r_effs, r_bin):
+        for idx in cluster_1d_sorted(r_effs, r_bin, cluster_mode):
             clusters.append([without_angle[i] for i in idx])
     return clusters
 

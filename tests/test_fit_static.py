@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 
 import numpy as np
+import pytest
 from larch import Group
 from larch.xafs.feffit import FeffitDataSet, TransformGroup, feffit
 from lmfit import Parameters  # type: ignore[import-untyped]
@@ -184,3 +185,118 @@ def test_to_feffit_path_parity_and_larch_feffit_roundtrip():
     assert abs(result.params["s02"].value - s02) < 1e-3
     assert abs(result.params["e0"].value - e0) < 0.05
     assert abs(result.params["alpha"].value - alpha) < 1e-3
+
+
+def test_md_sigma2_collinear_3leg_snap_and_4leg_classification():
+    from md_exafs.fit_static import _md_sigma2
+
+    # 3-leg collinear paths at 5.11 A (static 0.1/179.8 vs MD folded 2.3/175.3 deg)
+    p_a000 = _path(0, 5.11, nlegs=3, degeneracy=12.0, scatterer="Cu-Cu", angle=0.10)
+    p_a180 = _path(0, 5.11, nlegs=3, degeneracy=24.0, scatterer="Cu-Cu", angle=179.77)
+
+    # 4-leg paths at 5.11 A with explicit FEFF geometry: rattle, focus, thru_abs, bent
+    rlegs = (2.555, 2.555, 2.555, 2.555)
+    elems = ("Cu", "Cu", "Cu", "Cu")
+    p_rattle = PathResult(
+        frame_idx=0,
+        site_idx=0,
+        r_eff=5.11,
+        nlegs=4,
+        degeneracy=12.0,
+        scatterer="Cu-Cu-Cu",
+        cw_ratio=4.0,
+        k=K_NATIVE,
+        feff_data=_feff_data(),
+        rlegs=rlegs,
+        betas=(180.0, 180.0, 180.0, 180.0),
+        leg_elements=elems,
+    )
+    p_focus = PathResult(
+        frame_idx=0,
+        site_idx=0,
+        r_eff=5.11,
+        nlegs=4,
+        degeneracy=12.0,
+        scatterer="Cu-Cu-Cu",
+        cw_ratio=33.0,
+        k=K_NATIVE,
+        feff_data=_feff_data(0.1),
+        rlegs=rlegs,
+        betas=(180.0, 0.2, 180.0, 0.2),
+        leg_elements=elems,
+    )
+    p_thru = PathResult(
+        frame_idx=0,
+        site_idx=0,
+        r_eff=5.11,
+        nlegs=4,
+        degeneracy=12.0,
+        scatterer="Cu-Cu-Cu",
+        cw_ratio=19.0,
+        k=K_NATIVE,
+        feff_data=_feff_data(0.2),
+        rlegs=rlegs,
+        betas=(0.2, 180.0, 0.2, 180.0),
+        leg_elements=elems,
+    )
+    p_bent = PathResult(
+        frame_idx=0,
+        site_idx=0,
+        r_eff=5.11,
+        nlegs=4,
+        degeneracy=60.0,
+        scatterer="Cu-Cu-Cu",
+        cw_ratio=0.8,
+        k=K_NATIVE,
+        feff_data=_feff_data(0.3),
+        rlegs=rlegs,
+        betas=(60.0, 180.0, 60.0, 180.0),
+        leg_elements=elems,
+    )
+
+    pooled = pool_paths(
+        [p_a000, p_a180, p_rattle, p_focus, p_thru, p_bent], n_abs=1, absorber="Cu"
+    )
+    by_kind = {
+        (p.nlegs, p.path_kind, round(p.angle or -1)): (i, p)
+        for i, p in enumerate(pooled)
+    }
+    assert len(pooled) == 6
+
+    res_2b = [
+        {"type": "Cu-Cu", "reff": 2.555, "count": 120, "sigma2_thermal_A2": 0.0073},
+        {"type": "Cu-Cu", "reff": 5.110, "count": 120, "sigma2_thermal_A2": 0.0094},
+    ]
+    res_3b = [
+        {
+            "type": "Cu-Cu-Cu",
+            "reff": 5.112,
+            "count": 60,
+            "angle": 2.3,
+            "scatterer_angles_deg": (2.3, 2.3),
+            "sigma2_thermal_A2": 0.0098,
+        },
+        {
+            "type": "Cu-Cu-Cu",
+            "reff": 5.113,
+            "count": 120,
+            "angle": 175.3,
+            "scatterer_angles_deg": (2.4, 175.3),
+            "sigma2_thermal_A2": 0.0093,
+        },
+    ]
+
+    matched, _warns = _md_sigma2(pooled, res_2b, res_3b, match_r_tol=0.15)
+    idx_a000 = by_kind[(3, None, 0)][0]
+    idx_a180 = by_kind[(3, None, 180)][0]
+    idx_rattle = by_kind[(4, "rattle", -1)][0]
+    idx_focus = by_kind[(4, "collinear_focus", -1)][0]
+    idx_thru = by_kind[(4, "collinear_thru_abs", -1)][0]
+    idx_bent = by_kind[(4, "bent", -1)][0]
+
+    assert matched[idx_a000]["sigma2"] == pytest.approx(0.0098)
+    assert matched[idx_a180]["sigma2"] == pytest.approx(0.0093)
+    assert matched[idx_rattle]["sigma2"] == pytest.approx(4.0 * 0.0073)
+    assert matched[idx_focus]["sigma2"] == pytest.approx(0.0094)
+    assert matched[idx_thru]["sigma2"] == pytest.approx(0.0098)
+    assert idx_bent not in matched
