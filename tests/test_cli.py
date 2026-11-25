@@ -813,6 +813,17 @@ O  0.0 2.0 0.0
             PlotComponent.SITES,
         ]
 
+        # Test 'all,paths' and 'paths,all' preserve explicit 'paths'
+        for spec in ("all,paths", "paths,all"):
+            result = parse_plot_components(spec)
+            assert result == [
+                PlotComponent.INDIVIDUAL,
+                PlotComponent.AVERAGE,
+                PlotComponent.FRAMES,
+                PlotComponent.SITES,
+                PlotComponent.PATHS,
+            ]
+
         # Test invalid component raises error
         with pytest.raises(typer.BadParameter):
             parse_plot_components("invalid")

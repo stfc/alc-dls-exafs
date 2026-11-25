@@ -6,8 +6,9 @@ from .archive_series import InvalidFtParamsError, archive_series
 from .attribution import group_sites, peak_attribution
 from .constants import ETOK, HBAR2_OVER_2M_EV_ANGSTROM2
 from .exafs_data import PathAggregator, PathContribution
+from .execution import export_ensemble
 from .feff_input import FeffConfig, build_feff_inp, normalize_tag
-from .fit import fit_ensemble, fit_site_group_weights, fit_static
+from .fit import fit_ensemble, fit_site_group_weights, fit_static, score_spectrum
 from .hdf5 import (
     ArchiveReader,
     BatchShardReader,
@@ -50,11 +51,13 @@ __all__ = [
     "make_path_key",
     "xftf_arrays",
     "archive_series",
+    "export_ensemble",
     "group_sites",
     "peak_attribution",
     "fit_ensemble",
     "fit_site_group_weights",
     "fit_static",
+    "score_spectrum",
     "series_to_vega_lite",
     "InvalidFtParamsError",
     "average_chi_arrays",

@@ -88,6 +88,9 @@ class EXAFSDataCollection:
     # Maps path_key (e.g. "Cl_2_2.86") -> PathContribution
     path_contributions: dict[str, PathContribution] = field(default_factory=dict)
 
+    # Optional experimental spectrum overlay: dict with k, chi, r, chir_mag
+    experimental_spectrum: dict[str, Any] | None = None
+
     # Processing metadata
     kweight_used: int = 2  # The kweight used for all FTs
     fourier_params: dict[str, Any] = field(default_factory=dict)
@@ -2186,6 +2189,21 @@ def plot_exafs_matplotlib(
             style = styles.get_style("overall_avg")
             add_trace(ax1, spec["k"], spec["chi"], spec["label"], style)
             add_trace(ax2, spec["r"], spec["chir_mag"], spec["label"], style)
+
+        # Plot optional experimental overlay (always unadjusted, dashed black)
+        if collection.experimental_spectrum is not None:
+            exp = collection.experimental_spectrum
+            k_e = np.asarray(exp["k"], dtype=float)
+            chi_e = np.asarray(exp["chi"], dtype=float)
+            exp_style = {
+                "color": "black",
+                "linestyle": "--",
+                "linewidth": 1.6,
+                "zorder": 10,
+            }
+            add_trace(ax1, k_e, (k_e**kweight) * chi_e, "Experiment", exp_style)
+            if "r" in exp and "chir_mag" in exp:
+                add_trace(ax2, exp["r"], exp["chir_mag"], "Experiment", exp_style)
 
         # Format top-row axes
         ax1.set_xlabel("k (Å⁻¹)")

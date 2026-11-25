@@ -379,3 +379,81 @@ def test_merge_shards_time_reversal_non_isosceles_triangle(tmp_path: Path):
     assert top_paths[0]["count"] == 4
     assert top_paths[0]["degeneracy"] == 2.0
     assert top_paths[0]["scatterer"] == "C-O"
+
+
+def test_export_ensemble_from_pipeline_store(tmp_path: Path):
+    """export_ensemble turns a pipeline results.h5 store into a format-4 archive."""
+    from md_exafs.attribution import peak_attribution
+    from md_exafs.execution import export_ensemble
+    from md_exafs.feff_utils import FeffConfig as UtilsFeffConfig
+    from md_exafs.hdf5_store import ExafsHDF5Store
+
+    k_grid = np.arange(0.05, 16.0, 0.05)
+    p1 = 0.08 * np.sin(2.0 * k_grid * 2.55) / k_grid
+    p2 = 0.03 * np.sin(2.0 * k_grid * 3.60) / k_grid
+
+    store_path = tmp_path / "results.h5"
+    cfg = UtilsFeffConfig(
+        radius=5.5, kmin=3.0, kmax=14.0, kweight=2, dk=2.0, window="hanning"
+    )
+    store = ExafsHDF5Store(store_path, config=cfg, store_paths=True)
+    batch = []
+    for f_idx in range(3):
+        for s_idx in range(2):
+            batch.append(
+                {
+                    "frame_index": f_idx,
+                    "site_index": s_idx,
+                    "k": k_grid,
+                    "chi": p1 + p2,
+                    "absorber_element": "Cu",
+                    "success": True,
+                    "path_contributions": [
+                        {
+                            "path_index": 1,
+                            "r_eff": 2.55,
+                            "nlegs": 2,
+                            "degeneracy": 12.0,
+                            "scatterer": "Cu",
+                            "cw_ratio": 100.0,
+                            "angle": np.nan,
+                            "k": k_grid,
+                            "chi": p1,
+                        },
+                        {
+                            "path_index": 2,
+                            "r_eff": 3.60,
+                            "nlegs": 2,
+                            "degeneracy": 6.0,
+                            "scatterer": "Cu",
+                            "cw_ratio": 35.0,
+                            "angle": np.nan,
+                            "k": k_grid,
+                            "chi": p2,
+                        },
+                    ],
+                }
+            )
+    store.write_site_results_batch(batch)
+    store.close()
+
+    # Raw store reader should still recover fourier_params from meta/feff_config.
+    raw_reader = ArchiveReader(store_path)
+    assert raw_reader.fourier_params["kmin"] == 3.0
+    assert raw_reader.fourier_params["kmax"] == 14.0
+
+    ens_path = export_ensemble(store_path)
+    assert ens_path == tmp_path / "ensemble_results.h5"
+    reader = ArchiveReader(ens_path)
+    assert reader.format_version == 4
+    assert reader.radius == 5.5
+    assert reader.n_tasks == 6
+    assert reader.fourier_params["kmax"] == 14.0
+    assert len(reader.frame_indices) == 3
+    assert len(reader.site_indices) == 2
+    top_paths = reader.get_top_paths()
+    assert len(top_paths) == 2
+
+    att = peak_attribution(ens_path, by="paths", rrange=(1.0, 4.0))
+    assert att["unassigned"]["norm_fraction"] < 1e-4
+    assert att["peaks"]

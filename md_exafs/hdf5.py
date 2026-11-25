@@ -476,13 +476,29 @@ class ArchiveReader:
 
     @property
     def fourier_params(self) -> dict[str, Any]:
-        """Fourier transform parameters recorded in the archive metadata."""
+        """Fourier transform parameters recorded in the archive metadata.
+
+        Falls back to extracting Fourier-transform keys from ``meta/feff_config``
+        on raw pipeline ``results.h5`` stores when ``meta/fourier_params`` is absent.
+        """
         with self._open() as f:
             meta = f["meta"].attrs if "meta" in f else {}
             raw = meta.get("fourier_params")
-            if raw is None:
-                return {}
-            return dict(json.loads(_as_str(raw)))
+            if raw is not None:
+                return dict(json.loads(_as_str(raw)))
+            raw_cfg = meta.get("feff_config")
+            if raw_cfg is not None:
+                cfg = json.loads(_as_str(raw_cfg))
+                out: dict[str, Any] = {}
+                for key in ("kmin", "kmax", "kweight", "dk", "dk2", "window"):
+                    if cfg.get(key) is not None:
+                        out[key] = cfg[key]
+                if cfg.get("rmax") is not None:
+                    out["rmax"] = cfg["rmax"]
+                elif cfg.get("rmax_out") is not None:
+                    out["rmax"] = cfg["rmax_out"]
+                return out
+            return {}
 
     def get_overall_average(self) -> dict[str, np.ndarray]:
         """Return the stored grand average, one array per stored dataset."""
