@@ -106,3 +106,119 @@ def test_group_sites_recovers_planted_populations(tmp_path: Path):
             sum(s["projection"] for s in p["shares"]) + p["unassigned"]["projection"]
         )
         assert total_share == pytest.approx(1.0, abs=1e-6)
+
+
+def test_group_sites_noise_floor_prevents_over_splitting(tmp_path: Path):
+    rng = np.random.default_rng(7)
+    n_sites, n_frames = 8, 40
+    # Homogeneous sites: per-frame-per-site iid noise around the same spectrum.
+    base = _base(R0)
+    per_fs = (
+        base[None, None, :]
+        + 0.35 * rng.standard_normal((n_frames, n_sites, K.size)) / K[None, None, :]
+    )
+    site_means = per_fs.mean(axis=0)
+    frame_means = per_fs.mean(axis=1)
+    overall = per_fs.mean(axis=(0, 1))
+    path = tmp_path / "homog.h5"
+    with EnsembleWriter(path, k_grid=K, fourier_params=FT, radius=7.0) as w:
+        w.set_overall_average(
+            K,
+            overall,
+            n_contributors=np.full(K.shape, n_sites * n_frames, dtype=np.int32),
+        )
+        for s in range(n_sites):
+            w.add_site_average(
+                s,
+                K,
+                site_means[s],
+                n_contributors=np.full(K.shape, n_frames, dtype=np.int32),
+            )
+        for f_idx in range(n_frames):
+            w.add_frame_average(
+                f_idx,
+                K,
+                frame_means[f_idx],
+                n_contributors=np.full(K.shape, n_sites, dtype=np.int32),
+            )
+
+    res = group_sites(path, rrange=(1.0, 3.5), tol=0.05)
+    assert res["noise_floor"] is not None and res["noise_floor"] > 0
+    assert res["n_groups"] == 1
+    assert any("sampling-noise floor" in w for w in res["warnings"])
+
+    forced = group_sites(path, rrange=(1.0, 3.5), n_groups=2)
+    assert forced["n_groups"] == 2
+    assert any("not statistically significant" in w for w in forced["warnings"])
+
+    # Heterogeneous sites well above sampling noise still separate cleanly.
+    het_fs = per_fs.copy()
+    het_fs[:, 4:, :] += 1.5 * _base(3.1)[None, None, :]
+    het_path = tmp_path / "het.h5"
+    with EnsembleWriter(het_path, k_grid=K, fourier_params=FT, radius=7.0) as w:
+        w.set_overall_average(
+            K,
+            het_fs.mean(axis=(0, 1)),
+            n_contributors=np.full(K.shape, n_sites * n_frames, dtype=np.int32),
+        )
+        for s in range(n_sites):
+            w.add_site_average(
+                s,
+                K,
+                het_fs[:, s, :].mean(axis=0),
+                n_contributors=np.full(K.shape, n_frames, dtype=np.int32),
+            )
+        for f_idx in range(n_frames):
+            w.add_frame_average(
+                f_idx,
+                K,
+                het_fs[f_idx].mean(axis=0),
+                n_contributors=np.full(K.shape, n_sites, dtype=np.int32),
+            )
+
+    het_res = group_sites(het_path, rrange=(1.0, 4.0), tol=0.15)
+    assert het_res["n_groups"] == 2
+    assert {frozenset(g["site_indices"]) for g in het_res["groups"]} == {
+        frozenset({0, 1, 2, 3}),
+        frozenset({4, 5, 6, 7}),
+    }
+
+
+def test_peak_attribution_s02_and_e0_shift_invariants(tmp_path: Path):
+    from md_exafs import archive_series
+
+    p_in, p_out = 1.3 * _base(R0), -0.3 * _base(R0)
+    total = p_in + p_out + 0.15 * _base(R0, 0.8)
+    paths = [_path("p_in", p_in), _path("p_out", p_out)]
+    archive = _archive(tmp_path / "scaled.h5", [total], [3], top_paths=paths)
+
+    raw = peak_attribution(archive, by="paths", rrange=(1.0, 3.5))
+    scaled = peak_attribution(archive, by="paths", rrange=(1.0, 3.5), s02=0.75)
+    shifted = peak_attribution(
+        archive, by="paths", rrange=(1.0, 3.5), s02=0.75, e0_shift=2.0
+    )
+
+    assert scaled["adjustment"] == {"s02": 0.75, "e0_shift": 0.0}
+    assert scaled["unassigned"]["norm_fraction"] == pytest.approx(
+        raw["unassigned"]["norm_fraction"], rel=1e-6
+    )
+    assert scaled["peaks"][0]["height"] == pytest.approx(
+        0.75 * raw["peaks"][0]["height"], rel=1e-6
+    )
+    for s_raw, s_sc in zip(
+        raw["peaks"][0]["shares"], scaled["peaks"][0]["shares"], strict=True
+    ):
+        assert s_sc["projection"] == pytest.approx(s_raw["projection"], abs=1e-6)
+
+    for res in (scaled, shifted):
+        pk = res["peaks"][0]
+        assert sum(s["projection"] for s in pk["shares"]) + pk["unassigned"][
+            "projection"
+        ] == pytest.approx(1.0, abs=1e-6)
+
+    series = archive_series(archive, s02=0.75, e0_shift=2.0)
+    assert np.allclose(
+        shifted["total"]["chir_mag"],
+        series["comparison"]["overall_adjusted"]["chir_mag"],
+        atol=1e-12,
+    )

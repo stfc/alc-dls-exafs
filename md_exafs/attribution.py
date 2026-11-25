@@ -33,12 +33,14 @@ from .archive_series import (
     PHASE_SHIFT_ALLOWANCE_A,
     _archive_ft_defaults,
     _coverage_limits,
+    _finite_number,
     _floats,
     _ft_data_warnings,
     _resolve_ft_request,
     _spectrum,
     _units,
 )
+from .experimental import scaled_chi_arrays
 from .hdf5 import ArchiveReader
 from .spectra import resample_chi, xftf_arrays
 
@@ -51,6 +53,10 @@ PEAK_WINDOW_HALF_WIDTH_A = 0.5
 
 # Unassigned fraction of |chi(R)| above which a path decomposition is flagged.
 UNASSIGNED_WARN_FRACTION = 0.10
+
+# Multiple of the estimated pairwise site-sampling noise floor below which
+# hierarchical merges are treated as indistinguishable from sampling noise.
+SITE_NOISE_MARGIN = 2.0
 
 
 @dataclass
@@ -225,6 +231,40 @@ def _features(vec: np.ndarray, in_band: np.ndarray) -> np.ndarray:
     return np.concatenate([vec.real[in_band], vec.imag[in_band]])
 
 
+def _adjust_chi(
+    k: np.ndarray, chi: np.ndarray, s02: float, e0_shift: float
+) -> np.ndarray:
+    """Apply comparison-only S0^2 and delta-E0 scaling on the archive k grid."""
+    if s02 == 1.0 and e0_shift == 0.0:
+        return np.asarray(chi, dtype=float)
+    ka, ca = scaled_chi_arrays(k, np.nan_to_num(chi), s02=s02, e0_shift=e0_shift)
+    return resample_chi(ka, ca, k)
+
+
+def _site_noise_floor(ctx: _Context, n_sites: int) -> float | None:
+    """Expected pairwise RMS distance between two noise-only site averages.
+
+    Estimated from frame-to-frame variance of the stored frame averages
+    assuming independent site fluctuations within each frame:
+    ``sqrt(2 * n_sites * sum_j var(frame_feat_j) / n_frames)``.
+    Returns ``None`` when fewer than two frame averages are stored.
+    """
+    frame_ids = ctx.reader.frame_indices
+    if len(frame_ids) < 2:  # noqa: PLR2004
+        return None
+    feats = []
+    for f_idx in frame_ids:
+        data = ctx.reader.get_frame_average(f_idx)
+        chi_f = np.nan_to_num(_on_grid(data["k"], data["chi"], ctx.k))
+        _, t_f = _ft_complex(ctx.k, chi_f, ctx.ft)
+        feats.append(_features(t_f, ctx.in_band))
+    mat = np.asarray(feats, dtype=float)
+    tr_var = float(np.sum(np.var(mat, axis=0, ddof=1)))
+    if not (math.isfinite(tr_var) and tr_var >= 0.0):
+        return None
+    return float(math.sqrt(2.0 * n_sites * tr_var / len(frame_ids)))
+
+
 def group_sites(
     path: Path | str,
     *,
@@ -281,15 +321,44 @@ def group_sites(
     )
     overall_x = _features(ctx.total, ctx.in_band)
 
+    noise_floor = _site_noise_floor(ctx, n_sites) if n_sites >= 2 else None  # noqa: PLR2004
+    if n_sites >= 2 and noise_floor is None:  # noqa: PLR2004
+        ctx.warnings.append(
+            "The archive stores fewer than 2 frame averages, so site grouping "
+            "cannot be validated against trajectory sampling noise."
+        )
+
     if n_sites < 2:
         labels = np.ones(n_sites, dtype=int)
     else:
         z = linkage(x, method="average")
         if n_groups is not None:
             labels = fcluster(z, t=int(n_groups), criterion="maxclust")
+            if int(n_groups) > 1 and noise_floor is not None:
+                min_split = float(z[n_sites - int(n_groups), 2])
+                sig_thr = SITE_NOISE_MARGIN * noise_floor
+                if min_split < sig_thr:
+                    ctx.warnings.append(
+                        f"Requested n_groups={int(n_groups)} splits sites at "
+                        f"distance {min_split:.3g}, below {SITE_NOISE_MARGIN:g}x "
+                        f"the sampling-noise floor ({sig_thr:.3g}); the split is "
+                        "not statistically significant."
+                    )
         else:
             rms_norm = float(np.sqrt(np.mean(np.sum(x**2, axis=1))))
-            labels = fcluster(z, t=float(tol) * rms_norm, criterion="distance")
+            tol_thr = float(tol) * rms_norm
+            noise_thr = (
+                SITE_NOISE_MARGIN * noise_floor if noise_floor is not None else 0.0
+            )
+            thr = max(tol_thr, noise_thr)
+            if noise_floor is not None and noise_thr > tol_thr:
+                ctx.warnings.append(
+                    f"tol={float(tol):g} (threshold {tol_thr:.3g}) is below "
+                    f"{SITE_NOISE_MARGIN:g}x the sampling-noise floor "
+                    f"({noise_thr:.3g}); effective threshold raised to merge "
+                    "noise-indistinguishable sites."
+                )
+            labels = fcluster(z, t=thr, criterion="distance")
 
     weights = _scalar_weights(sites)
     groups: list[dict[str, Any]] = []
@@ -343,6 +412,7 @@ def group_sites(
         "rrange": list(ctx.rrange),
         "rmax_valid": ctx.rmax_valid,
         "tol": None if n_groups is not None else float(tol),
+        "noise_floor": noise_floor,
         "n_groups": len(groups),
         "n_sites": n_sites,
         "groups": groups,
@@ -355,8 +425,9 @@ def _path_components(ctx: _Context) -> list[dict[str, Any]]:
     if version is None or version < 4:
         raise ValueError(
             f"by='paths' needs archive format version >= 4 (this archive is "
-            f"version {version}): older archives do not store ensemble-weighted "
-            "per-path chi(k). Regenerate the archive, or use by='sites'."
+            f"version {version}): older or raw pipeline archives do not store "
+            "ensemble-weighted per-path chi(k). Run 'md-exafs export-ensemble' "
+            "(or md_exafs.execution.export_ensemble) on results.h5, or use by='sites'."
         )
     paths = ctx.reader.get_top_paths()
     comps: list[dict[str, Any]] = []
@@ -450,6 +521,8 @@ def peak_attribution(
     prominence: float = 0.05,
     max_components: int = 20,
     groups: Any = None,
+    s02: float = 1.0,
+    e0_shift: float = 0.0,
 ) -> dict[str, Any]:
     """Attribute each chi(R) peak of the overall average to its components.
 
@@ -469,16 +542,20 @@ def peak_attribution(
         groups: For ``by="site_groups"``, the output of :func:`group_sites` or
             a sequence of site-index sequences. ``None`` runs
             :func:`group_sites` with defaults.
+        s02: Comparison-only amplitude reduction factor applied identically to
+            total and all components (must be finite and > 0; default 1.0).
+        e0_shift: Comparison-only threshold energy shift (eV) applied
+            identically to total and all components (default 0.0).
 
     Returns:
         A JSON-safe dict with ``schema_version``, ``units``, ``ft_params``,
-        ``rrange``, ``rmax_valid``, ``source``, ``decomposition``, ``r``,
-        ``total``, ``components``, ``remainder``, ``unassigned``, ``peaks`` and
-        ``warnings``. Each peak has ``r_peak``, ``window``, ``height``,
-        ``shoulder_warning``, ``shares`` (``id``, ``projection``, ``loo_delta``,
-        ``r_max`` per kept component), ``unassigned`` and, when components were
-        truncated, ``remainder``. Projections of the shares, remainder and
-        unassigned sum to 1.
+        ``rrange``, ``rmax_valid``, ``adjustment``, ``source``,
+        ``decomposition``, ``r``, ``total``, ``components``, ``remainder``,
+        ``unassigned``, ``peaks`` and ``warnings``. Each peak has ``r_peak``,
+        ``window``, ``height``, ``shoulder_warning``, ``shares`` (``id``,
+        ``projection``, ``loo_delta``, ``r_max`` per kept component),
+        ``unassigned`` and, when components were truncated, ``remainder``.
+        Projections of the shares, remainder and unassigned sum to 1.
 
     Raises:
         ValueError: Bad arguments, not an ensemble archive, or ``by="paths"`` on
@@ -494,9 +571,16 @@ def peak_attribution(
         raise ValueError(f"prominence must be a finite number > 0, got {prominence!r}")
     if isinstance(max_components, bool) or max_components < 1:
         raise ValueError(f"max_components must be >= 1, got {max_components!r}")
+    if not (_finite_number(s02) and float(s02) > 0.0):
+        raise ValueError(f"s02 must be a finite number > 0, got {s02!r}")
+    if not _finite_number(e0_shift):
+        raise ValueError(f"e0_shift must be a finite number, got {e0_shift!r}")
+    s02_f, e0_f = float(s02), float(e0_shift)
 
     ctx = _resolve(path, ft_params, rrange)
     ft, k, r, total = ctx.ft, ctx.k, ctx.r, ctx.total
+    if s02_f != 1.0 or e0_f != 0.0:
+        r, total = _ft_complex(k, _adjust_chi(k, ctx.overall["chi"], s02_f, e0_f), ft)
     reader = ctx.reader
 
     comps: list[dict[str, Any]]
@@ -530,7 +614,9 @@ def peak_attribution(
                     }
                 )
 
-    cmat = np.array([_ft_complex(k, c["chi"], ft)[1] for c in comps])
+    cmat = np.array(
+        [_ft_complex(k, _adjust_chi(k, c["chi"], s02_f, e0_f), ft)[1] for c in comps]
+    )
     unassigned = total - cmat.sum(axis=0)
     band = ctx.in_band
     t_norm = float(np.linalg.norm(total[band]))
@@ -621,6 +707,7 @@ def peak_attribution(
         "ft_params": ft,
         "rrange": list(ctx.rrange),
         "rmax_valid": ctx.rmax_valid,
+        "adjustment": {"s02": s02_f, "e0_shift": e0_f},
         "source": {
             "n_sites": len(reader.site_indices),
             "n_frames": len(reader.frame_indices),
