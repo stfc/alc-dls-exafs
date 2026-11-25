@@ -1,6 +1,6 @@
 """Nanoparticle builder."""
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
 #     "ase==3.27.0",
 #     "marimo>=0.19.11",

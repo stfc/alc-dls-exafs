@@ -51,12 +51,13 @@ results.h5
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -113,6 +114,7 @@ def _ensure_feff_encoding_patch() -> None:
 
 
 if TYPE_CHECKING:
+    import h5py
     from larch import Group
 
     from .exafs_data import EXAFSDataCollection, PathContribution
@@ -135,6 +137,52 @@ _COMPRESS = {"compression": "gzip", "compression_opts": 1, "shuffle": True}
 # averaged aggregates stay float64 for accurate interpolation / Fourier
 # transforms.
 _ARRAY_DTYPE = np.float32
+
+
+class UnreadableHDF5Error(OSError):
+    """An existing HDF5 results file cannot be opened."""
+
+
+def _open_h5(path: Path, mode: str) -> h5py.File:
+    """Open an HDF5 file, explaining unreadable existing files.
+
+    File locking is disabled: a run killed on a shared filesystem can leave a
+    stale lock that blocks resuming, and the stores assume a single writer.
+    Permission and missing-file errors propagate unchanged, so that OS access
+    failures are not reported as corruption.
+    """
+    import h5py
+
+    try:
+        return h5py.File(path, mode, locking=False)
+    except OSError as exc:
+        if (
+            mode == "w"
+            or not path.exists()
+            or isinstance(exc, PermissionError | IsADirectoryError | FileExistsError)
+            or exc.errno == errno.EROFS
+        ):
+            raise
+        raise UnreadableHDF5Error(
+            f"HDF5 file {path} is unreadable ({exc}). It was most likely left "
+            "behind by an interrupted run that did not close it. Move it aside "
+            "to recompute; it has not been modified."
+        ) from exc
+
+
+def _close_h5(h5: h5py.File, path: Path) -> None:
+    """Flush and close *h5*, logging errors without raising."""
+    if not h5.id.valid:
+        return
+    try:
+        h5.flush()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Failed to flush HDF5 file {path}: {exc}")
+    finally:
+        try:
+            h5.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Failed to close HDF5 file {path}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +236,6 @@ class ExafsHDF5Store:
         store_path_params: bool | None = None,
     ) -> None:
         """Open or create the HDF5 file at *path*."""
-        import h5py
-
         self.path = Path(path)
         self.store_paths = store_paths
         self.dedup_k = dedup_k
@@ -215,7 +261,7 @@ class ExafsHDF5Store:
         )
         self._lock = threading.Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._h5 = h5py.File(self.path, mode)
+        self._h5 = _open_h5(self.path, mode)
 
         if mode == "a":
             self._init_metadata(config)
@@ -237,12 +283,8 @@ class ExafsHDF5Store:
         self.close()
 
     def close(self) -> None:
-        """Flush and close the HDF5 file."""
-        try:
-            self._h5.flush()
-            self._h5.close()
-        except Exception:  # noqa: BLE001, S110
-            pass
+        """Flush and close the HDF5 file.  Errors are logged, not raised."""
+        _close_h5(self._h5, self.path)
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -250,7 +292,7 @@ class ExafsHDF5Store:
 
     def _init_metadata(self, config: FeffConfig | None) -> None:
         meta = self._h5.require_group("meta")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         meta.attrs["version"] = _STORE_VERSION
         # Set created_at only on first creation; always record last updated_at.
         if "created_at" not in meta.attrs:
@@ -270,6 +312,7 @@ class ExafsHDF5Store:
         # Pre-create top-level groups
         self._h5.require_group("frames")
         self._h5.require_group("aggregates")
+        self._h5.flush()
 
     # ------------------------------------------------------------------
     # Writing – per-site results
@@ -1068,6 +1111,10 @@ class ExafsHDF5Store:
                     grp_paths["lam"][n_existing_paths:] = p_lams
                     grp_paths["rep"][n_existing_paths:] = p_reps
 
+            # Without a flush, a killed run leaves the superblock and root group
+            # at their creation-time state and the whole file is unreadable.
+            self._h5.flush()
+
     # ------------------------------------------------------------------
     # Migration helper
     # ------------------------------------------------------------------
@@ -1462,11 +1509,9 @@ class AveragedPathsStore:
         mode: str = "a",
     ) -> None:
         """Open or create the averaged-paths HDF5 file."""
-        import h5py
-
         self.path = Path(path)
         self._lock = threading.Lock()
-        self._h5 = h5py.File(self.path, mode)
+        self._h5 = _open_h5(self.path, mode)
         if mode == "a":
             self._init_metadata(source_h5_path)
 
@@ -1474,12 +1519,13 @@ class AveragedPathsStore:
         meta = self._h5.require_group("meta")
         if "version" not in meta.attrs:
             meta.attrs["version"] = "1.0"
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         if "created_at" not in meta.attrs:
             meta.attrs["created_at"] = now
         meta.attrs["updated_at"] = now
         if source_h5_path is not None:
             meta.attrs["source_h5_path"] = str(source_h5_path)
+        self._h5.flush()
 
     def write_average(
         self,
@@ -1626,9 +1672,5 @@ class AveragedPathsStore:
                         p_grp.attrs["angle_std"] = float(pc.angle_std)
 
     def close(self) -> None:
-        """Flush and close the HDF5 file."""
-        try:
-            self._h5.flush()
-            self._h5.close()
-        except Exception:  # noqa: BLE001, S110
-            pass
+        """Flush and close the HDF5 file.  Errors are logged, not raised."""
+        _close_h5(self._h5, self.path)

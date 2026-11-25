@@ -12,7 +12,7 @@ import json
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -55,11 +55,11 @@ class BatchShardWriter:
         self.threshold = float(threshold)
         self.config = config
 
-        self._f = h5py.File(self.path, "w")
+        self._f = h5py.File(self.path, "w", locking=False)
         meta = self._f.create_group("meta")
         meta.attrs["format_version"] = SHARD_VERSION
         meta.attrs["archive_type"] = "batch_shard"
-        meta.attrs["created_at"] = datetime.now(timezone.utc).isoformat()
+        meta.attrs["created_at"] = datetime.now(UTC).isoformat()
         meta.attrs["threshold"] = self.threshold
         if config is not None:
             try:
@@ -70,6 +70,7 @@ class BatchShardWriter:
         meta.create_dataset("k_grid", data=self.k_grid)
         self._tasks_grp = self._f.create_group("tasks")
         self._task_count = 0
+        self._f.flush()
 
     def add_task_result(
         self,
@@ -130,6 +131,10 @@ class BatchShardWriter:
         self._task_count += 1
         self._f["meta"].attrs["n_tasks"] = self._task_count
 
+    def flush(self) -> None:
+        """Flush written tasks to disk so an interrupted run stays readable."""
+        self._f.flush()
+
     def close(self) -> None:
         """Flush and close the HDF5 archive."""
         if self._f:
@@ -159,11 +164,11 @@ class EnsembleWriter:
         self.k_grid = np.asarray(k_grid, dtype=float)
         self.fourier_params = resolve_ft_params(fourier_params)
 
-        self._f = h5py.File(self.path, "w")
+        self._f = h5py.File(self.path, "w", locking=False)
         meta = self._f.create_group("meta")
         meta.attrs["format_version"] = ENSEMBLE_VERSION
         meta.attrs["archive_type"] = "ensemble"
-        meta.attrs["created_at"] = datetime.now(timezone.utc).isoformat()
+        meta.attrs["created_at"] = datetime.now(UTC).isoformat()
         meta.attrs["fourier_params"] = json.dumps(self.fourier_params)
         meta.create_dataset("k_grid", data=self.k_grid)
 
@@ -303,7 +308,7 @@ class ArchiveReader:
 
     @contextmanager
     def _open(self) -> Iterator[h5py.File]:
-        with h5py.File(self.path, "r") as f:
+        with _open_h5(self.path, "r") as f:
             yield f
 
     @property
@@ -626,7 +631,11 @@ BatchShardReader = ArchiveReader
 EnsembleReader = ArchiveReader
 
 # Re-export ExafsHDF5Store for backwards compatibility
-from .hdf5_store import ExafsHDF5Store  # noqa: E402
+from md_exafs.hdf5_store import (  # noqa: E402
+    ExafsHDF5Store,
+    UnreadableHDF5Error,
+    _open_h5,
+)
 
 __all__ = [
     "SHARD_VERSION",
@@ -637,4 +646,5 @@ __all__ = [
     "EnsembleReader",
     "ArchiveReader",
     "ExafsHDF5Store",
+    "UnreadableHDF5Error",
 ]

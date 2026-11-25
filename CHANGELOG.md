@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Python 3.10 is no longer supported. Requires Python 3.11 or newer.
+- Requires h5py 3.5 or newer (for the `locking` argument to `h5py.File`).
+
+### Added
+
+- `md_exafs.stop`: `STOP`, a `threading.Event` set by SIGTERM or SIGUSR1 once
+  `install_sigterm_handler()` has been called, and `RunStoppedError`.
+  `md-exafs pipeline` installs the handler. Library code does not.
+- `BatchShardWriter.flush()`.
+
+### Fixed
+
+- HDF5 results survive a killed run. `ExafsHDF5Store.write_site_results_batch`
+  flushes after each batch, and `BatchExecutor` flushes once per chunk, before
+  removing that chunk's scratch directories. Previously a run killed at a Slurm
+  time limit left an unreadable `results.h5`.
+- On a stop request, the pipeline and `BatchExecutor` finish the chunk in
+  flight and start no new one. `process_trajectory` then raises
+  `RunStoppedError` without averaging, and `md-exafs pipeline` exits with
+  status 1.
+- An existing results file that cannot be opened raises `UnreadableHDF5Error`
+  (an `OSError`) naming the file. `ExafsHDF5Store.close()` logs flush errors
+  instead of silently discarding them.
+- A run killed on a shared filesystem (for example a preempted HPC job) no
+  longer leaves `results.h5` locked. HDF5 file locking is now disabled when
+  opening results archives, so a stale lock cannot block a resume.
+
 ## 0.3.1
 
 ### Added

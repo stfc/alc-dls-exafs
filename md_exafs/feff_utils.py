@@ -28,6 +28,8 @@ except ImportError:
 
 from larch.io import read_ascii
 
+from md_exafs.stop import STOP
+
 logger = logging.getLogger("larch_wrapper")
 
 # Maximum number of absorber sites to process to avoid excessive computation
@@ -1016,6 +1018,8 @@ def run_multi_site_feff_calculations(
         feff_dir = input_file.parent
 
         for attempt in range(max_retries + 1):
+            if attempt > 0 and STOP.is_set():
+                break
             try:
                 success = run_feff_calculation(
                     feff_dir,
@@ -1028,12 +1032,12 @@ def run_multi_site_feff_calculations(
                     return feff_dir, True
 
                 # Progressive backoff before retry (except on last attempt)
-                if attempt < max_retries:
+                if attempt < max_retries and not STOP.is_set():
                     time.sleep(1 + attempt)
 
             except (OSError, RuntimeError, TimeoutError):
                 # On final attempt, return failure
-                if attempt == max_retries:
+                if attempt == max_retries or STOP.is_set():
                     return feff_dir, False
                 # Otherwise, wait and retry
                 time.sleep(1 + attempt)

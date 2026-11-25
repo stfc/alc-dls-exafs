@@ -85,6 +85,14 @@ when you want to inspect the raw FEFF output of a completed run. Eviction is
 also skipped automatically under `--no-hdf5` or `--no-cleanup`, since the
 archive would then not hold the results being deleted.
 
+Each chunk is flushed to the HDF5 archive as soon as it is written, so a run
+killed by the scheduler (for example at a Slurm time limit) leaves a readable
+`results.h5`. On SIGTERM or SIGUSR1 (on Slurm, request `#SBATCH --signal=B:TERM@120`
+so the batch job is signalled ahead of SIGKILL), `pipeline` finishes the chunk
+in flight, starts no new ones, does not average, and exits with status 1. Rerun
+the same command to resume from the saved results. Files written by runs killed
+before this change may be unreadable; move them aside to recompute.
+
 ---
 
 ## 2. analyze
