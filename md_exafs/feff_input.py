@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import logging
 from dataclasses import dataclass
+from dataclasses import fields as dataclass_fields
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -233,6 +234,7 @@ class FeffConfig:
     sample_interval: int = 1
     force_recalculate: bool = False
     cleanup_feff_files: bool = True
+    clean_scratch: bool = True
     keep_path_files: bool = False
     max_paths: int | None = None
     stream_chunk_size: int | None = 256
@@ -333,14 +335,74 @@ class FeffConfig:
 
     @classmethod
     def from_yaml(cls, yaml_path: Path | str) -> FeffConfig:
-        """Load configuration from a YAML file."""
-        if not YAML_AVAILABLE:
-            raise ImportError("PyYAML is required to load configuration from YAML.")
-        with open(yaml_path) as f:
-            data = yaml.safe_load(f)
-        if not isinstance(data, dict):
-            raise ValueError(f"Invalid configuration file {yaml_path}")
-        return cls(**data)
+        """Load configuration from a YAML file.
+
+        Strips any ``cli:`` section (pipeline CLI defaults) and converts FEFF
+        card fields explicitly set to ``null`` into ``delete_tags`` entries.
+        """
+        valid = {f.name for f in dataclass_fields(cls)}
+        return cls(**config_dict_from_yaml(yaml_path, valid_fields=valid))
+
+
+def normalize_config_dict(
+    params: Any,
+    *,
+    valid_fields: set[str] | None = None,
+    source: Path | str = "<yaml>",
+) -> dict[str, Any]:
+    """Normalize a loaded FeffConfig YAML mapping.
+
+    Drops the ``cli:`` section (used by CLI defaults), converts FEFF card
+    fields explicitly set to ``null`` into ``delete_tags`` entries, and checks
+    keys against ``valid_fields`` when provided.
+    """
+    if not isinstance(params, dict):
+        raise ValueError(f"YAML file must contain a dictionary: {source}")
+    out: dict[str, Any] = dict(params)
+
+    explicit_none_fields = [
+        field.upper()
+        for field in FEFF_CARD_FIELDS
+        if field in out and out[field] is None
+    ]
+    if explicit_none_fields:
+        existing_delete_tags = out.get("delete_tags", [])
+        if isinstance(existing_delete_tags, str):
+            existing_delete_tags = [existing_delete_tags]
+        elif existing_delete_tags is None:
+            existing_delete_tags = []
+        else:
+            existing_delete_tags = list(existing_delete_tags)
+
+        for field in explicit_none_fields:
+            if field not in existing_delete_tags:
+                existing_delete_tags.append(field)
+
+        out["delete_tags"] = existing_delete_tags
+
+    out.pop("cli", None)
+
+    if valid_fields is not None:
+        unknown = sorted(k for k in out if k not in valid_fields)
+        if unknown:
+            raise ValueError(
+                f"Unknown config key(s) in {source}: {', '.join(unknown)}. "
+                f"Valid keys: {', '.join(sorted(valid_fields))}"
+            )
+
+    return out
+
+
+def config_dict_from_yaml(
+    yaml_path: Path | str,
+    valid_fields: set[str] | None = None,
+) -> dict[str, Any]:
+    """Load and normalize a FeffConfig dictionary from a YAML file."""
+    if not YAML_AVAILABLE:
+        raise ImportError("PyYAML is required to load configuration from YAML.")
+    with open(yaml_path) as f:
+        params = yaml.safe_load(f)
+    return normalize_config_dict(params, valid_fields=valid_fields, source=yaml_path)
 
 
 def make_potentials_feff_config(base_config: FeffConfig) -> FeffConfig:
@@ -457,6 +519,7 @@ __all__ = [
     "WindowType",
     "PRESETS",
     "FEFF_CARD_FIELDS",
+    "config_dict_from_yaml",
     "make_potentials_feff_config",
     "make_paths_feff_config",
     "build_feff_inp",

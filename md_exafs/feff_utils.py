@@ -419,48 +419,25 @@ class FeffConfig:
         return cls(**preset)  # type: ignore[arg-type]
 
     @classmethod
-    def from_yaml(cls, yaml_path: Path) -> "FeffConfig":
+    def from_yaml(cls, yaml_path: Path | str) -> "FeffConfig":
         """Load configuration from a YAML file.
 
         Expects keys to match FeffConfig field names directly
         (e.g., control, print, s02, scf, exchange, nleg, exafs, delete_tags).
 
         Fields explicitly set to null in YAML will be added to delete_tags
-        to disable those FEFF cards.
+        to disable those FEFF cards. Any ``cli:`` section is ignored.
         """
+        from dataclasses import fields as dataclass_fields
+
+        from .feff_input import normalize_config_dict
+
         if not YAML_AVAILABLE:
             raise ImportError("PyYAML required for configuration files")
         with open(yaml_path) as f:
-            params = yaml.safe_load(f)
-        if not isinstance(params, dict):
-            raise ValueError("YAML file must contain a dictionary")
-
-        # Track FEFF card fields that are explicitly set to None
-        explicit_none_fields = [
-            field.upper()
-            for field in FEFF_CARD_FIELDS
-            if field in params and params[field] is None
-        ]
-
-        # If there are fields explicitly set to None, add them to delete_tags
-        if explicit_none_fields:
-            existing_delete_tags = params.get("delete_tags", [])
-            if isinstance(existing_delete_tags, str):
-                existing_delete_tags = [existing_delete_tags]
-            elif existing_delete_tags is None:
-                existing_delete_tags = []
-            else:
-                existing_delete_tags = list(existing_delete_tags)
-
-            # Add explicit None fields to delete list
-            for field in explicit_none_fields:
-                if field not in existing_delete_tags:
-                    existing_delete_tags.append(field)
-
-            params["delete_tags"] = existing_delete_tags
-
-        # Strip cli: section (pipeline CLI defaults) — not a FeffConfig field
-        params.pop("cli", None)
+            raw = yaml.safe_load(f)
+        valid = {f.name for f in dataclass_fields(cls)}
+        params = normalize_config_dict(raw, valid_fields=valid, source=yaml_path)
         return cls(**params)  # type: ignore[arg-type]
 
     def to_yaml(self, yaml_path: Path) -> None:
