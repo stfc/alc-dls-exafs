@@ -38,8 +38,43 @@
 - `EnsembleWriter` stores `radius` in archive metadata. It is threaded from
   `FeffConfig` through `BatchExecutor`, `write_batch_shard` and `merge_shards`.
 - `experimental.read_experimental_spectrum` accepts a Larch `Group`, a dict
-  (`{"k", "chi"}` or `{"energy", "mu"}`), or a 2-tuple, in addition to file
-  paths. A 2-tuple is read as `(k, chi)` unless `kind="energy_mu"` is given.
+  (`{"k", "chi"}`, `{"energy", "mu"}`, or a file-descriptor dict
+  `{"path": ..., "labels": ..., "group": ..., "autobk": ..., "kind": ...}`),
+  or a 2-tuple, in addition to file paths. A 2-tuple is read as `(k, chi)` unless
+  `kind="energy_mu"` is given.
+- `export_ensemble` (`md_exafs.execution.export_ensemble` and `md-exafs export-ensemble`)
+  converts a pipeline `results.h5` store into a format-4 `ensemble_results.h5`
+  archive with `fourier_params`, `radius`, `n_contributors`, and `/top_paths`.
+  `md-exafs pipeline --hdf5` now writes `ensemble_results.h5` automatically by
+  default (`--ensemble/--no-ensemble`), and `ArchiveReader.fourier_params` falls
+  back to `meta/feff_config` on raw `results.h5` stores.
+- `md_exafs.FeffConfig.from_yaml` now strips any `cli:` block, turns explicit
+  `null` FEFF cards into `delete_tags`, and raises a clear `ValueError` on
+  unknown keys (sharing normalization with `feff_utils.FeffConfig.from_yaml`).
+- `md-exafs pipeline` and `md-exafs analyze` preserve explicit `paths` in
+  `--plot-include all,paths`, accept `--experimental-kwargs JSON`, and overlay
+  the experimental spectrum directly on generated plots (with `s02`/`e0_shift`
+  applied only to the simulated overall average).
+- `group_sites` estimates a sampling-noise floor (`noise_floor`) from stored
+  frame averages and raises the cut threshold to at least `2 * noise_floor` so
+  equivalent sites are not over-split by finite-frame sampling noise.
+- `peak_attribution` accepts optional `s02` and `e0_shift` to match Fit A scaling.
+- `fit_static` snaps near-collinear 3-leg angles (within 10° of 0°/180°) during
+  MD σ² matching, classifies 4-leg FEFF paths into true rattles ($4\sigma^2_\mathrm{1NN}$),
+  collinear forward-focusing ($\sigma^2_\mathrm{2b}(R_\mathrm{eff})$), collinear
+  absorber-crossing ($\sigma^2_\mathrm{3b,A000}(R_\mathrm{eff})$), and bent (dropped),
+  and returns the B0 spectrum curve in `comparison["b0"]["theory"]`.
+- `fit_ensemble`, `fit_static`, and `fit_site_group_weights` echo `epsilon_r`
+  and `epsilon_k` noise estimates alongside `chi2_reduced`.
+- `score_spectrum` (`md_exafs.score_spectrum`) scores any external model χ(k)
+  (such as a manual Artemis fit) against an experiment using the exact same
+  FT, noise-weighting, R-factor, and `n_idp` conventions as `fit_ensemble` and
+  `fit_static`.
+- `cluster_mode="valley"` option on `cluster_1d_sorted`, `cluster_path_category`,
+  `group_path_instances`, `calculate_grouped_msrd`, `export_ensemble`,
+  `merge_shards`, `fit_static`, `md-exafs pipeline`, and `md-exafs export-ensemble`
+  splits distance distributions only at density valleys between shells so broad
+  thermal shells stay intact while separated shells stay distinct.
 - `archive_series` accepts `experiment=`, `s02=` and `e0_shift=`. An
   `experiment` entry is added in the same shape as `overall`. When `s02` or
   `e0_shift` is set, a `comparison` block holds
