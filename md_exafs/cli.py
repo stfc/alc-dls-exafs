@@ -83,7 +83,7 @@ def _diagnose_missing_paths(hdf5_path: "Path", output_dir: "Path", console) -> N
     lines = ["[yellow]Warning: No path contributions found in HDF5.[/yellow]"]
 
     try:
-        with h5py.File(hdf5_path, "r") as h5:
+        with h5py.File(hdf5_path, "r", locking=False) as h5:
             frames_grp = h5.get("frames")
             if frames_grp is None:
                 lines.append("  [dim]HDF5 has no frames group at all.[/dim]")

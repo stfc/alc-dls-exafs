@@ -5,6 +5,7 @@
 ### Changed
 
 - Python 3.10 is no longer supported. Requires Python 3.11 or newer.
+- Requires h5py 3.5 or newer (for the `locking` argument to `h5py.File`).
 
 ### Added
 
@@ -24,9 +25,11 @@
   `RunStoppedError` without averaging, and `md-exafs pipeline` exits with
   status 1.
 - An existing results file that cannot be opened raises `UnreadableHDF5Error`
-  (an `OSError`) naming the file. Lock errors are re-raised unchanged.
-  `ExafsHDF5Store.close()` logs flush errors instead of silently discarding
-  them.
+  (an `OSError`) naming the file. `ExafsHDF5Store.close()` logs flush errors
+  instead of silently discarding them.
+- A run killed on a shared filesystem (for example a preempted HPC job) no
+  longer leaves `results.h5` locked. HDF5 file locking is now disabled when
+  opening results archives, so a stale lock cannot block a resume.
 
 ## 0.3.1
 

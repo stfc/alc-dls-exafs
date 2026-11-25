@@ -146,20 +146,21 @@ class UnreadableHDF5Error(OSError):
 def _open_h5(path: Path, mode: str) -> h5py.File:
     """Open an HDF5 file, explaining unreadable existing files.
 
-    Lock, permission, and missing-file errors propagate unchanged, so that OS
-    access failures are not reported as corruption.
+    File locking is disabled: a run killed on a shared filesystem can leave a
+    stale lock that blocks resuming, and the stores assume a single writer.
+    Permission and missing-file errors propagate unchanged, so that OS access
+    failures are not reported as corruption.
     """
     import h5py
 
     try:
-        return h5py.File(path, mode)
+        return h5py.File(path, mode, locking=False)
     except OSError as exc:
         if (
             mode == "w"
             or not path.exists()
             or isinstance(exc, PermissionError | IsADirectoryError | FileExistsError)
             or exc.errno == errno.EROFS
-            or "unable to lock file" in str(exc)
         ):
             raise
         raise UnreadableHDF5Error(

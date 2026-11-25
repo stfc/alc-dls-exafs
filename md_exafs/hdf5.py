@@ -55,7 +55,7 @@ class BatchShardWriter:
         self.threshold = float(threshold)
         self.config = config
 
-        self._f = h5py.File(self.path, "w")
+        self._f = h5py.File(self.path, "w", locking=False)
         meta = self._f.create_group("meta")
         meta.attrs["format_version"] = SHARD_VERSION
         meta.attrs["archive_type"] = "batch_shard"
@@ -164,7 +164,7 @@ class EnsembleWriter:
         self.k_grid = np.asarray(k_grid, dtype=float)
         self.fourier_params = resolve_ft_params(fourier_params)
 
-        self._f = h5py.File(self.path, "w")
+        self._f = h5py.File(self.path, "w", locking=False)
         meta = self._f.create_group("meta")
         meta.attrs["format_version"] = ENSEMBLE_VERSION
         meta.attrs["archive_type"] = "ensemble"

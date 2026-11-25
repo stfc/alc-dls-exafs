@@ -25,7 +25,7 @@ dependencies = [
     "scipy>=1.11",
     "xraylarch>=0.9.47",
     "pymatgen<2026.0,>=2024.1",
-    "h5py>=3.0",
+    "h5py>=3.5",
 ]
 
 [project.optional-dependencies]

@@ -211,23 +211,26 @@ def test_missing_file_in_read_mode_is_not_reported_as_corrupt(tmp_path: Path) ->
         ExafsHDF5Store(tmp_path / "missing.h5", mode="r")
 
 
-def test_lock_error_is_not_reported_as_corruption(
+def test_stores_open_without_file_locking(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "results.h5"
     _write_one_batch(path)
 
-    def locked(*_args, **_kwargs):
-        raise OSError(
-            "Unable to synchronously open file (unable to lock file, errno = 11, "
-            "error message = 'Resource temporarily unavailable')"
-        )
+    real_file = h5py.File
+    seen: list[dict] = []
 
-    monkeypatch.setattr(h5py, "File", locked)
+    def spy(*args, **kwargs):
+        seen.append(kwargs)
+        return real_file(*args, **kwargs)
 
-    with pytest.raises(OSError, match="unable to lock file") as exc_info:
-        ExafsHDF5Store(path)
-    assert not isinstance(exc_info.value, UnreadableHDF5Error)
+    monkeypatch.setattr(h5py, "File", spy)
+
+    ExafsHDF5Store(path).close()
+    AveragedPathsStore(tmp_path / "averaged_paths.h5").close()
+
+    assert seen
+    assert all(kw.get("locking") is False for kw in seen)
 
 
 def test_archive_reader_raises_unreadable_error(tmp_path: Path) -> None:

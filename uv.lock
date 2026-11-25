@@ -2059,7 +2059,7 @@ pre-commit = [
 requires-dist = [
     { name = "altair", marker = "extra == 'notebooks'", specifier = ">=5.0" },
     { name = "ase", specifier = ">=3.25,<4.0" },
-    { name = "h5py", specifier = ">=3.0" },
+    { name = "h5py", specifier = ">=3.5" },
     { name = "marimo", marker = "extra == 'notebooks'", specifier = ">=0.16.4" },
     { name = "matplotlib", marker = "extra == 'cli'", specifier = ">=3.5" },
     { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=3.0" },
