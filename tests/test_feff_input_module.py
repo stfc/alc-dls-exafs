@@ -53,3 +53,31 @@ def test_build_feff_inp_exclude_hydrogen():
     # Absorber index 0 is H -> should raise ValueError
     with pytest.raises(ValueError, match="hydrogen atom"):
         build_feff_inp(atoms, cfg, absorber_idx=0)
+
+
+def test_from_yaml_strips_cli_handles_null_cards_and_rejects_unknown(tmp_path):
+    from md_exafs.feff_utils import FeffConfig as UtilsFeffConfig
+
+    cfg_file = tmp_path / "exafs_config.yaml"
+    cfg_file.write_text(
+        "spectrum_type: EXAFS\n"
+        "edge: K\n"
+        "radius: 5.5\n"
+        "scf: null\n"
+        "kmin: 3\n"
+        "kmax: 18\n"
+        "clean_scratch: true\n"
+        "cli:\n"
+        "  reuse_potentials: true\n"
+    )
+    for cls in (FeffConfig, UtilsFeffConfig):
+        cfg = cls.from_yaml(cfg_file)
+        assert cfg.radius == 5.5
+        assert cfg.scf is None
+        assert "SCF" in (cfg.delete_tags or [])
+
+    bad_file = tmp_path / "bad.yaml"
+    bad_file.write_text("radius: 5.0\nnot_a_real_key: 42\n")
+    for cls in (FeffConfig, UtilsFeffConfig):
+        with pytest.raises(ValueError, match="Unknown config key"):
+            cls.from_yaml(bad_file)

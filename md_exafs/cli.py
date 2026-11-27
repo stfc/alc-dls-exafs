@@ -3,6 +3,7 @@
 
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import typer
 from ase import Atoms
@@ -65,15 +66,103 @@ def parse_plot_components(components_str: str) -> list[PlotComponent]:
             raise typer.BadParameter(
                 f"Invalid plot component '{comp}'. Available: {available}"
             ) from None
-    # If 'all' is specified, return all components EXCEPT 'paths' (opt-in)
+    # If 'all' is specified, expand to standard components while preserving explicit 'paths'
     if PlotComponent.ALL in components:
-        return [
+        expanded = [
             PlotComponent.INDIVIDUAL,
             PlotComponent.AVERAGE,
             PlotComponent.FRAMES,
             PlotComponent.SITES,
         ]
-    return components
+        if PlotComponent.PATHS in components:
+            expanded.append(PlotComponent.PATHS)
+        return expanded
+    return list(dict.fromkeys(components))
+
+
+def _load_experimental_overlay(
+    experimental: Path,
+    experimental_kwargs: str | None,
+    fourier_params: dict,
+    s02: float,
+    e0_shift: float,
+    overall_group: Any | None,
+    console: Console,
+) -> tuple[dict[str, Any] | None, Any | None]:
+    """Load an experimental spectrum for plotting and adjust a copy of the simulation.
+
+    Per ADR 0009, the experimental spectrum is never scaled or shifted;
+    ``s02`` and ``e0_shift`` are applied only to a copy of the simulated
+    overall average for visual comparison.
+    """
+    import copy
+    import json
+
+    import numpy as np
+
+    from .experimental import read_experimental_spectrum, scaled_chi_arrays
+    from .spectra import resample_chi, xftf_arrays
+
+    source: object = experimental
+    if experimental_kwargs:
+        try:
+            extra = json.loads(experimental_kwargs)
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter(
+                f"Invalid JSON in --experimental-kwargs: {exc}"
+            ) from exc
+        if not isinstance(extra, dict):
+            raise typer.BadParameter("--experimental-kwargs must be a JSON object")
+        source = {"path": str(experimental), **extra}
+
+    console.print(
+        f"\n[cyan]Loading experimental spectrum from {experimental}...[/cyan]"
+    )
+    ft_clean = {
+        k: (v.value if hasattr(v, "value") else v) for k, v in fourier_params.items()
+    }
+    try:
+        k_exp, chi_exp, _exp_meta = read_experimental_spectrum(source)
+        # Resample onto a uniform k grid (0.05 A^-1) before xftf, as non-uniform
+        # experimental grids with fine spacing can overflow Larch's nfft=2048 buffer.
+        k_exp_grid = np.arange(
+            max(0.05, float(np.nanmin(k_exp))),
+            float(np.nanmax(k_exp)) + 1e-9,
+            0.05,
+        )
+        chi_exp_grid = resample_chi(k_exp, chi_exp, k_exp_grid)
+        ft_exp = xftf_arrays(k_exp_grid, chi_exp_grid, ft_clean, warn_uncovered=False)
+        exp_dict = {
+            "k": k_exp_grid,
+            "chi": chi_exp_grid,
+            "r": ft_exp["r"],
+            "chir_mag": ft_exp["chir_mag"],
+        }
+        adjusted_overall = overall_group
+        if overall_group is not None and (s02 != 1.0 or e0_shift != 0.0):
+            adjusted_overall = copy.deepcopy(overall_group)
+            k_sim, chi_sim = scaled_chi_arrays(
+                adjusted_overall.k, adjusted_overall.chi, s02=s02, e0_shift=e0_shift
+            )
+            chi_sim_u = resample_chi(k_sim, chi_sim, adjusted_overall.k)
+            ft_sim = xftf_arrays(
+                adjusted_overall.k, chi_sim_u, ft_clean, warn_uncovered=False
+            )
+            adjusted_overall.chi = chi_sim_u
+            adjusted_overall.r = ft_sim["r"]
+            adjusted_overall.chir_mag = ft_sim["chir_mag"]
+            adjusted_overall.chir_re = ft_sim["chir_re"]
+            adjusted_overall.chir_im = ft_sim["chir_im"]
+        console.print(
+            f"[green]✓ Experimental spectrum loaded: {len(k_exp)} points "
+            f"(simulation overlay S02={s02}, ΔE0={e0_shift} eV)[/green]"
+        )
+        return exp_dict, adjusted_overall
+    except Exception as exp_err:
+        console.print(
+            f"[yellow]Warning: Could not process experimental spectrum: {exp_err}[/yellow]"
+        )
+        return None, overall_group
 
 
 def _diagnose_missing_paths(hdf5_path: "Path", output_dir: "Path", console) -> None:
@@ -853,6 +942,14 @@ def analyze_feff_outputs(
         "-e",
         help="Optional experimental spectrum file (.prj, .dat, .chi) to overlay",
     ),
+    experimental_kwargs: str | None = typer.Option(
+        None,
+        "--experimental-kwargs",
+        help=(
+            "JSON object of reader options forwarded to read_experimental_spectrum, "
+            'e.g. \'{"labels": "chi,k"}\' or \'{"group": "Cu_foil"}\''
+        ),
+    ),
     e0_shift: float = typer.Option(
         0.0,
         "--e0-shift",
@@ -1118,6 +1215,20 @@ def analyze_feff_outputs(
             style=plot_style,
         )
 
+        if experimental:
+            exp_dict, adj_overall = _load_experimental_overlay(
+                experimental=experimental,
+                experimental_kwargs=experimental_kwargs,
+                fourier_params=config.fourier_params,
+                s02=s02,
+                e0_shift=e0_shift,
+                overall_group=collection.overall_average,
+                console=console,
+            )
+            if exp_dict is not None:
+                collection.experimental_spectrum = exp_dict
+                collection.overall_average = adj_overall
+
         plot_result = plot_exafs_matplotlib(
             collection=collection,
             config=plot_config,
@@ -1150,25 +1261,6 @@ def analyze_feff_outputs(
             if plot_paths_out:
                 for fmt, path in plot_paths_out.items():
                     console.print(f"  {fmt.upper()}: {path}")
-
-        if experimental and Path(experimental).exists():
-            from .experimental import read_experimental_spectrum, scaled_chi_arrays
-
-            console.print(
-                f"\n[cyan]Loading experimental spectrum from {experimental}...[/cyan]"
-            )
-            try:
-                k_exp, chi_exp, exp_meta = read_experimental_spectrum(experimental)
-                k_scaled, chi_scaled = scaled_chi_arrays(
-                    k_exp, chi_exp, s02=s02, e0_shift=e0_shift
-                )
-                console.print(
-                    f"[green]✓ Experimental spectrum loaded: {len(k_scaled)} points (S02={s02}, ΔE0={e0_shift} eV)[/green]"
-                )
-            except Exception as exp_err:
-                console.print(
-                    f"[yellow]Warning: Could not process experimental spectrum: {exp_err}[/yellow]"
-                )
 
         # Save averaged groups if requested
         if save_groups:
@@ -1257,8 +1349,8 @@ def run_full_pipeline(
             "Options: 'individual' (individual spectra), 'average' (overall average), "
             "'frames' (frame averages), 'sites' (site averages), "
             "'paths' (path contributions panel), and 'all' "
-            "(all components present, excluding paths). "
-            "Examples: 'average', 'average,frames', 'individual,average,sites' "
+            "(individual, average, frames, sites; add 'paths' explicitly, e.g. 'all,paths'). "
+            "Examples: 'average', 'average,frames', 'all,paths'. "
             "Default is 'all'."
         ),
     ),
@@ -1269,6 +1361,24 @@ def run_full_pipeline(
             "Write per-site chi(k) and aggregates to a single HDF5 file "
             "instead of many ASCII .dat files. Implies --keep-paths when "
             "'paths' is included in --plot-include. (Default: True)"
+        ),
+    ),
+    write_ensemble: bool = typer.Option(
+        True,
+        "--ensemble/--no-ensemble",
+        help=(
+            "Also export a format-4 ensemble_results.h5 archive (with "
+            "n_contributors, fourier_params, radius, and /top_paths) for "
+            "experimental comparison, fitting, and peak attribution. "
+            "Requires --hdf5. (Default: True)"
+        ),
+    ),
+    cluster_mode: str = typer.Option(
+        "running_mean",
+        "--cluster-mode",
+        help=(
+            "Path grouping mode for ensemble_results.h5 /top_paths: "
+            "'running_mean' (default) or 'valley' (split only at density valleys)."
         ),
     ),
     clean_scratch: bool | None = typer.Option(
@@ -1418,6 +1528,14 @@ def run_full_pipeline(
         "--experimental",
         "-e",
         help="Optional experimental spectrum file (.prj, .dat, .chi) to overlay in analysis",
+    ),
+    experimental_kwargs: str | None = typer.Option(
+        None,
+        "--experimental-kwargs",
+        help=(
+            "JSON object of reader options forwarded to read_experimental_spectrum, "
+            'e.g. \'{"labels": "chi,k"}\' or \'{"group": "Cu_foil"}\''
+        ),
     ),
     e0_shift: float = typer.Option(
         0.0,
@@ -1853,8 +1971,35 @@ def run_full_pipeline(
         )
         console.print(f"  Successful calculations: {len(individual_groups)}")
 
-        # Generate plots if show_plot is enabled or plot components specified
-        if show_plot or plot_include != "all":
+        # Export format-4 ensemble archive alongside results.h5 for fit/attribution APIs
+        if (
+            write_ensemble
+            and use_hdf5
+            and effective_hdf5_path is not None
+            and effective_hdf5_path.exists()
+        ):
+            try:
+                from .execution import export_ensemble
+
+                ensemble_out = output_dir / "ensemble_results.h5"
+                export_ensemble(
+                    effective_hdf5_path,
+                    ensemble_out,
+                    fourier_params=config.fourier_params,
+                    radius=config.radius,
+                    cluster_mode=cluster_mode,
+                )
+                console.print(
+                    f"[green]✓ Format-4 ensemble archive written: {ensemble_out}[/green]"
+                )
+            except Exception as ens_err:  # noqa: BLE001
+                console.print(
+                    f"[yellow]Warning: Could not export ensemble_results.h5: "
+                    f"{ens_err}[/yellow]"
+                )
+
+        # Generate plots if show_plot is enabled, experimental overlay given, or custom plot components specified
+        if show_plot or experimental is not None or plot_include != "all":
             console.print("\n[cyan]Generating plots...[/cyan]")
 
             # Parse plot components and create plot
@@ -1977,6 +2122,20 @@ def run_full_pipeline(
                     edge=config.edge,
                     style=plot_style,
                 )
+
+                if experimental:
+                    exp_dict, adj_overall = _load_experimental_overlay(
+                        experimental=experimental,
+                        experimental_kwargs=experimental_kwargs,
+                        fourier_params=config.fourier_params,
+                        s02=s02,
+                        e0_shift=e0_shift,
+                        overall_group=collection.overall_average,
+                        console=console,
+                    )
+                    if exp_dict is not None:
+                        collection.experimental_spectrum = exp_dict
+                        collection.overall_average = adj_overall
 
                 # Generate plot using new matplotlib function
                 _plot_result = plot_exafs_matplotlib(
@@ -2413,6 +2572,47 @@ def debye_waller(
     msrd_plot_path = Path(f"{out_prefix}_msrd_{site_label}.png")
     plot_sigma2_vs_reff(res_2b, res_3b, output_path=msrd_plot_path)
     console.print(f"  [green]✓[/green] σ² vs Reff plot → [cyan]{msrd_plot_path}[/cyan]")
+
+
+@app.command("export-ensemble")
+def export_ensemble_cmd(
+    results_h5: Path = typer.Argument(
+        ...,
+        help="Path to a pipeline results.h5 file (ExafsHDF5Store).",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Destination path (default: ensemble_results.h5 next to results.h5).",
+    ),
+    top_n_paths: int = typer.Option(
+        25,
+        "--top-n-paths",
+        help="Maximum number of top path groups to store in /top_paths.",
+    ),
+    cluster_mode: str = typer.Option(
+        "running_mean",
+        "--cluster-mode",
+        help="Path grouping: 'running_mean' (historical) or 'valley' (split only at density valleys between shells).",
+    ),
+) -> None:
+    """Convert a pipeline results.h5 store into a format-4 ensemble_results.h5 archive."""
+    from .execution import export_ensemble
+
+    try:
+        out_path = export_ensemble(
+            results_h5,
+            output,
+            top_n_paths=top_n_paths,
+            cluster_mode=cluster_mode,
+        )
+        console.print(
+            f"[green]✓ Format-4 ensemble archive written to {out_path}[/green]"
+        )
+    except Exception as exc:
+        console.print(f"[red]Error exporting ensemble archive: {exc}[/red]")
+        raise typer.Exit(1) from exc
 
 
 if __name__ == "__main__":

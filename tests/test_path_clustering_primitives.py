@@ -117,3 +117,56 @@ class TestEstimateToleranceFromElbow:
         distances = np.array([0.01, 0.02, np.nan, np.inf, 0.5])
         result = estimate_tolerance_from_elbow(distances)
         assert len(result["sorted_distances"]) == 3
+
+
+def test_cluster_1d_sorted_valley_keeps_broad_unimodal_shell_whole():
+    rng = np.random.default_rng(0)
+    shell = rng.normal(3.16, 0.15, 5000)
+    assert len(cluster_1d_sorted(shell, 0.15)) > 1
+    assert len(cluster_1d_sorted(shell, 0.15, "valley")) == 1
+
+
+def test_cluster_1d_sorted_valley_splits_separated_shells():
+    rng = np.random.default_rng(1)
+    shells = np.concatenate([rng.normal(3.1, 0.15, 3000), rng.normal(5.4, 0.15, 3000)])
+    clusters = cluster_1d_sorted(shells, 0.15, "valley")
+    assert len(clusters) == 2
+    assert sorted(len(c) for c in clusters) == [3000, 3000]
+
+
+def test_cluster_1d_sorted_rejects_unknown_mode():
+    import pytest
+
+    with pytest.raises(ValueError, match="cluster mode"):
+        cluster_1d_sorted(np.array([1.0, 2.0]), 0.1, "gap")
+
+
+def test_cluster_1d_sorted_valley_handles_small_n_msrd_and_tail_ripples():
+    # Small-N MSRD (e.g. single absorber: 6 1NN + 8 3NN = 14 instances) must split.
+    small = np.concatenate([np.full(6, 3.16), np.full(8, 5.45)])
+    clusters = cluster_1d_sorted(small, 0.10, "valley")
+    assert len(clusters) == 2
+    assert sorted(len(c) for c in clusters) == [6, 8]
+
+    # Small noise bump in the tail between two tall shells must not cause a 3rd cut.
+    rng = np.random.default_rng(42)
+    with_ripple = np.concatenate(
+        [
+            rng.normal(3.16, 0.14, 4000),
+            rng.normal(3.75, 0.05, 8),  # tiny tail ripple (<0.5% peak height)
+            rng.normal(5.45, 0.15, 4000),
+        ]
+    )
+    clusters_r = cluster_1d_sorted(with_ripple, 0.15, "valley")
+    assert len(clusters_r) == 2
+
+    # Angle-scale clustering (bandwidth=15 deg) stays fast and separates 0/90/180 deg.
+    angles = np.concatenate(
+        [
+            rng.normal(5.0, 3.0, 500),
+            rng.normal(90.0, 4.0, 500),
+            rng.normal(175.0, 3.0, 500),
+        ]
+    )
+    ang_clusters = cluster_1d_sorted(angles, 15.0, "valley")
+    assert len(ang_clusters) == 3

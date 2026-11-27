@@ -6,6 +6,28 @@
 
 - Python 3.10 is no longer supported. Requires Python 3.11 or newer.
 - Requires h5py 3.5 or newer (for the `locking` argument to `h5py.File`).
+- **Breaking:** The ensemble archive format is bumped from version 3 to 4
+  (`ENSEMBLE_VERSION = 4`). Version 2 and 3 archives remain readable through
+  `ArchiveReader`.
+- **Breaking:** `/top_paths/*/chi` in ensemble archives now stores the
+  ensemble-weighted path contribution (per-instance `path_chi` summed and
+  divided by the per-k `n_contributors`), not `path_chi` evaluated on the
+  group-mean parameters. Path contributions therefore keep the disorder damping
+  and sum with `unassigned` to the overall average. `/top_paths` groups paths
+  with angle-aware clustering (`cluster_path_category`), ranks them by
+  ensemble-weighted importance, and stores a per-path `count` and a file-level
+  `top_paths.attrs["n_tasks"]`.
+- **Breaking:** Removed the duplicate `exafs_data.make_path_key` (`SS_`/`MS3_`
+  labels). All callers now use `paths.make_path_key`, which gives labels such as
+  `Cu_2_2.55` and `Cu-Cu_3_3.60_A120`. Keys already stored in old archives are
+  unchanged. `aiida-feff` carries a separate downstream copy of
+  `make_path_key`, which is not updated by this release.
+- **Breaking:** The $\Delta E_0$ sign convention is fixed in
+  `experimental.shifted_k_mask` and `experimental.scaled_chi_arrays`. Both now
+  use $k^2 + \Delta E_0 / (\hbar^2/2m_e)$, matching `paths.path_chi` and Larch's
+  `feffdat._calc_chi`; the previous sign was opposite to both. Downstream `aiida-feff` and
+  `aiidalab-exafs` code that applies `e0_shift` through these functions must be
+  checked and updated, because results for a nonzero `e0_shift` change.
 
 ### Added
 
@@ -13,6 +35,89 @@
   `install_sigterm_handler()` has been called, and `RunStoppedError`.
   `md-exafs pipeline` installs the handler. Library code does not.
 - `BatchShardWriter.flush()`.
+- `EnsembleWriter` stores `radius` in archive metadata. It is threaded from
+  `FeffConfig` through `BatchExecutor`, `write_batch_shard` and `merge_shards`.
+- `experimental.read_experimental_spectrum` accepts a Larch `Group`, a dict
+  (`{"k", "chi"}`, `{"energy", "mu"}`, or a file-descriptor dict
+  `{"path": ..., "labels": ..., "group": ..., "autobk": ..., "kind": ...}`),
+  or a 2-tuple, in addition to file paths. A 2-tuple is read as `(k, chi)` unless
+  `kind="energy_mu"` is given.
+- `export_ensemble` (`md_exafs.execution.export_ensemble` and `md-exafs export-ensemble`)
+  converts a pipeline `results.h5` store into a format-4 `ensemble_results.h5`
+  archive with `fourier_params`, `radius`, `n_contributors`, and `/top_paths`.
+  `md-exafs pipeline --hdf5` now writes `ensemble_results.h5` automatically by
+  default (`--ensemble/--no-ensemble`), and `ArchiveReader.fourier_params` falls
+  back to `meta/feff_config` on raw `results.h5` stores.
+- `md_exafs.FeffConfig.from_yaml` now strips any `cli:` block, turns explicit
+  `null` FEFF cards into `delete_tags`, and raises a clear `ValueError` on
+  unknown keys (sharing normalization with `feff_utils.FeffConfig.from_yaml`).
+- `md-exafs pipeline` and `md-exafs analyze` preserve explicit `paths` in
+  `--plot-include all,paths`, accept `--experimental-kwargs JSON`, and overlay
+  the experimental spectrum directly on generated plots (with `s02`/`e0_shift`
+  applied only to the simulated overall average).
+- `group_sites` estimates a sampling-noise floor (`noise_floor`) from stored
+  frame averages and raises the cut threshold to at least `2 * noise_floor` so
+  equivalent sites are not over-split by finite-frame sampling noise.
+- `peak_attribution` accepts optional `s02` and `e0_shift` to match Fit A scaling.
+- `fit_static` snaps near-collinear 3-leg angles (within 10° of 0°/180°) during
+  MD σ² matching, classifies 4-leg FEFF paths into true rattles ($4\sigma^2_\mathrm{1NN}$),
+  collinear forward-focusing ($\sigma^2_\mathrm{2b}(R_\mathrm{eff})$), collinear
+  absorber-crossing ($\sigma^2_\mathrm{3b,A000}(R_\mathrm{eff})$), and bent (dropped),
+  and returns the B0 spectrum curve in `comparison["b0"]["theory"]`.
+- `fit_ensemble`, `fit_static`, and `fit_site_group_weights` echo `epsilon_r`
+  and `epsilon_k` noise estimates alongside `chi2_reduced`.
+- `score_spectrum` (`md_exafs.score_spectrum`) scores any external model χ(k)
+  (such as a manual Artemis fit) against an experiment using the exact same
+  FT, noise-weighting, R-factor, and `n_idp` conventions as `fit_ensemble` and
+  `fit_static`.
+- `cluster_mode="valley"` option on `cluster_1d_sorted`, `cluster_path_category`,
+  `group_path_instances`, `calculate_grouped_msrd`, `export_ensemble`,
+  `merge_shards`, `fit_static`, `md-exafs pipeline`, and `md-exafs export-ensemble`
+  splits distance distributions only at density valleys between shells so broad
+  thermal shells stay intact while separated shells stay distinct.
+- `archive_series` accepts `experiment=`, `s02=` and `e0_shift=`. An
+  `experiment` entry is added in the same shape as `overall`. When `s02` or
+  `e0_shift` is set, a `comparison` block holds
+  `{"s02", "e0_shift", "overall_adjusted"}`. `overall` stays raw, so the schema
+  version is unchanged.
+- `archive_series` reports `ft_limits["rmax_valid"]` (the archive `radius` minus
+  0.5 Å) and adds a structured warning when the requested `rmax` exceeds it.
+- `viz.series_to_vega_lite` overlays `experiment` as a dashed line in the
+  `chi_k` and `chi_r` views, and plots `comparison["overall_adjusted"]` when it
+  is present.
+- `ArchiveReader` gains `get_top_paths()`, `n_tasks`, `radius` and
+  `format_version`.
+- `paths.cluster_path_category`, a shared angle-aware clustering helper used by
+  `PathAggregator` and archive path grouping.
+- `md_exafs.fit.fit_ensemble` (also re-exported as `md_exafs.fit_ensemble`) fits
+  global $S_0^2$ and $\Delta E_0$ to an ensemble archive's overall $\chi(k)$
+  against experimental data over several $k$-weights (default `(1, 2, 3)`) in
+  R-, k-, or q-space. It uses Larch's `TransformGroup`, per-$k$-weight
+  `estimate_noise` normalization, and $\chi^2$ and uncertainty rescaling matched
+  to Larch's $N_{\mathrm{idp}}$. It returns a versioned, JSON-safe report with
+  R-factors and aligned theory and experiment curves.
+- `md_exafs.fit.fit_site_group_weights` (also re-exported at top-level
+  `md_exafs`) fits simplex-constrained ($w_g \ge 0$, $\sum_g w_g = 1$) site-group
+  weights to experimental $\chi(R)$ over several $k$-weights, normalized per
+  $k$-weight with `estimate_noise`. It uses $S_0^2$ and a fixed $\Delta E_0$ from
+  `fit_ensemble` or caller-supplied values. The report gives MD and fitted
+  weights, R-factors before and after reweighting, and warns of overfitting when
+  the number of groups exceeds $N_{\mathrm{idp}}/2$.
+- `md_exafs.attribution.peak_attribution` and `md_exafs.attribution.group_sites`
+  (also re-exported at top-level `md_exafs`): decomposes $\chi(R)$ peaks by
+  scattering path (`by="paths"`, requiring archive format version 4), absorber
+  site (`by="sites"`), or site group (`by="site_groups"`), reporting signed
+  projections that sum to 1 with an explicit `unassigned` component, leave-one-out
+  peak deltas, peak windows between neighbouring minima with shoulder detection,
+  and hierarchical clustering of sites by their complex $\chi(R)$ spectra.
+- `md_exafs.fit_static` (re-exported via `md_exafs.fit` and `md_exafs.fit_static`):
+  conventional single-structure Larch `feffit` fitting (Fit B) using
+  complete-linkage exact complex-sum path pooling (`pool_paths`), synthetic
+  `FeffPathGroup` adapters (`to_feffit_path`), multi-absorber static FEFF path
+  collection (`static_paths`), thermal-only MD Debye–Waller factors
+  (`sigma2_thermal_A2` via `match_paths_within_tolerance`, dropping and flagging
+  unmatched MS paths), isotropic or per-shell $\Delta R$ modes, static
+  path-truncation diagnostics, and side-by-side Fit A / B0 / Fit B comparisons.
 
 ### Fixed
 

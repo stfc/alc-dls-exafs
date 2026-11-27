@@ -476,28 +476,127 @@ def path_feature_vector(r_eff: float, angle: float | None = None) -> np.ndarray:
     return np.array([r_eff, r_eff * np.radians(angle)])
 
 
-def cluster_1d_sorted(values: np.ndarray, tol: float) -> list[np.ndarray]:
-    """Greedy 1-D clustering by running-mean gap.
+CLUSTER_MODES = ("running_mean", "valley")
+VALLEY_DEPTH = 0.5
+VALLEY_MIN_PEAK_REL = 0.005
 
-    Values are sorted ascending; a new cluster starts whenever the next
-    value's distance from the *running mean* of the current (growing)
-    cluster exceeds ``tol``. This is the sequential clustering algorithm
-    historically inlined in :func:`calculate_grouped_msrd`, extracted here so
-    it can be reused for FEFF-path pooling and MSRD↔FEFF matching as well.
+
+def _valley_segments(
+    sorted_vals: np.ndarray, bandwidth: float
+) -> list[tuple[int, int]]:
+    """Index ranges ``[start, stop)`` of ``sorted_vals`` split at density valleys.
+
+    The values are histogrammed on a bandwidth-scaled grid (padded by
+    ``3 * bandwidth`` so boundary shells are interior local maxima), smoothed
+    with a Gaussian of width ``bandwidth``, and partitioned between adjacent
+    local peaks whose intervening valley dips below ``VALLEY_DEPTH`` times the
+    shorter flanking peak. Peaks below ``VALLEY_MIN_PEAK_REL`` of the global
+    maximum (isolated stray outliers in large ensembles) are ignored.
+    """
+    from scipy.signal import find_peaks
+
+    n = len(sorted_vals)
+    if n < 2 or bandwidth <= 0.0:  # noqa: PLR2004
+        return [(0, n)]
+    lo, hi = float(sorted_vals[0]), float(sorted_vals[-1])
+    if hi - lo <= 0.0:
+        return [(0, n)]
+
+    bin_w = max(bandwidth / 10.0, (hi - lo) / 4000.0)
+    pad = 3.0 * bandwidth
+    edges = np.arange(lo - pad, hi + pad + 2.0 * bin_w, bin_w)
+    counts, _ = np.histogram(sorted_vals, bins=edges)
+    sigma = bandwidth / bin_w
+    radius = max(1, int(np.ceil(3.0 * sigma)))
+    offs = np.arange(-radius, radius + 1)
+    kern = np.exp(-0.5 * (offs / sigma) ** 2)
+    dens = np.convolve(counts.astype(float), kern / kern.sum(), mode="same")
+    centers = edges[:-1] + 0.5 * bin_w
+
+    max_dens = float(dens.max())
+    if max_dens <= 0.0:
+        return [(0, n)]
+
+    raw_peaks, _ = find_peaks(dens, height=VALLEY_MIN_PEAK_REL * max_dens)
+    peaks = [int(p) for p in raw_peaks]
+    while len(peaks) >= 2:  # noqa: PLR2004
+        worst_idx = -1
+        worst_ratio = -1.0
+        for j in range(len(peaks) - 1):
+            pa, pb = peaks[j], peaks[j + 1]
+            flank = min(float(dens[pa]), float(dens[pb]))
+            ratio = 1.0 if flank <= 0.0 else float(dens[pa : pb + 1].min()) / flank
+            if ratio > worst_ratio:
+                worst_ratio = ratio
+                worst_idx = j
+        if worst_ratio < VALLEY_DEPTH:
+            break
+        pa, pb = peaks[worst_idx], peaks[worst_idx + 1]
+        peaks.pop(worst_idx if dens[pa] <= dens[pb] else worst_idx + 1)
+
+    if len(peaks) < 2:  # noqa: PLR2004
+        return [(0, n)]
+
+    cuts: list[float] = []
+    for pa, pb in zip(peaks[:-1], peaks[1:], strict=True):
+        seg = dens[pa : pb + 1]
+        min_val = float(seg.min())
+        tied = np.flatnonzero(seg <= min_val * (1.0 + 1e-12) + 1e-15)
+        valley_idx = pa + int(tied[len(tied) // 2])
+        cuts.append(float(centers[valley_idx]))
+
+    bounds = [0, *(int(np.searchsorted(sorted_vals, c)) for c in cuts), n]
+    return [
+        (start, stop)
+        for start, stop in zip(bounds[:-1], bounds[1:], strict=True)
+        if stop > start
+    ]
+
+
+def cluster_1d_sorted(
+    values: np.ndarray, tol: float, mode: str = "running_mean"
+) -> list[np.ndarray]:
+    """Greedy 1-D clustering of scalar values.
+
+    ``mode="running_mean"`` (default): values are sorted ascending and a new
+    cluster starts whenever the next value's distance from the *running mean*
+    of the current cluster exceeds ``tol``. This caps the cluster *width* at
+    roughly ``2 * tol``, so a continuous thermal distribution wider than that
+    is split into several clusters. It is the historical behaviour and is kept
+    as the default.
+
+    ``mode="valley"``: the density of the values is estimated by a histogram
+    smoothed with a Gaussian of width ``tol``, and the values are split only at
+    density valleys between shells (see :func:`_valley_segments`). A single
+    broad but unimodal shell stays one cluster; overlapping shells separated by
+    a clear dip are kept apart.
 
     Args:
         values: 1-D array of scalar values to cluster.
-        tol: Maximum allowed distance from a cluster's running mean.
+        tol: ``running_mean``: maximum distance from a cluster's running mean
+            (Å). ``valley``: Gaussian smoothing width of the density (Å).
+        mode: ``"running_mean"`` or ``"valley"``.
 
     Returns:
         List of index arrays (into ``values``), one per cluster, in
         ascending order of the clustered values.
+
+    Raises:
+        ValueError: If ``mode`` is not one of :data:`CLUSTER_MODES`.
     """
+    if mode not in CLUSTER_MODES:
+        raise ValueError(f"cluster mode must be one of {CLUSTER_MODES}, got {mode!r}")
     if len(values) == 0:
         return []
     values = np.asarray(values)
     order = np.argsort(values)
     sorted_vals = values[order]
+
+    if mode == "valley":
+        return [
+            np.asarray(order[start:stop])
+            for start, stop in _valley_segments(sorted_vals, float(tol))
+        ]
 
     clusters: list[list[int]] = [[int(order[0])]]
     running_sum = [float(sorted_vals[0])]
@@ -1236,6 +1335,7 @@ def group_path_instances(
     instance_stats: list[dict[str, Any]],
     tol_dist: float = 0.1,
     tol_angle: float = 5.0,
+    cluster_mode: str = "running_mean",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Pool path instances into grouped 2-body and 3-body MSRD results.
 
@@ -1249,8 +1349,12 @@ def group_path_instances(
     Args:
         samples: Per-instance samples.
         instance_stats: Per-instance statistics (same order as *samples*).
-        tol_dist: Distance grouping tolerance (Å).
+        tol_dist: Distance grouping tolerance (Å); see ``cluster_mode``.
         tol_angle: Angle grouping tolerance (degrees).
+        cluster_mode: ``"running_mean"`` (width-capped, historical default) or
+            ``"valley"`` (split only at density valleys, smoothed by
+            ``tol_dist``) for the
+            distance clustering. Angle clustering is unchanged.
 
     Returns:
         Tuple ``(res_2b, res_3b)`` sorted by ``"reff"``. Dict keys include the
@@ -1320,7 +1424,7 @@ def group_path_instances(
         mean_ds = np.array([st["mean_reff_A"] for _s, st in entries])
         clusters = [
             [entries[i] for i in idx_arr]
-            for idx_arr in cluster_1d_sorted(mean_ds, tol_dist)
+            for idx_arr in cluster_1d_sorted(mean_ds, tol_dist, cluster_mode)
         ]
         for cluster in clusters:
             absorber_el = cluster[0][0].instance.species[0]
@@ -1360,7 +1464,7 @@ def group_path_instances(
             mean_ls = np.array([st["mean_reff_A"] for _s, st in angle_cluster])
             dist_clusters = [
                 [angle_cluster[i] for i in idx_arr]
-                for idx_arr in cluster_1d_sorted(mean_ls, tol_dist)
+                for idx_arr in cluster_1d_sorted(mean_ls, tol_dist, cluster_mode)
             ]
             for cluster in dist_clusters:
                 absorber_el = cluster[0][0].instance.species[0]
@@ -1436,6 +1540,7 @@ def calculate_grouped_msrd(
     tol_angle: float = 5.0,
     cutoff_3body: float | None = None,
     exclude_hydrogen: bool = True,
+    cluster_mode: str = "running_mean",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Calculate grouped MSRD for 2-body and 3-body EXAFS paths.
 
@@ -1459,6 +1564,8 @@ def calculate_grouped_msrd(
         exclude_hydrogen: When ``True`` (default), hydrogen atoms are excluded
             from the neighbor search and will not appear as scatterers in any
             MSRD path.
+        cluster_mode: Distance grouping mode, ``"running_mean"`` (default) or
+            ``"valley"``; see :func:`group_path_instances`.
 
     Returns:
         Tuple ``(res_2b, res_3b)`` as documented for
@@ -1483,7 +1590,11 @@ def calculate_grouped_msrd(
     samples = sample_path_instances(structures, catalogue)
     instance_stats = compute_instance_statistics(samples)
     return group_path_instances(
-        samples, instance_stats, tol_dist=tol_dist, tol_angle=tol_angle
+        samples,
+        instance_stats,
+        tol_dist=tol_dist,
+        tol_angle=tol_angle,
+        cluster_mode=cluster_mode,
     )
 
 

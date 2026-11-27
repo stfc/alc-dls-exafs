@@ -16,6 +16,8 @@ import numpy as np
 from larch import Group
 from larch.xafs import xftf
 
+from .paths import cluster_path_category, make_path_key
+
 if TYPE_CHECKING:
     import matplotlib.pyplot as plt
     import plotly.graph_objects as go
@@ -30,7 +32,6 @@ __all__ = [
     "PathAggregator",
     "aggregate_store_paths",
     "filter_path_contributions",
-    "make_path_key",
     "PlotConfig",
     "format_chi_ascii",
 ]
@@ -84,8 +85,11 @@ class EXAFSDataCollection:
     overall_average: Group | None = None
 
     # Path contributions (populated when FEFF path files are kept)
-    # Maps path_key (e.g. "SS_Cl_2.86") -> PathContribution
+    # Maps path_key (e.g. "Cl_2_2.86") -> PathContribution
     path_contributions: dict[str, PathContribution] = field(default_factory=dict)
+
+    # Optional experimental spectrum overlay: dict with k, chi, r, chir_mag
+    experimental_spectrum: dict[str, Any] | None = None
 
     # Processing metadata
     kweight_used: int = 2  # The kweight used for all FTs
@@ -708,37 +712,6 @@ def _has_angle(sample: dict) -> bool:
     return bool(angle is not None and np.isfinite(angle))
 
 
-def make_path_key(scatterer: str, nlegs: int, r_eff: float, r_bin: float = 0.15) -> str:
-    """Create a display label for a (already-pooled) FEFF path population.
-
-    This is now purely a *labeling* helper — the actual pooling of raw
-    per-frame FEFF paths into populations is done by
-    :meth:`PathAggregator.finalize` using proper clustering (see
-    :func:`larch_cli_wrapper.debye_waller_core.cluster_1d_sorted`), not by
-    rounding ``r_eff`` into a fixed-width bin. This function just formats a
-    stable-looking label from the *already-clustered* mean ``r_eff``.
-
-    Examples::
-
-        make_path_key("Cl",  2, 2.84)  -> "SS_Cl_2.85"
-        make_path_key("K",   2, 4.03)  -> "SS_K_3.90"
-        make_path_key("Cl-K", 3, 6.12) -> "MS3_Cl-K_6.15"
-
-    Args:
-        scatterer: Scatterer element string (e.g. ``"Cl"`` or ``"Cl-K"``)
-        nlegs: Number of scattering legs (2 = single-scattering)
-        r_eff: Effective path length in ångströms
-        r_bin: Bin width used only for rounding the displayed label
-            (default 0.15 Å) — has no effect on grouping.
-
-    Returns:
-        Key string suitable for dict lookup / display.
-    """
-    prefix = "SS" if nlegs == 2 else f"MS{nlegs}"
-    r_binned = round(round(r_eff / r_bin) * r_bin, 3)
-    return f"{prefix}_{scatterer}_{r_binned:.2f}"
-
-
 @dataclass
 class PathContribution:
     """Averaged chi(k) and chi(R) for a single FEFF scattering path type.
@@ -748,7 +721,7 @@ class PathContribution:
     """
 
     path_key: str
-    """Stable identifier, e.g. ``"SS_Cl_2.85"``."""
+    """Stable identifier, e.g. ``"Cl_2_2.85"``."""
     scatterer: str
     """Element label(s) of the scattering atom(s), e.g. ``"Cl"``."""
     nlegs: int
@@ -866,39 +839,9 @@ class PathAggregator:
 
     def _cluster_category(self, nlegs: int, samples: list[dict]) -> list[list[dict]]:
         """Split one (scatterer, nlegs) category's samples into path populations."""
-        from .debye_waller_core import cluster_1d_sorted
-
-        if nlegs != 3:
-            r_effs = np.array([float(s["r_eff"]) for s in samples])
-            return [
-                [samples[i] for i in idx_arr]
-                for idx_arr in cluster_1d_sorted(r_effs, self._r_bin)
-            ]
-
-        # 3-leg paths: cluster by angle first, then by r_eff within each
-        # angle cluster (mirroring the MD-side 3-body clustering in
-        # calculate_grouped_msrd). Samples without a usable angle (e.g. from
-        # older/failed geometry extraction) fall back to distance-only
-        # clustering as their own sub-population. ``_has_angle`` treats both
-        # a missing/None value and a stray NaN (the on-disk HDF5 sentinel,
-        # which should normally already be converted to None by
-        # ``iter_path_contributions`` before reaching here) as "no angle".
-        with_angle = [s for s in samples if _has_angle(s)]
-        without_angle = [s for s in samples if not _has_angle(s)]
-
-        clusters: list[list[dict]] = []
-        if with_angle:
-            angles = np.array([float(s["angle"]) for s in with_angle])
-            for angle_idx_arr in cluster_1d_sorted(angles, self._angle_tol):
-                angle_cluster = [with_angle[i] for i in angle_idx_arr]
-                r_effs = np.array([float(s["r_eff"]) for s in angle_cluster])
-                for dist_idx_arr in cluster_1d_sorted(r_effs, self._r_bin):
-                    clusters.append([angle_cluster[i] for i in dist_idx_arr])
-        if without_angle:
-            r_effs = np.array([float(s["r_eff"]) for s in without_angle])
-            for idx_arr in cluster_1d_sorted(r_effs, self._r_bin):
-                clusters.append([without_angle[i] for i in idx_arr])
-        return clusters
+        return cluster_path_category(
+            nlegs, samples, r_bin=self._r_bin, angle_tol=self._angle_tol
+        )
 
     def finalize(self, fourier_params: dict) -> dict[str, PathContribution]:
         """Cluster, average, and Fourier-transform accumulated path samples.
@@ -924,7 +867,15 @@ class PathAggregator:
                 if not samples:
                     continue
                 mean_reff = float(np.mean([s["r_eff"] for s in samples]))
-                key = make_path_key(scatterer_label, nlegs, mean_reff, self._r_bin)
+                angles = [float(s["angle"]) for s in samples if _has_angle(s)]
+                mean_angle = float(np.mean(angles)) if angles else None
+                key = make_path_key(
+                    scatterer_label,
+                    nlegs,
+                    mean_reff,
+                    r_bin=self._r_bin,
+                    angle=mean_angle,
+                )
                 # Disambiguate labels in the rare case two clusters round to
                 # the same display key (e.g. two very close but genuinely
                 # distinct populations).
@@ -1316,7 +1267,9 @@ def _build_contributions(
         g = Group(k=k_paths, chi=chi_avg)
         xftf(g, **fourier_params)
 
-        key = make_path_key(m["scatterer"], m["nlegs"], m["r_eff"], r_bin)
+        key = make_path_key(
+            m["scatterer"], m["nlegs"], m["r_eff"], r_bin=r_bin, angle=m.get("angle")
+        )
         if key in result:
             key = f"{key}_{len(result)}"
 
@@ -2236,6 +2189,21 @@ def plot_exafs_matplotlib(
             style = styles.get_style("overall_avg")
             add_trace(ax1, spec["k"], spec["chi"], spec["label"], style)
             add_trace(ax2, spec["r"], spec["chir_mag"], spec["label"], style)
+
+        # Plot optional experimental overlay (always unadjusted, dashed black)
+        if collection.experimental_spectrum is not None:
+            exp = collection.experimental_spectrum
+            k_e = np.asarray(exp["k"], dtype=float)
+            chi_e = np.asarray(exp["chi"], dtype=float)
+            exp_style = {
+                "color": "black",
+                "linestyle": "--",
+                "linewidth": 1.6,
+                "zorder": 10,
+            }
+            add_trace(ax1, k_e, (k_e**kweight) * chi_e, "Experiment", exp_style)
+            if "r" in exp and "chir_mag" in exp:
+                add_trace(ax2, exp["r"], exp["chir_mag"], "Experiment", exp_style)
 
         # Format top-row axes
         ax1.set_xlabel("k (Å⁻¹)")

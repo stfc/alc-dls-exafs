@@ -314,6 +314,11 @@ def series_to_vega_lite(
     Re and Im of the overall average, with a rule at rmax), and ``sites`` and
     ``frames`` (k-weighted chi(k) over |chi(R)| for the included spectra).
 
+    When the series holds ``comparison``, the ensemble curves in ``chi_k`` and
+    ``chi_r`` are its ``overall_adjusted`` (the std band is then omitted). When
+    it holds ``experiment``, the experimental spectrum is overlaid as a dashed
+    black line in ``chi_k`` and ``chi_r``.
+
     The series warnings, FT parameters and units travel in the spec's top-level
     ``usermeta``, so a viewer needs only the spec.
 
@@ -332,13 +337,16 @@ def series_to_vega_lite(
     kweight = int(ft["kweight"])
     chi_title = _chi_k_label(kweight)
     phrase = _weight_phrase(kweight)
+    comparison = series.get("comparison")
+    theory = comparison["overall_adjusted"] if comparison else overall
+    experiment = series.get("experiment")
 
     if view == "chi_k":
         df = pd.DataFrame(
             {
-                "k": overall["k"],
-                "chi_weighted": overall["chi_weighted"],
-                "path": "ensemble mean",
+                "k": theory["k"],
+                "chi_weighted": theory["chi_weighted"],
+                "path": "ensemble mean (adjusted)" if comparison else "ensemble mean",
             }
         )
         layers: list[Any] = [
@@ -351,11 +359,11 @@ def series_to_vega_lite(
                 y_title=chi_title,
             )
         ]
-        if overall.get("chi_std_weighted") is not None:
-            std = pd.Series(overall["chi_std_weighted"], dtype=float)
-            center = pd.Series(overall["chi_weighted"], dtype=float)
+        if theory.get("chi_std_weighted") is not None:
+            std = pd.Series(theory["chi_std_weighted"], dtype=float)
+            center = pd.Series(theory["chi_weighted"], dtype=float)
             band_df = pd.DataFrame(
-                {"k": overall["k"], "lo": center - std, "hi": center + std}
+                {"k": theory["k"], "lo": center - std, "hi": center + std}
             )
             layers.insert(
                 0,
@@ -368,6 +376,22 @@ def series_to_vega_lite(
                 ),
             )
         layers.extend(_marker_rules(df, [ft["kmin"], ft["kmax"]]))
+        if experiment is not None:
+            exp_df = pd.DataFrame(
+                {
+                    "k": experiment["k"],
+                    "chi_weighted": experiment["chi_weighted"],
+                    "path": "experiment",
+                }
+            )
+            layers.append(
+                alt.Chart(exp_df)
+                .mark_line(strokeDash=[6, 4], color="black", strokeWidth=2)
+                .encode(
+                    x=alt.X("k:Q", title="k (Å⁻¹)"),
+                    y=alt.Y("chi_weighted:Q", title=chi_title),
+                )
+            )
         chart = alt.layer(*layers)
         if overall.get("n_contributors") is not None:
             n_df = pd.DataFrame({"k": overall["k"], "n": overall["n_contributors"]})
@@ -382,20 +406,20 @@ def series_to_vega_lite(
             )
             chart = alt.vconcat(chart, strip)
     elif view == "chi_r":
-        if "r" not in overall:
+        if "r" not in theory:
             raise ViewUnavailableError(
                 "The series has no chi(R) for the overall average"
             )
         labels = {"chir_mag": "|χ(R)|", "chir_re": "Re χ(R)", "chir_im": "Im χ(R)"}
         chir_df = pd.concat(
             [
-                pd.DataFrame({"r": overall["r"], "chir": overall[c], "path": label})
+                pd.DataFrame({"r": theory["r"], "chir": theory[c], "path": label})
                 for c, label in labels.items()
-                if c in overall
+                if c in theory
             ],
             ignore_index=True,
         )
-        chart = alt.layer(
+        chir_layers: list[Any] = [
             build_chir_chart(
                 chir_df,
                 title=f"Ensemble χ(R), {phrase}",
@@ -403,9 +427,26 @@ def series_to_vega_lite(
                 height=height,
                 y_field="chir",
                 y_title=f"χ(R) ({_inv_angstrom(kweight + 1)})",
-            ),
-            *_marker_rules(chir_df, [ft["rmax"]]),
-        )
+            )
+        ]
+        if experiment is not None and "r" in experiment and "chir_mag" in experiment:
+            exp_df = pd.DataFrame(
+                {
+                    "r": experiment["r"],
+                    "chir": experiment["chir_mag"],
+                    "path": "experiment |χ(R)|",
+                }
+            )
+            chir_layers.append(
+                alt.Chart(exp_df)
+                .mark_line(strokeDash=[6, 4], color="black", strokeWidth=2)
+                .encode(
+                    x=alt.X("r:Q", title="R (Å)"),
+                    y=alt.Y("chir:Q", title=f"χ(R) ({_inv_angstrom(kweight + 1)})"),
+                )
+            )
+        chir_layers.extend(_marker_rules(chir_df, [ft["rmax"]]))
+        chart = alt.layer(*chir_layers)
     else:
         label = view.removesuffix("s")
         spectra = series[view]["spectra"]
